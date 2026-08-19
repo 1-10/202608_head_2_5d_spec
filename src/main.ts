@@ -10,13 +10,15 @@ import { buildCanonicalFaceDepth, buildFaceDepthField, computeFinalFaceDepthPerV
 import { buildFaceOnlyMesh, recomputeFaceOnlyDepth, type FaceOnlyBuild } from './faceOnlyMesh';
 import { buildHeadGridGeometry, recomputeFullHeadDepth, type FullHeadBuild, type FullHeadBuildContext } from './fullHeadMesh';
 import {
-  applyFaceOnlyBlink,
-  applyFullHeadBlink,
-  buildFullHeadAnimationMasks,
+  applyBlinkToFaceOnly,
+  applyBlinkToFullHead,
+  buildEyeAnchorPair,
+  buildEyeDeformTable,
   createBlinkState,
-  updateBlink,
+  updateBlinkAmount,
   type BlinkState,
-  type FullHeadAnimationMasks,
+  type EyeAnchors,
+  type EyeDeformEntry,
 } from './animation';
 import {
   applyMouthTalkDeform,
@@ -33,7 +35,7 @@ import {
   type TalkState,
 } from './mouthTalk';
 import { createParams, type Params } from './params';
-import { applyDebugVisualization, setupDebugGui } from './debugView';
+import { applyDebugVisualization, setupDebugGui, updateBlinkDebugOverlays } from './debugView';
 import { OrbitDragController } from './interaction';
 
 class Viewport {
@@ -97,13 +99,14 @@ interface SceneState {
   normalized: NormalizedFaceResult;
   faceOnly: FaceOnlyBuild;
   fullHead: FullHeadBuild;
-  fullHeadMasks: FullHeadAnimationMasks;
   texture: THREE.Texture;
   mouthAnchors: MouthAnchors;
   faceOnlyMouthTable: MouthDeformEntry[];
   fullHeadMouthTable: MouthDeformEntry[];
   faceOnlyCavity: MouthCavityBuild;
   fullHeadCavity: MouthCavityBuild;
+  eyeAnchors: [EyeAnchors, EyeAnchors];
+  fullHeadEyeTable: EyeDeformEntry[];
 }
 
 const params: Params = createParams();
@@ -251,7 +254,13 @@ async function processImage(captured: CapturedImage): Promise<void> {
       imageHeight: captured.height,
     };
     const fullHead = buildHeadGridGeometry(ctx, texture, params);
-    const fullHeadMasks = buildFullHeadAnimationMasks(fullHead, normalized.landmarks);
+
+    const eyeAnchors = buildEyeAnchorPair(normalized.landmarks, (i) => faceZFinal[i]);
+    const fullHeadEyeTable = buildEyeDeformTable(
+      fullHead.cols * fullHead.rows,
+      (i) => ({ x: fullHead.basePositions[i * 3], y: fullHead.basePositions[i * 3 + 1] }),
+      eyeAnchors,
+    );
 
     const mouthAnchors = computeMouthAnchors(normalized.landmarks, (i) => faceZFinal[i]);
     const faceOnlyMouthTable = buildMouthDeformTable(
@@ -273,13 +282,14 @@ async function processImage(captured: CapturedImage): Promise<void> {
       normalized,
       faceOnly,
       fullHead,
-      fullHeadMasks,
       texture,
       mouthAnchors,
       faceOnlyMouthTable,
       fullHeadMouthTable,
       faceOnlyCavity,
       fullHeadCavity,
+      eyeAnchors,
+      fullHeadEyeTable,
     };
 
     // yaw→pitchの順で直感的に合成されるよう回転順序を明示する。
@@ -317,11 +327,11 @@ export function rebuildDepthOnly(): void {
   if (!sceneState) return;
   recomputeFaceOnlyDepth(sceneState.faceOnly, params);
   recomputeFullHeadDepth(sceneState.fullHead, sceneState.ctx, params);
-  sceneState.fullHeadMasks = buildFullHeadAnimationMasks(sceneState.fullHead, sceneState.normalized.landmarks);
 
-  // Mouth SeamのZは顔Depthに追従させる (X/Yはlandmarkから不変なのでtableは再利用でよい)。
+  // Mouth Seam / Eye AnchorsのZは顔Depthに追従させる (X/Yはlandmarkから不変なのでtableは再利用でよい)。
   const posAttr = sceneState.faceOnly.geometry.getAttribute('position') as THREE.BufferAttribute;
   sceneState.mouthAnchors = computeMouthAnchors(sceneState.normalized.landmarks, (i) => posAttr.getZ(i));
+  sceneState.eyeAnchors = buildEyeAnchorPair(sceneState.normalized.landmarks, (i) => posAttr.getZ(i));
   updateCameras();
 }
 
@@ -370,6 +380,7 @@ els.btnReset.addEventListener('click', () => {
 
 els.toggleBlink.addEventListener('change', () => {
   params.blinkEnabled = els.toggleBlink.checked;
+  syncBlinkEnabledControllers();
 });
 els.toggleTalk.addEventListener('change', () => {
   params.talkEnabled = els.toggleTalk.checked;
@@ -400,19 +411,30 @@ const debugGui = setupDebugGui(els.guiContainer, params, {
     setMouthCavityDarkness(sceneState.faceOnlyCavity, params.mouthCavityDarkness);
     setMouthCavityDarkness(sceneState.fullHeadCavity, params.mouthCavityDarkness);
   },
+  onBlinkEnabledChangedFromGui: (value) => {
+    els.toggleBlink.checked = value;
+  },
 });
 
 function syncTalkEnabledControllers(): void {
   debugGui.syncTalkEnabled();
 }
 
-// --- レンダーループ ---
-function animate(): void {
-  requestAnimationFrame(animate);
-  const now = performance.now();
+function syncBlinkEnabledControllers(): void {
+  debugGui.syncBlinkEnabled();
+}
 
+// --- レンダーループ ---
+function renderFrame(now: number): void {
   if (sceneState) {
-    const blinkAmount = params.blinkEnabled ? updateBlink(now, blinkState, params) : 0;
+    let blinkAmount: number;
+    if (params.blinkManualOverride) {
+      blinkAmount = params.blinkAmountManual;
+    } else if (params.blinkEnabled) {
+      blinkAmount = updateBlinkAmount(now, blinkState, params);
+    } else {
+      blinkAmount = 0;
+    }
 
     let talkOpen: number;
     if (params.talkManualOverride) {
@@ -423,8 +445,8 @@ function animate(): void {
       talkOpen = 0;
     }
 
-    applyFaceOnlyBlink(sceneState.faceOnly, blinkAmount);
-    applyFullHeadBlink(sceneState.fullHead, sceneState.fullHeadMasks, blinkAmount);
+    applyBlinkToFaceOnly(sceneState.faceOnly, sceneState.eyeAnchors, blinkAmount, params);
+    applyBlinkToFullHead(sceneState.fullHead, sceneState.fullHeadEyeTable, sceneState.eyeAnchors, blinkAmount, params);
 
     const faceOnlyPosAttr = sceneState.faceOnly.geometry.getAttribute('position') as THREE.BufferAttribute;
     const fullHeadPosAttr = sceneState.fullHead.geometry.getAttribute('position') as THREE.BufferAttribute;
@@ -451,10 +473,19 @@ function animate(): void {
 
     updateMouthCavityGeometry(sceneState.faceOnlyCavity, sceneState.mouthAnchors, talkOpen, params);
     updateMouthCavityGeometry(sceneState.fullHeadCavity, sceneState.mouthAnchors, talkOpen, params);
+
+    if (params.showUpperLidLine || params.showLowerLidLine || params.showBlinkTargets) {
+      updateBlinkDebugOverlays(sceneState, params);
+    }
   }
 
   faceOnlyViewport.render();
   fullHeadViewport.render();
+}
+
+function animate(): void {
+  requestAnimationFrame(animate);
+  renderFrame(performance.now());
 }
 
 updateCameras();

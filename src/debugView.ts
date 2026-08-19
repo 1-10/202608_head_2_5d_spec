@@ -9,6 +9,7 @@ import type { FullHeadBuild } from './fullHeadMesh';
 import type { NormalizedFaceResult } from './faceTopology';
 import type { FullHeadBuildContext } from './fullHeadMesh';
 import { seamPointAt, type MouthAnchors, type MouthDeformEntry } from './mouthTalk';
+import { closeTargetAt, sampleCurveXYZ, type EyeAnchors, type EyeDeformEntry } from './animation';
 
 export interface SceneStateLike {
   ctx: FullHeadBuildContext;
@@ -18,6 +19,8 @@ export interface SceneStateLike {
   texture: THREE.Texture;
   mouthAnchors: MouthAnchors;
   fullHeadMouthTable: MouthDeformEntry[];
+  eyeAnchors: [EyeAnchors, EyeAnchors];
+  fullHeadEyeTable: EyeDeformEntry[];
 }
 
 export interface DebugGuiOptions {
@@ -27,16 +30,22 @@ export interface DebugGuiOptions {
   getSceneState: () => SceneStateLike | null;
   onTalkEnabledChangedFromGui: (value: boolean) => void;
   onMouthCavityDarknessChanged: () => void;
+  onBlinkEnabledChangedFromGui: (value: boolean) => void;
 }
 
 export interface DebugGuiHandle {
   gui: GUI;
   /** paramsに外部(下部パネル)から書き込まれたtalkEnabledをGUI表示へ反映する。 */
   syncTalkEnabled: () => void;
+  /** paramsに外部(下部パネル)から書き込まれたblinkEnabledをGUI表示へ反映する。 */
+  syncBlinkEnabled: () => void;
 }
 
 let landmarkPoints: THREE.Points | null = null;
 let mouthSeamLine: THREE.Line | null = null;
+let upperLidLines: THREE.Line[] = [];
+let lowerLidLines: THREE.Line[] = [];
+let blinkTargetLines: THREE.LineSegments | null = null;
 
 function ensureLandmarkPoints(faceOnly: FaceOnlyBuild): THREE.Points {
   if (landmarkPoints) {
@@ -78,6 +87,64 @@ function ensureMouthSeamLine(faceOnly: FaceOnlyBuild, anchors: MouthAnchors): TH
   mouthSeamLine.position.copy(faceOnly.mesh.position);
   faceOnly.group.add(mouthSeamLine);
   return mouthSeamLine;
+}
+
+const LID_LINE_SEGMENTS = 12;
+
+function buildLidLine(anchors: EyeAnchors, curve: 'upperCurve' | 'lowerCurve', color: number): THREE.Line {
+  const positions = new Float32Array(LID_LINE_SEGMENTS * 3);
+  for (let i = 0; i < LID_LINE_SEGMENTS; i++) {
+    const eyeU = i / (LID_LINE_SEGMENTS - 1);
+    const p = sampleCurveXYZ(anchors[curve], eyeU);
+    positions[i * 3] = p.x;
+    positions[i * 3 + 1] = p.y;
+    positions[i * 3 + 2] = p.z + 0.0015;
+  }
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  const material = new THREE.LineBasicMaterial({ color });
+  return new THREE.Line(geometry, material);
+}
+
+function disposeLines(lines: THREE.Line[]): void {
+  for (const line of lines) {
+    line.parent?.remove(line);
+    line.geometry.dispose();
+    (line.material as THREE.Material).dispose();
+  }
+}
+
+function ensureLidLines(faceOnly: FaceOnlyBuild, eyeAnchors: [EyeAnchors, EyeAnchors], which: 'upperCurve' | 'lowerCurve', color: number, store: THREE.Line[]): THREE.Line[] {
+  disposeLines(store);
+  const lines = eyeAnchors.map((a) => buildLidLine(a, which, color));
+  for (const line of lines) {
+    line.position.copy(faceOnly.mesh.position);
+    faceOnly.group.add(line);
+  }
+  return lines;
+}
+
+/** 上瞼landmarkの現在位置からcloseTargetへの線分(×印代わりに端点マーカー付き)を構築する。 */
+function buildBlinkTargetLines(faceOnly: FaceOnlyBuild, eyeAnchors: [EyeAnchors, EyeAnchors], params: Params): THREE.LineSegments {
+  const posAttr = faceOnly.geometry.getAttribute('position') as THREE.BufferAttribute;
+  const segments: number[] = [];
+  for (const anchors of eyeAnchors) {
+    for (const idx of anchors.lidIndices.upper) {
+      const from = { x: posAttr.getX(idx), y: posAttr.getY(idx), z: posAttr.getZ(idx) };
+      const bx = faceOnly.basePositions[idx * 3];
+      const by = faceOnly.basePositions[idx * 3 + 1];
+      const eyeU = ((bx - anchors.inner.x) * anchors.dirX + (by - anchors.inner.y) * anchors.dirY) / anchors.eyeWidth;
+      const target = closeTargetAt(anchors, eyeU, params.blinkCloseTargetBias);
+      segments.push(from.x, from.y, from.z + 0.0015, target.x, target.y, target.z + 0.0015);
+    }
+  }
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(segments), 3));
+  const material = new THREE.LineBasicMaterial({ color: 0xffb400 });
+  const lines = new THREE.LineSegments(geometry, material);
+  lines.position.copy(faceOnly.mesh.position);
+  faceOnly.group.add(lines);
+  return lines;
 }
 
 function heatColor(t: number): THREE.Color {
@@ -127,6 +194,47 @@ function buildMouthRegionVertexColors(vertexCount: number, table: MouthDeformEnt
   return colors;
 }
 
+/** Upper Lid=赤 / Lower Lid=緑 / Eye Interior=青 として目周辺の影響領域を可視化する。 */
+function buildEyeRegionVertexColors(vertexCount: number, table: EyeDeformEntry[]): Float32Array {
+  const colors = new Float32Array(vertexCount * 3).fill(0.04);
+  for (const e of table) {
+    colors[e.index * 3] = Math.min(1, e.upperLidW);
+    colors[e.index * 3 + 1] = Math.min(1, e.lowerLidW);
+    colors[e.index * 3 + 2] = Math.min(1, e.interiorW);
+  }
+  return colors;
+}
+
+/** Blink関連のdebug overlay(まぶたライン・ターゲットライン)を最新のgeometry位置へ更新する。show*がOFFなら何もしない。 */
+export function updateBlinkDebugOverlays(state: SceneStateLike | null, params: Params): void {
+  if (!state) return;
+  if (params.showUpperLidLine) {
+    upperLidLines = ensureLidLines(state.faceOnly, state.eyeAnchors, 'upperCurve', 0x00e5ff, upperLidLines);
+  } else if (upperLidLines.length) {
+    disposeLines(upperLidLines);
+    upperLidLines = [];
+  }
+  if (params.showLowerLidLine) {
+    lowerLidLines = ensureLidLines(state.faceOnly, state.eyeAnchors, 'lowerCurve', 0xff59d3, lowerLidLines);
+  } else if (lowerLidLines.length) {
+    disposeLines(lowerLidLines);
+    lowerLidLines = [];
+  }
+  if (params.showBlinkTargets) {
+    if (blinkTargetLines) {
+      blinkTargetLines.parent?.remove(blinkTargetLines);
+      blinkTargetLines.geometry.dispose();
+      (blinkTargetLines.material as THREE.Material).dispose();
+    }
+    blinkTargetLines = buildBlinkTargetLines(state.faceOnly, state.eyeAnchors, params);
+  } else if (blinkTargetLines) {
+    blinkTargetLines.parent?.remove(blinkTargetLines);
+    blinkTargetLines.geometry.dispose();
+    (blinkTargetLines.material as THREE.Material).dispose();
+    blinkTargetLines = null;
+  }
+}
+
 /** GUIのデバッグ表示チェックボックス状態を実際のThree.jsシーンへ反映する。 */
 export function applyDebugVisualization(state: SceneStateLike | null, params: Params): void {
   if (!state) return;
@@ -150,11 +258,14 @@ export function applyDebugVisualization(state: SceneStateLike | null, params: Pa
     mouthSeamLine.visible = false;
   }
 
-  let mode: 'none' | 'mask' | 'faceDepth' | 'finalDepth' | 'mouthRegion' = 'none';
+  updateBlinkDebugOverlays(state, params);
+
+  let mode: 'none' | 'mask' | 'faceDepth' | 'finalDepth' | 'mouthRegion' | 'eyeRegion' = 'none';
   if (params.showHeadMask) mode = 'mask';
   else if (params.showFaceDepth) mode = 'faceDepth';
   else if (params.showFinalDepth) mode = 'finalDepth';
   else if (params.showMouthRegion) mode = 'mouthRegion';
+  else if (params.showEyeRegion) mode = 'eyeRegion';
 
   if (mode === 'none') {
     fhMat.vertexColors = false;
@@ -170,8 +281,10 @@ export function applyDebugVisualization(state: SceneStateLike | null, params: Pa
     colors = buildDebugVertexColors(state.fullHead.debug.faceDepth);
   } else if (mode === 'finalDepth') {
     colors = buildDebugVertexColors(state.fullHead.debug.finalDepth);
-  } else {
+  } else if (mode === 'mouthRegion') {
     colors = buildMouthRegionVertexColors(state.fullHead.cols * state.fullHead.rows, state.fullHeadMouthTable);
+  } else {
+    colors = buildEyeRegionVertexColors(state.fullHead.cols * state.fullHead.rows, state.fullHeadEyeTable);
   }
   state.fullHead.geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
   fhMat.vertexColors = true;
@@ -179,7 +292,7 @@ export function applyDebugVisualization(state: SceneStateLike | null, params: Pa
   fhMat.needsUpdate = true;
 }
 
-const EXCLUSIVE_DEBUG_MODES = ['showHeadMask', 'showFaceDepth', 'showFinalDepth', 'showMouthRegion'] as const;
+const EXCLUSIVE_DEBUG_MODES = ['showHeadMask', 'showFaceDepth', 'showFinalDepth', 'showMouthRegion', 'showEyeRegion'] as const;
 
 export function setupDebugGui(container: HTMLElement, params: Params, options: DebugGuiOptions): DebugGuiHandle {
   const gui = new GUI({ container, title: 'Quality Parameters' });
@@ -240,6 +353,38 @@ export function setupDebugGui(container: HTMLElement, params: Params, options: D
     .onChange(() => options.onMouthCavityDarknessChanged());
   talkFolder.open();
 
+  // --- Blink Animation ---
+  const blinkFolder = gui.addFolder('Blink');
+  const blinkEnabledController = blinkFolder
+    .add(params, 'blinkEnabled')
+    .name('Blink Animation')
+    .onChange((v: boolean) => options.onBlinkEnabledChangedFromGui(v));
+
+  blinkFolder
+    .add(params, 'blinkAmountManual', 0, 1, 0.01)
+    .name('Blink Amount Manual')
+    .onChange((v: number) => {
+      params.blinkAmountManual = v;
+      params.blinkManualOverride = true;
+      blinkManualOverrideController.updateDisplay();
+      applyDebugVisualization(options.getSceneState(), params);
+    });
+  const blinkManualOverrideController = blinkFolder.add(params, 'blinkManualOverride').name('Manual Override');
+
+  blinkFolder.add(params, 'blinkUpperLidMoveScale', 0, 3, 0.05).name('Upper Lid Move');
+  blinkFolder.add(params, 'blinkLowerLidMove', 0, 0.2, 0.005).name('Lower Lid Move');
+  blinkFolder.add(params, 'blinkCloseTargetBias', 0, 0.3, 0.005).name('Close Target Bias');
+  blinkFolder.add(params, 'blinkClosingDurationMs', 20, 400, 5).name('Closing Duration');
+  blinkFolder.add(params, 'blinkClosedHoldMs', 0, 400, 5).name('Closed Hold');
+  blinkFolder.add(params, 'blinkOpeningDurationMs', 20, 400, 5).name('Opening Duration');
+  blinkFolder.add(params, 'blinkIntervalMinSec', 0.5, 15, 0.1).name('Interval Min');
+  blinkFolder.add(params, 'blinkIntervalMaxSec', 0.5, 15, 0.1).name('Interval Max');
+  blinkFolder.add(params, 'blinkIntervalRandomize').name('Randomize Interval');
+  blinkFolder.add(params, 'blinkUpperLidZEpsilonRatio', 0, 0.005, 0.0001).name('Upper Lid Z Epsilon');
+  blinkFolder.add(params, 'showUpperLidLine').name('Show Upper Lid Line').onChange(() => applyDebugVisualization(options.getSceneState(), params));
+  blinkFolder.add(params, 'showLowerLidLine').name('Show Lower Lid Line').onChange(() => applyDebugVisualization(options.getSceneState(), params));
+  blinkFolder.add(params, 'showBlinkTargets').name('Show Blink Targets').onChange(() => applyDebugVisualization(options.getSceneState(), params));
+
   const debugFolder = gui.addFolder('Debug View');
   const onDebugToggle = () => applyDebugVisualization(options.getSceneState(), params);
   debugFolder.add(params, 'showWireframe').name('Show Wireframe').onChange(onDebugToggle);
@@ -266,9 +411,11 @@ export function setupDebugGui(container: HTMLElement, params: Params, options: D
   makeExclusiveToggle('showFaceDepth', 'Show Face Depth');
   makeExclusiveToggle('showFinalDepth', 'Show Final Depth');
   makeExclusiveToggle('showMouthRegion', 'Show Mouth Region');
+  makeExclusiveToggle('showEyeRegion', 'Show Eye Region');
 
   return {
     gui,
     syncTalkEnabled: () => talkEnabledController.updateDisplay(),
+    syncBlinkEnabled: () => blinkEnabledController.updateDisplay(),
   };
 }

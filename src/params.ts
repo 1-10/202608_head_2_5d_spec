@@ -20,12 +20,20 @@ export interface Params {
   // --- Full Head 表示モード ---
   fullHeadMode: FullHeadMode;
 
-  // --- アニメーション (Blink) ---
+  // --- Blink Animation ---
   blinkEnabled: boolean;
-  blinkPeriodMinSec: number;
-  blinkPeriodMaxSec: number;
-  blinkDurationMinMs: number;
-  blinkDurationMaxMs: number;
+  blinkAmountManual: number; // 0.0-1.0, Manual Override時に使用
+  blinkManualOverride: boolean; // ONの間は周期Blinkを止めblinkAmountManualを使う
+  blinkUpperLidMoveScale: number; // 上瞼closeTargetへの寄り具合の全体倍率
+  blinkLowerLidMove: number; // lowerOffset = t * eyeHeight * this
+  blinkCloseTargetBias: number; // closeTarget = mix(targetLowerLid, originalUpperLid, this)
+  blinkUpperLidZEpsilonRatio: number; // 完全閉眼時、上瞼を下瞼よりわずかに手前へ (faceWidth比)
+  blinkClosingDurationMs: number;
+  blinkClosedHoldMs: number;
+  blinkOpeningDurationMs: number;
+  blinkIntervalMinSec: number;
+  blinkIntervalMaxSec: number;
+  blinkIntervalRandomize: boolean;
 
   // --- Talk Animation / Mouth Cavity ---
   talkEnabled: boolean;
@@ -46,6 +54,10 @@ export interface Params {
   showFinalDepth: boolean;
   showMouthSeam: boolean;
   showMouthRegion: boolean;
+  showUpperLidLine: boolean;
+  showLowerLidLine: boolean;
+  showBlinkTargets: boolean;
+  showEyeRegion: boolean;
 
   // --- カメラ/共通表示設定 ---
   cameraFovDeg: number;
@@ -74,10 +86,18 @@ export const DEFAULT_PARAMS: Params = {
   fullHeadMode: 'FACE_HEAD_HAIR',
 
   blinkEnabled: true,
-  blinkPeriodMinSec: 3,
-  blinkPeriodMaxSec: 5,
-  blinkDurationMinMs: 150,
-  blinkDurationMaxMs: 250,
+  blinkAmountManual: 0,
+  blinkManualOverride: false,
+  blinkUpperLidMoveScale: 2.0,
+  blinkLowerLidMove: 0.07,
+  blinkCloseTargetBias: 0.08,
+  blinkUpperLidZEpsilonRatio: 0.001,
+  blinkClosingDurationMs: 90,
+  blinkClosedHoldMs: 40,
+  blinkOpeningDurationMs: 120,
+  blinkIntervalMinSec: 2.5,
+  blinkIntervalMaxSec: 5.5,
+  blinkIntervalRandomize: true,
 
   talkEnabled: true,
   talkOpenManual: 0,
@@ -96,6 +116,10 @@ export const DEFAULT_PARAMS: Params = {
   showFinalDepth: false,
   showMouthSeam: false,
   showMouthRegion: false,
+  showUpperLidLine: false,
+  showLowerLidLine: false,
+  showBlinkTargets: false,
+  showEyeRegion: false,
 
   cameraFovDeg: 30,
   cameraDistanceRatio: 3.4,
