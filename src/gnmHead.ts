@@ -21,6 +21,8 @@ export interface GnmModel {
   landmarkIndices: Uint32Array; // (68,3)
   landmarkWeights: Float32Array; // (68,3)
   earWeight: Uint8Array; // (N,) 耳グループ重み 0-255
+  eyeWeight: Uint8Array; // (N,) 眼球グループ重み 0-255。現在未使用 (眼球分離の再挑戦用)
+  nostrilWeight: Uint8Array; // (N,) 鼻孔内壁 (平滑化で塞ぐ対象)。0要素 = 旧アセット
   expressionCount: number; // 0 = 旧アセット (表情なし)
   expressionBasisQ: Int16Array; // (M,N,3) int16量子化
   expressionScales: Float32Array; // (M,)
@@ -92,6 +94,12 @@ export async function loadGnmModel(url = 'gnm/gnm_head_lite.bin'): Promise<GnmMo
 
   const basisSec = section('identityBasisQ');
   const earSec = section('earWeight');
+  const u8 = (name: string) => {
+    const s = header.sections[name];
+    if (!s) return new Uint8Array(0); // 旧アセット互換
+    const sec = section(name);
+    return new Uint8Array(buf.slice(sec.start, sec.start + sec.byteLength));
+  };
   const hasExpression = !!header.sections['expressionBasisQ'] && (header.expressionBasisCount ?? 0) > 0;
   const exprSec = hasExpression ? section('expressionBasisQ') : null;
   return {
@@ -105,6 +113,8 @@ export async function loadGnmModel(url = 'gnm/gnm_head_lite.bin'): Promise<GnmMo
     landmarkIndices: u32('landmarkIndices'),
     landmarkWeights: f32('landmarkWeights'),
     earWeight: new Uint8Array(buf.slice(earSec.start, earSec.start + earSec.byteLength)),
+    eyeWeight: u8('eyeWeight'),
+    nostrilWeight: u8('nostrilWeight'),
     expressionCount: hasExpression ? (header.expressionBasisCount ?? 0) : 0,
     expressionBasisQ: exprSec
       ? new Int16Array(buf.slice(exprSec.start, exprSec.start + exprSec.byteLength))
@@ -273,6 +283,9 @@ function solveSPD(a: Float64Array, b: Float64Array, n: number): Float64Array {
 
 const FIT_ITERATIONS = 3;
 const COEFF_CLAMP = 3.0; // 係数はz-scoreスケール。統計的に妥当な範囲へクランプ
+// Σw正規化後の正則化の単位。正規化前の68点版 (λ×1e-3を非正規化AᵀAへ加算, Σw=2×68) と
+// 実効強度が揃うよう 1e-3/(2×68) とする
+const REG_UNIT = 1e-3 / 136;
 
 /**
  * GNM Headを顔ランドマークへフィットする。
@@ -282,10 +295,11 @@ export function fitGnmToLandmarks(
   model: GnmModel,
   landmarks: NormalizedFaceLandmark[],
   identityReg: number,
+  denseFit = true, // false = 密対応があっても68点フィットを使う (品質比較用)
 ): GnmFitResult {
   // 対応点: 密対応 (最大468点。目・口・輪郭の精度と横幅追従のため) があればそれを、
   // 無ければ旧68点 (HEAD_SPARSE_68) を使う
-  const useDense = model.denseCount > 0;
+  const useDense = denseFit && model.denseCount > 0;
   const lmCount = useDense ? model.denseCount : MEDIAPIPE_IBUG68.length;
   const corrIdx = useDense ? model.denseTriIndices : model.landmarkIndices;
   const corrBary = useDense ? model.denseBaryWeights : model.landmarkWeights;
@@ -352,11 +366,13 @@ export function fitGnmToLandmarks(
         A[(m * 2 + 1) * k + i] = sim.s * (sim.sin * bx + sim.cos * by);
       }
     }
-    // 重み付き正規方程式 (AᵀWA + λI) c = AᵀWr
+    // 重み付き正規方程式 ((AᵀWA + λI)/Σw基準) c = AᵀWr/Σw
     const ata = new Float64Array(k * k);
     const atr = new Float64Array(k);
+    let wTotal = 0;
     for (let row = 0; row < rows; row++) {
       const rw = fitWeights ? fitWeights[row >> 1] : 1; // x/y行は同じ点重みを共有
+      wTotal += rw;
       const rv = r[row] * rw;
       for (let i = 0; i < k; i++) {
         const av = A[row * k + i];
@@ -364,12 +380,18 @@ export function fitGnmToLandmarks(
         for (let j = 0; j <= i; j++) ata[i * k + j] += av * A[row * k + j] * rw;
       }
     }
+    // Σwで正規化する — しないと対応点数に比例してAᵀAが育ち、
+    // λの実効強度が点数で変わってしまう (68点→458点で約1/7に弱まり顔が歪む)
+    const invW = 1 / Math.max(1e-12, wTotal);
+    for (let i = 0; i < k * k; i++) ata[i] *= invW;
+    for (let i = 0; i < k; i++) atr[i] *= invW;
     for (let i = 0; i < k; i++) {
       for (let j = i + 1; j < k; j++) ata[i * k + j] = ata[j * k + i];
       // 係数はz-scoreスケール (公式デモが±3スライダーで直接使用しており確認済み) なので
       // 一様な単位行列リッジがガウス事前分布として正しい。
-      // 2D残差の典型スケール(≈1e-2)に対しGUI値1.0で程よく効くよう1e-3を掛ける。
-      ata[i * k + i] += identityReg * 1e-3 * lambdaSchedule[Math.min(iter, lambdaSchedule.length - 1)];
+      // REG_UNIT: 正規化前の68点版 (λ×1e-3, Σw=2×68×重み1) と実効強度が
+      // 一致するよう較正 → 密対応でも68点フィットと同じ強さの事前分布が効く
+      ata[i * k + i] += identityReg * REG_UNIT * lambdaSchedule[Math.min(iter, lambdaSchedule.length - 1)];
     }
     const solved = solveSPD(ata, atr, k);
     const next = new Float32Array(k);
