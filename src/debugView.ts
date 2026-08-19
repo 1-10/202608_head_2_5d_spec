@@ -26,8 +26,6 @@ export interface DebugGuiOptions {
   onSourceChanged: () => void;
   onBackendChanged: () => void; // Head Backend切替 (GNMは遅延ロード)
   onGnmParamsChanged: () => void; // GNMのフィット/髪シェルパラメータ変更 (再構築)
-  onGnmExpressionRandom: () => void; // ランダム表情 (GNMバックエンド時のみ有効)
-  onGnmExpressionNeutral: () => void;
   onYawRangeChanged: () => void;
   onPitchRangeChanged: () => void;
   getSceneState: () => SceneStateLike | null;
@@ -230,6 +228,14 @@ export function setupDebugGui(container: HTMLElement, params: Params, options: D
     .name('GNM Identity Reg')
     .onFinishChange(() => options.onGnmParamsChanged());
   sourceFolder
+    .add(params, 'gnmDenseFit')
+    .name('GNM Dense Fit (468pt)')
+    .onChange(() => options.onGnmParamsChanged());
+  sourceFolder
+    .add(params, 'gnmWarpStrength', 0, 1.5, 0.05)
+    .name('GNM Residual Warp')
+    .onFinishChange(() => options.onGnmParamsChanged());
+  sourceFolder
     .add(params, 'gnmHairLift', 0, 0.2, 0.005)
     .name('GNM Hair Lift')
     .onFinishChange(() => options.onGnmParamsChanged());
@@ -239,25 +245,29 @@ export function setupDebugGui(container: HTMLElement, params: Params, options: D
     .onFinishChange(() => options.onGnmParamsChanged());
   sourceFolder.open();
 
-  // GNMバックエンド時のみ効く (GNMは383成分中、目20+下顔面20の表情基底を持つ)
+  // GNMバックエンド時のみ効く。プリセットは公式ExpressionSampler由来 (gnmExpressions.ts)
   const exprFolder = gui.addFolder('GNM Expression');
-  const exprAutoController = exprFolder.add(params, 'gnmExprAuto').name('Auto Animate');
+  exprFolder
+    .add(params, 'gnmEmotion', {
+      'Auto (喜怒哀楽を巡回)': 'AUTO',
+      Neutral: 'NEUTRAL',
+      'Manual (下のスライダー)': 'MANUAL',
+      '喜 Happy': 'joy',
+      '楽 Smile': 'fun',
+      '哀 Sad': 'sad',
+      '怒 Snarl': 'anger',
+      '驚 Surprise': 'surprise',
+    })
+    .name('Emotion');
   exprFolder.add(params, 'gnmExprIntensity', 0, 2, 0.05).name('Intensity');
-  exprFolder
-    .add({ random: () => options.onGnmExpressionRandom() }, 'random')
-    .name('Random Expression');
-  exprFolder
-    .add(
-      {
-        neutral: () => {
-          params.gnmExprAuto = false; // Neutralが次のAuto遷移で上書きされないように
-          exprAutoController.updateDisplay();
-          options.onGnmExpressionNeutral();
-        },
-      },
-      'neutral',
-    )
-    .name('Neutral');
+  // パーツ別スライダー (Emotion=Manual時に有効。公式クラスを目/下顔面領域で分離)
+  exprFolder.add(params, 'gnmMouthOpen', 0, 1.5, 0.05).name('Mouth Open');
+  exprFolder.add(params, 'gnmSmile', 0, 1.5, 0.05).name('Smile');
+  exprFolder.add(params, 'gnmPucker', 0, 1.5, 0.05).name('Pucker');
+  exprFolder.add(params, 'gnmCornersDown', 0, 1.5, 0.05).name('Corners Down');
+  exprFolder.add(params, 'gnmEyesClose', 0, 1.2, 0.05).name('Eyes Close');
+  exprFolder.add(params, 'gnmEyesWide', 0, 1.5, 0.05).name('Eyes Wide');
+  exprFolder.add(params, 'gnmSquint', 0, 1.5, 0.05).name('Squint');
 
   const depthFolder = gui.addFolder('Depth Parameters');
   depthFolder.add(params, 'faceDepthScale', 0, 3, 0.01).name('Face Depth').onChange(notifyDepth);

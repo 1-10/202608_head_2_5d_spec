@@ -40,6 +40,7 @@ import {
   type MouthDeformEntry,
   type TalkState,
 } from './mouthTalk';
+import { GNM_EXPRESSION_PRESETS } from './gnmExpressions';
 import { createParams, type Params } from './params';
 import { applyDebugVisualization, setupDebugGui } from './debugView';
 import { OrbitDragController } from './interaction';
@@ -161,7 +162,30 @@ let yawDeg = 0;
 let pitchDeg = 0;
 let blinkState: BlinkState = createBlinkState(performance.now(), params);
 let talkState: TalkState = createTalkState(performance.now());
-let gnmExprNextChangeAt = 0; // GNM表情自動アニメーションの次回遷移時刻
+// --- GNM表情の自動巡回 (Emotion=AUTO時): 感情→ニュートラル→別の感情… ---
+// 感情 → 公式ExpressionSamplerプリセット群 (Varはseed違いの変化形。巡回のたびに選ぶ)
+const GNM_EMOTION_VARIANTS: Record<string, string[]> = {
+  joy: ['happy', 'happyVar1', 'happyVar2'],
+  fun: ['smileWide', 'smileWideVar1', 'smileWideVar2'],
+  sad: ['cornersDown', 'cornersDownVar1', 'cornersDownVar2'],
+  anger: ['snarl', 'snarlVar1', 'snarlVar2'],
+  surprise: ['surprise', 'surpriseVar1', 'surpriseVar2'],
+};
+let gnmExprNextChangeAt = 0; // 次回遷移時刻
+let gnmAutoTarget: number[] | null = null; // 現在の目標プリセット (null=ニュートラル区間)
+let gnmLastEmotion = ''; // 直前の感情 (同じ感情の連続を避ける)
+
+// Emotion=MANUAL用のパーツ別スライダー定義。公式プリセットを領域で分離して合成する。
+// 領域はアセットの表情成分レイアウト (前半=目20成分, 後半=下顔面20成分) に対応
+const GNM_MANUAL_CONTROLS: { param: keyof Params; preset: string; region: 'eyes' | 'lower' }[] = [
+  { param: 'gnmMouthOpen', preset: 'surprise', region: 'lower' },
+  { param: 'gnmSmile', preset: 'smileWide', region: 'lower' },
+  { param: 'gnmPucker', preset: 'pucker', region: 'lower' },
+  { param: 'gnmCornersDown', preset: 'cornersDown', region: 'lower' },
+  { param: 'gnmEyesClose', preset: 'blink', region: 'eyes' },
+  { param: 'gnmEyesWide', preset: 'surprise', region: 'eyes' },
+  { param: 'gnmSquint', preset: 'squint', region: 'eyes' },
+];
 
 function setStatus(message: string, isError = false): void {
   els.status.textContent = message;
@@ -395,6 +419,9 @@ async function ensureGnmHead(rebuild = false): Promise<void> {
     const build = gnmMeshModule.buildGnmHead(gnmModel, s.ctx, s.sourceCanvas, s.texture, params);
     build.group.rotation.order = 'YXZ';
     s.gnmHead = build;
+    // デバッグ用: コンソールから表情係数や対応残差を直接調べられるようにする
+    (window as unknown as Record<string, unknown>).__gnmHead = build;
+    (window as unknown as Record<string, unknown>).__gnmDebug = { model: gnmModel, ctx: s.ctx, build };
     applyHeadBackend();
     applyDebugVisualization(sceneState, params);
     if (!build.hairMesh) {
@@ -655,16 +682,6 @@ const debugGui = setupDebugGui(els.guiContainer, params, {
   onGnmParamsChanged: () => {
     void ensureGnmHead(true);
   },
-  onGnmExpressionRandom: () => {
-    if (!sceneState?.gnmHead || params.headBackend !== 'GNM') {
-      setStatus('表情デモはHead Backend: GNM選択時のみ使えます。', true);
-      return;
-    }
-    sceneState.gnmHead.setRandomExpression(params.gnmExprIntensity);
-  },
-  onGnmExpressionNeutral: () => {
-    sceneState?.gnmHead?.setNeutralExpression();
-  },
   onYawRangeChanged: () => updateYaw(yawDeg),
   onPitchRangeChanged: () => updatePitch(pitchDeg),
   getSceneState: () => sceneState,
@@ -726,13 +743,54 @@ function animate(): void {
     updateMouthCavityGeometry(sceneState.faceOnlyCavity, sceneState.mouthAnchors, talkOpen, params);
     updateMouthCavityGeometry(sceneState.fullHeadCavity, sceneState.mouthAnchors, talkOpen, params);
 
-    // GNM表情の自動アニメーション: 一定間隔で新しいランダム表情を目標に設定し、
-    // tickExpressionの指数遷移で滑らかに繋ぐ
-    if (sceneState.gnmHead && params.headBackend === 'GNM' && params.gnmExprAuto && now >= gnmExprNextChangeAt) {
-      sceneState.gnmHead.setRandomExpression(params.gnmExprIntensity);
-      gnmExprNextChangeAt = now + 1500 + Math.random() * 2000;
+    // GNM表情: 感情プリセットを目標に設定し、tickExpressionの指数遷移で滑らかに繋ぐ。
+    // まばたきはBlinkの共通エンベロープを渡して他ビューと同期させる
+    const gnmHead = sceneState.gnmHead;
+    if (gnmHead && params.headBackend === 'GNM') {
+      let preset: number[] | null = null;
+      if (params.gnmEmotion === 'AUTO') {
+        if (now >= gnmExprNextChangeAt) {
+          if (gnmAutoTarget) {
+            // 感情の保持が終わったら短いニュートラル区間を挟む
+            gnmAutoTarget = null;
+            gnmExprNextChangeAt = now + 800 + Math.random() * 1200;
+          } else {
+            const emotions = Object.keys(GNM_EMOTION_VARIANTS).filter((e) => e !== gnmLastEmotion);
+            const emotion = emotions[Math.floor(Math.random() * emotions.length)];
+            gnmLastEmotion = emotion;
+            const variants = GNM_EMOTION_VARIANTS[emotion];
+            gnmAutoTarget =
+              GNM_EXPRESSION_PRESETS[variants[Math.floor(Math.random() * variants.length)]] ?? null;
+            gnmExprNextChangeAt = now + 2000 + Math.random() * 2500;
+          }
+        }
+        preset = gnmAutoTarget;
+      } else if (params.gnmEmotion === 'MANUAL') {
+        // パーツ別スライダーの合成 (公式プリセットの目/下顔面領域を強度倍して加算)
+        let vec: number[] | null = null;
+        for (const c of GNM_MANUAL_CONTROLS) {
+          const amount = params[c.param] as number;
+          if (amount === 0) continue;
+          const p = GNM_EXPRESSION_PRESETS[c.preset];
+          if (!p) continue;
+          vec ??= new Array<number>(p.length).fill(0);
+          const half = p.length / 2;
+          for (let i = 0; i < p.length; i++) {
+            const inRegion = c.region === 'lower' ? i >= half : i < half;
+            if (inRegion) vec[i] += p[i] * amount;
+          }
+        }
+        preset = vec;
+      } else if (params.gnmEmotion !== 'NEUTRAL') {
+        preset = GNM_EXPRESSION_PRESETS[GNM_EMOTION_VARIANTS[params.gnmEmotion]?.[0] ?? ''] ?? null;
+      }
+      if (preset) {
+        gnmHead.setExpressionTarget(preset.map((v) => v * params.gnmExprIntensity));
+      } else {
+        gnmHead.setNeutralExpression();
+      }
+      gnmHead.tickExpression(params.blinkEnabled ? blinkAmount : 0);
     }
-    sceneState.gnmHead?.tickExpression();
   }
 
   faceOnlyViewport.render();

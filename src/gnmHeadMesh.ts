@@ -13,12 +13,14 @@ import * as THREE from 'three';
 import { sampleField, fieldBoundsUv, type ScalarField } from './fields';
 import {
   MEDIAPIPE_IBUG68,
-  applyIdentity,
   applySimilarityInPlace,
   fitGnmToLandmarks,
   type GnmFitResult,
   type GnmModel,
+  type SimilarityTransform,
 } from './gnmHead';
+import { GNM_EXPRESSION_PRESETS } from './gnmExpressions';
+import { applyResidualWarp, fillNostrils } from './gnmRefine';
 import { smoothstep } from './headDepth';
 import { applyFlatNormals, buildGridIndices } from './meshUtils';
 import { rasterizeMaskCanvas } from './personSegmentation';
@@ -30,11 +32,16 @@ export interface GnmHeadBuild {
   headMesh: THREE.Mesh;
   hairMesh: THREE.Mesh | null;
   fit: GnmFitResult;
-  /** ランダム表情を目標に設定する (intensity=係数の標準偏差, z-scoreスケール)。 */
-  setRandomExpression(intensity: number): void;
   setNeutralExpression(): void;
-  /** レンダーループから毎フレーム呼ぶ。目標表情へ滑らかに遷移する。 */
-  tickExpression(): void;
+  /** 表情係数を直接目標に設定する (長さexpressionCount。感情プリセット用)。 */
+  setExpressionTarget(coeffs: ArrayLike<number>): void;
+  /** 表情係数を即時適用する (遷移なし。成分ラベリングなどデバッグ用)。 */
+  snapExpression(coeffs: ArrayLike<number>): void;
+  /**
+   * レンダーループから毎フレーム呼ぶ。目標表情へ滑らかに遷移する。
+   * blinkAmount: 0-1のまばたき量 (公式WINK合成の閉眼ベクトルを表情に加算する)。
+   */
+  tickExpression(blinkAmount?: number): void;
   dispose(): void;
 }
 
@@ -47,8 +54,16 @@ export function buildGnmHead(
   texture: THREE.Texture,
   params: Params,
 ): GnmHeadBuild {
-  const fit = fitGnmToLandmarks(model, ctx.landmarks, params.gnmIdentityReg);
+  const fit = fitGnmToLandmarks(model, ctx.landmarks, params.gnmIdentityReg, params.gnmDenseFit);
   const seg = selectSegmentation(ctx, params);
+
+  // 残差ワープ: identity係数 (統計モデル) では張り切れない目・唇の位置残差を
+  // neutral頂点へ焼き込む。まばたき・開口が「写真の目・口の位置」で起きる。
+  // 返り値は目領域の表情成分の振幅スケール (ワープで瞼開口幅が変わった分の補正)
+  const exprScales = applyResidualWarp(model, fit, ctx.landmarks, params.gnmWarpStrength);
+
+  // 鼻孔: 内壁を平滑化で塞ぐ (穴のジオメトリは不要 — 写真の鼻孔の暗さで十分)
+  fillNostrils(model, fit.vertices);
 
   // --- Head geometry ---
   const geometry = new THREE.BufferGeometry();
@@ -114,6 +129,7 @@ export function buildGnmHead(
     fallback[i * 3] = linear.r;
     fallback[i * 3 + 1] = linear.g;
     fallback[i * 3 + 2] = linear.b;
+
   }
 
   geometry.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
@@ -146,17 +162,28 @@ export function buildGnmHead(
   // --- 表情 (GNM expression basis) ---
   // 未変換のneutral頂点を保持し、表情係数を足してから相似変換して差し替える。
   // UV/fallback/alphaはneutral時のまま使う (写真は表面に追従して動く)。
-  const neutralUntransformed = applyIdentity(model, fit.coeffs);
+  // 注意: applyIdentityから作り直すと残差ワープなどの後処理が毎フレーム消えるため、
+  // 最終頂点 (fit.vertices) を逆相似変換して作る
+  const neutralUntransformed = invertSimilarity(fit.vertices, fit.sim);
   const exprCurrent = new Float32Array(model.expressionCount);
   const exprTarget = new Float32Array(model.expressionCount);
   const posAttr = geometry.getAttribute('position') as THREE.BufferAttribute;
 
+  // まばたきベクトル: 公式ExpressionSamplerのWINK_LEFT+WINK_RIGHT合成 (目領域のみ)。
+  // blinkAmountを乗算して感情表情へ加算する独立チャネル
+  const blinkVec =
+    GNM_EXPRESSION_PRESETS.blink?.length === model.expressionCount
+      ? GNM_EXPRESSION_PRESETS.blink
+      : new Array<number>(model.expressionCount).fill(0);
+  let blinkNow = 0;
+
   const applyExpressionNow = (): void => {
     const out = new Float32Array(neutralUntransformed);
     for (let i = 0; i < model.expressionCount; i++) {
-      const c = exprCurrent[i];
+      const c = exprCurrent[i] + blinkVec[i] * blinkNow;
       if (c === 0) continue;
-      const cs = (c * model.expressionScales[i]) / 32767;
+      // exprScales: 残差ワープで瞼開口幅が変わった分の目領域振幅補正
+      const cs = (c * exprScales[i] * model.expressionScales[i]) / 32767;
       const base = i * model.vertexCount * 3;
       for (let j = 0; j < model.vertexCount * 3; j++) out[j] += model.expressionBasisQ[base + j] * cs;
     }
@@ -165,27 +192,26 @@ export function buildGnmHead(
     posAttr.needsUpdate = true;
   };
 
-  const gaussian = (): number => {
-    const u1 = Math.max(1e-12, Math.random());
-    const u2 = Math.random();
-    return Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
-  };
-
   return {
     group,
     headMesh,
     hairMesh: hair?.mesh ?? null,
     fit,
-    setRandomExpression(intensity: number) {
-      for (let i = 0; i < model.expressionCount; i++) {
-        exprTarget[i] = Math.min(2.5, Math.max(-2.5, gaussian() * intensity));
-      }
-    },
     setNeutralExpression() {
       exprTarget.fill(0);
     },
-    tickExpression() {
-      let maxDiff = 0;
+    setExpressionTarget(coeffs: ArrayLike<number>) {
+      for (let i = 0; i < model.expressionCount; i++) exprTarget[i] = coeffs[i] ?? 0;
+    },
+    snapExpression(coeffs: ArrayLike<number>) {
+      for (let i = 0; i < model.expressionCount; i++) {
+        exprTarget[i] = coeffs[i] ?? 0;
+        exprCurrent[i] = coeffs[i] ?? 0;
+      }
+      applyExpressionNow();
+    },
+    tickExpression(blinkAmount = 0) {
+      let maxDiff = Math.abs(blinkAmount - blinkNow);
       for (let i = 0; i < model.expressionCount; i++) {
         const diff = exprTarget[i] - exprCurrent[i];
         if (Math.abs(diff) > maxDiff) maxDiff = Math.abs(diff);
@@ -195,6 +221,8 @@ export function buildGnmHead(
       for (let i = 0; i < model.expressionCount; i++) {
         exprCurrent[i] += (exprTarget[i] - exprCurrent[i]) * t;
       }
+      // まばたきは既にエンベロープ済みの値が来るため遅延なく反映する
+      blinkNow = blinkAmount;
       applyExpressionNow();
     },
     dispose() {
@@ -207,6 +235,19 @@ export function buildGnmHead(
       }
     },
   };
+}
+
+/** 相似変換の逆変換 (新しい配列を返す)。 */
+function invertSimilarity(verts: Float32Array, sim: SimilarityTransform): Float32Array {
+  const out = new Float32Array(verts.length);
+  for (let i = 0; i < verts.length; i += 3) {
+    const dx = verts[i] - sim.tx;
+    const dy = verts[i + 1] - sim.ty;
+    out[i] = (sim.cos * dx + sim.sin * dy) / sim.s;
+    out[i + 1] = (-sim.sin * dx + sim.cos * dy) / sim.s;
+    out[i + 2] = (verts[i + 2] - sim.tz) / sim.s;
+  }
+  return out;
 }
 
 /** map色とfallback頂点色をaPhotoWでmixするようMeshStandardMaterialへパッチする。 */

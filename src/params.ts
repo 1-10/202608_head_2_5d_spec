@@ -17,6 +17,10 @@ export type DepthSource = 'MEASURED' | 'NEURAL' | 'HEURISTIC';
 //        アセットは tools/export_gnm_assets.py で生成し、選択時に遅延ロードする
 export type HeadBackend = 'GRID' | 'GNM';
 
+// GNMバックエンドの表情感情 (AUTO=自動巡回, MANUAL=パーツ別スライダー)。
+// キーは main.ts の感情→プリセット表と対応する
+export type GnmEmotion = 'AUTO' | 'NEUTRAL' | 'MANUAL' | 'joy' | 'fun' | 'sad' | 'anger' | 'surprise';
+
 export interface Params {
   // --- GUIへ露出する主要パラメータ（spec: 品質比較用UI表） ---
   faceDepthScale: number; // Face Depth: MediaPipe顔凹凸倍率
@@ -42,10 +46,27 @@ export interface Params {
   // --- GNM Head バックエンド ---
   headBackend: HeadBackend;
   gnmIdentityReg: number; // identity係数のL2正則化強度 (大=平均顔寄り)
+  // 468点密対応フィットを使う (false=68点フィット。密対応の品質比較用スイッチ)
+  gnmDenseFit: boolean;
+  // 残差ワープ強度 (0=無効)。identity係数では張り切れない目・唇の位置残差を
+  // neutral頂点へ焼き込み、まばたき・開口を写真の目・口の位置で起こす
+  gnmWarpStrength: number;
   gnmHairLift: number; // 髪シェルをGNM表面手前へ持ち上げる量 (モデル空間)
   gnmHairRolloff: number; // 髪シェル縁を後方へ巻き込む量 (モデル空間)
-  gnmExprIntensity: number; // ランダム表情の強さ (表情係数の標準偏差, z-score)
-  gnmExprAuto: boolean; // 一定間隔でランダム表情へ遷移し続ける
+  gnmExprIntensity: number; // 感情表情の強さ (プリセット係数への乗数)
+  // 表情の感情選択。AUTO=喜怒哀楽を自動巡回 (感情→ニュートラル→別の感情…)、
+  // NEUTRAL=無表情、MANUAL=下のパーツ別スライダーで合成、それ以外=その感情で固定。
+  // プリセットはGNM公式ExpressionSampler由来
+  gnmEmotion: GnmEmotion;
+  // --- パーツ別スライダー (Emotion=MANUAL時に有効) ---
+  // 公式ExpressionSamplerのクラスを領域 (目成分/下顔面成分) で分離した強度
+  gnmMouthOpen: number; // SURPRISEの下顔面 (顎開き)
+  gnmSmile: number; // SMILE_WIDEの下顔面
+  gnmPucker: number; // PUCKERの下顔面 (口すぼめ)
+  gnmCornersDown: number; // CORNERS_DOWNの下顔面 (口角下げ)
+  gnmEyesClose: number; // WINK合成の目領域 (閉眼)
+  gnmEyesWide: number; // SURPRISEの目領域 (見開き)
+  gnmSquint: number; // SQUINTの目領域 (細目)
 
   // --- アニメーション (Blink) ---
   blinkEnabled: boolean;
@@ -108,10 +129,19 @@ export const DEFAULT_PARAMS: Params = {
 
   headBackend: 'GRID',
   gnmIdentityReg: 1.0,
+  gnmDenseFit: true,
+  gnmWarpStrength: 1.0,
   gnmHairLift: 0.02,
   gnmHairRolloff: 0.08,
   gnmExprIntensity: 1.0,
-  gnmExprAuto: true,
+  gnmEmotion: 'AUTO',
+  gnmMouthOpen: 0,
+  gnmSmile: 0,
+  gnmPucker: 0,
+  gnmCornersDown: 0,
+  gnmEyesClose: 0,
+  gnmEyesWide: 0,
+  gnmSquint: 0,
 
   blinkEnabled: true,
   blinkPeriodMinSec: 3,
