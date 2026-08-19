@@ -1,0 +1,8 @@
+.claude/
+node_modules/
+dist/
+sample/
+*.local
+.DS_Store
+Thumbs.db
+desktop.ini
