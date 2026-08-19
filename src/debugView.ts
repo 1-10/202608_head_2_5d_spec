@@ -270,6 +270,8 @@ export function setupDebugGui(container: HTMLElement, params: Params, options: D
   depthFolder.open();
 
   const cameraFolder = gui.addFolder('Camera / Rotation');
+  // ORTHO=平行投影前提のフィット/UVと一致 (正面が写真と一致) / PERSP=近接感の比較用
+  cameraFolder.add(params, 'cameraProjection', ['ORTHO', 'PERSP']).name('Projection').onChange(notifyDepth);
   cameraFolder.add(params, 'pivotZRatio', -0.2, 0.05, 0.005).name('Pivot Z').onChange(notifyDepth);
   cameraFolder
     .add(params, 'maxYawDeg', 5, 45, 1)
@@ -280,12 +282,7 @@ export function setupDebugGui(container: HTMLElement, params: Params, options: D
     .name('Max Pitch')
     .onChange(() => options.onPitchRangeChanged());
   cameraFolder.add(params, 'cameraFovDeg', 15, 60, 1).name('Camera FOV').onChange(notifyDepth);
-  cameraFolder
-    .add(params, 'cameraDistanceRatio', 1.5, 8, 0.1)
-    .name('Camera Distance')
-    .onChange(notifyDepth)
-    // GNMの透視補正UVはカメラ距離に依存するため、確定時に再ベイクする
-    .onFinishChange(() => options.onGnmParamsChanged());
+  cameraFolder.add(params, 'cameraDistanceRatio', 1.5, 8, 0.1).name('Camera Distance').onChange(notifyDepth);
 
   // --- Talk Animation / Mouth Cavity ---
   const talkFolder = gui.addFolder('Talk / Mouth');

@@ -76,8 +76,13 @@ export interface Params {
   showMouthRegion: boolean;
 
   // --- カメラ/共通表示設定 ---
-  cameraFovDeg: number;
-  cameraDistanceRatio: number; // faceWidth比
+  // ORTHO(既定): 正射影。フィット・UV焼き込み・FACE ONLYはすべて平行投影前提の
+  // ため、表示も正射影にすると正面表示が写真と画素単位で一致する。
+  // 回転による視差 (3D感) は正射影でも正しく出る。
+  // PERSP: 透視 (近接感の演出比較用。平行投影UVとの視差で目鼻口が数pxズレる)
+  cameraProjection: 'ORTHO' | 'PERSP';
+  cameraFovDeg: number; // PERSP時のみ有効
+  cameraDistanceRatio: number; // faceWidth比 (ORTHO時はズーム換算に使用)
 
   // --- Head Grid 解像度 ---
   headGridCols: number;
@@ -138,6 +143,7 @@ export const DEFAULT_PARAMS: Params = {
   showMouthSeam: false,
   showMouthRegion: false,
 
+  cameraProjection: 'ORTHO',
   cameraFovDeg: 30,
   cameraDistanceRatio: 3.4,
 

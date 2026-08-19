@@ -46,10 +46,15 @@ import { OrbitDragController } from './interaction';
 
 class Viewport {
   readonly scene = new THREE.Scene();
-  readonly camera: THREE.PerspectiveCamera;
   readonly renderer: THREE.WebGLRenderer;
+  private perspCamera: THREE.PerspectiveCamera;
+  private orthoCamera: THREE.OrthographicCamera;
+  private activeCamera: THREE.Camera;
   private container: HTMLElement;
   private currentGroup: THREE.Object3D | null = null;
+  private lastFovDeg = 30;
+  private lastDistance = 3.4;
+  private lastProjection: 'ORTHO' | 'PERSP' = 'ORTHO';
 
   constructor(container: HTMLElement) {
     this.container = container;
@@ -57,7 +62,9 @@ class Viewport {
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     container.appendChild(this.renderer.domElement);
 
-    this.camera = new THREE.PerspectiveCamera(30, 1, 0.05, 50);
+    this.perspCamera = new THREE.PerspectiveCamera(30, 1, 0.05, 50);
+    this.orthoCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.05, 50);
+    this.activeCamera = this.orthoCamera;
 
     const ambient = new THREE.AmbientLight(0xffffff, 0.65);
     const key = new THREE.DirectionalLight(0xffffff, 0.9);
@@ -80,23 +87,51 @@ class Viewport {
     }
   }
 
-  updateCamera(fovDeg: number, distance: number): void {
-    this.camera.fov = fovDeg;
-    this.camera.position.set(0, 0, distance);
-    this.camera.lookAt(0, 0, 0);
-    this.camera.updateProjectionMatrix();
+  /**
+   * ORTHO(既定): フィット・UV・FACE ONLYの平行投影前提と表示を一致させる。
+   * ズーム量はPERSPと見かけが揃うよう distance·tan(fov/2) から換算する。
+   */
+  updateCamera(fovDeg: number, distance: number, projection: 'ORTHO' | 'PERSP'): void {
+    this.lastFovDeg = fovDeg;
+    this.lastDistance = distance;
+    this.lastProjection = projection;
+    const aspect = this.aspect();
+
+    if (projection === 'PERSP') {
+      this.perspCamera.fov = fovDeg;
+      this.perspCamera.aspect = aspect;
+      this.perspCamera.position.set(0, 0, distance);
+      this.perspCamera.lookAt(0, 0, 0);
+      this.perspCamera.updateProjectionMatrix();
+      this.activeCamera = this.perspCamera;
+    } else {
+      const halfH = distance * Math.tan((fovDeg * Math.PI) / 360);
+      this.orthoCamera.top = halfH;
+      this.orthoCamera.bottom = -halfH;
+      this.orthoCamera.left = -halfH * aspect;
+      this.orthoCamera.right = halfH * aspect;
+      this.orthoCamera.position.set(0, 0, distance);
+      this.orthoCamera.lookAt(0, 0, 0);
+      this.orthoCamera.updateProjectionMatrix();
+      this.activeCamera = this.orthoCamera;
+    }
+  }
+
+  private aspect(): number {
+    const w = this.container.clientWidth || 1;
+    const h = this.container.clientHeight || 1;
+    return w / h;
   }
 
   resize(): void {
     const w = this.container.clientWidth || 1;
     const h = this.container.clientHeight || 1;
     this.renderer.setSize(w, h, false);
-    this.camera.aspect = w / h;
-    this.camera.updateProjectionMatrix();
+    this.updateCamera(this.lastFovDeg, this.lastDistance, this.lastProjection);
   }
 
   render(): void {
-    this.renderer.render(this.scene, this.camera);
+    this.renderer.render(this.scene, this.activeCamera);
   }
 }
 
@@ -527,8 +562,8 @@ async function processImage(captured: CapturedImage): Promise<void> {
 
 function updateCameras(): void {
   const distance = params.cameraDistanceRatio;
-  faceOnlyViewport.updateCamera(params.cameraFovDeg, distance);
-  fullHeadViewport.updateCamera(params.cameraFovDeg, distance);
+  faceOnlyViewport.updateCamera(params.cameraFovDeg, distance, params.cameraProjection);
+  fullHeadViewport.updateCamera(params.cameraFovDeg, distance, params.cameraProjection);
 }
 
 /**
