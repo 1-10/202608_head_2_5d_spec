@@ -21,6 +21,10 @@ export interface GnmModel {
   landmarkIndices: Uint32Array; // (68,3)
   landmarkWeights: Float32Array; // (68,3)
   earWeight: Uint8Array; // (N,) 耳グループ重み 0-255
+  expressionCount: number; // 0 = 旧アセット (表情なし)
+  expressionBasisQ: Int16Array; // (M,N,3) int16量子化
+  expressionScales: Float32Array; // (M,)
+  expressionNames: string[];
 }
 
 /** MediaPipe FaceMesh 468点 → iBUG-68 の対応表 (顎17/眉10/鼻9/目12/口20)。 */
@@ -42,6 +46,9 @@ interface BinHeader {
   triangleCount: number;
   identityBasisCount: number;
   identityBasisScales: number[];
+  expressionBasisCount?: number;
+  expressionBasisScales?: number[];
+  expressionNames?: string[];
   landmarkCount: number;
   sections: Record<string, { offset: number; byteLength: number; dtype: string }>;
 }
@@ -78,6 +85,8 @@ export async function loadGnmModel(url = 'gnm/gnm_head_lite.bin'): Promise<GnmMo
 
   const basisSec = section('identityBasisQ');
   const earSec = section('earWeight');
+  const hasExpression = !!header.sections['expressionBasisQ'] && (header.expressionBasisCount ?? 0) > 0;
+  const exprSec = hasExpression ? section('expressionBasisQ') : null;
   return {
     vertexCount: header.vertexCount,
     triangleCount: header.triangleCount,
@@ -89,6 +98,12 @@ export async function loadGnmModel(url = 'gnm/gnm_head_lite.bin'): Promise<GnmMo
     landmarkIndices: u32('landmarkIndices'),
     landmarkWeights: f32('landmarkWeights'),
     earWeight: new Uint8Array(buf.slice(earSec.start, earSec.start + earSec.byteLength)),
+    expressionCount: hasExpression ? (header.expressionBasisCount ?? 0) : 0,
+    expressionBasisQ: exprSec
+      ? new Int16Array(buf.slice(exprSec.start, exprSec.start + exprSec.byteLength))
+      : new Int16Array(0),
+    expressionScales: new Float32Array(header.expressionBasisScales ?? []),
+    expressionNames: header.expressionNames ?? [],
   };
 }
 
@@ -127,7 +142,7 @@ function gnmLandmarkPositions(model: GnmModel, verts: Float32Array): Float32Arra
 }
 
 /** identity係数を適用した頂点位置 (GNM座標系のまま)。 */
-function applyIdentity(model: GnmModel, coeffs: Float32Array): Float32Array {
+export function applyIdentity(model: GnmModel, coeffs: Float32Array): Float32Array {
   const { vertexCount: n, basisCount: k } = model;
   const out = new Float32Array(model.positions);
   for (let i = 0; i < k; i++) {
@@ -183,7 +198,7 @@ function fitSimilarity2D(src: Float32Array, dst: Float32Array, count: number): S
   return { s, cos, sin, tx, ty, tz };
 }
 
-function applySimilarityInPlace(verts: Float32Array, sim: SimilarityTransform): void {
+export function applySimilarityInPlace(verts: Float32Array, sim: SimilarityTransform): void {
   const { s, cos, sin, tx, ty, tz } = sim;
   for (let i = 0; i < verts.length; i += 3) {
     const x = verts[i];

@@ -11,7 +11,14 @@
 
 import * as THREE from 'three';
 import { sampleField, fieldBoundsUv, type ScalarField } from './fields';
-import { MEDIAPIPE_IBUG68, fitGnmToLandmarks, type GnmFitResult, type GnmModel } from './gnmHead';
+import {
+  MEDIAPIPE_IBUG68,
+  applyIdentity,
+  applySimilarityInPlace,
+  fitGnmToLandmarks,
+  type GnmFitResult,
+  type GnmModel,
+} from './gnmHead';
 import { smoothstep } from './headDepth';
 import { applyFlatNormals, buildGridIndices } from './meshUtils';
 import { rasterizeMaskCanvas } from './personSegmentation';
@@ -23,6 +30,11 @@ export interface GnmHeadBuild {
   headMesh: THREE.Mesh;
   hairMesh: THREE.Mesh | null;
   fit: GnmFitResult;
+  /** ランダム表情を目標に設定する (intensity=係数の標準偏差, z-scoreスケール)。 */
+  setRandomExpression(intensity: number): void;
+  setNeutralExpression(): void;
+  /** レンダーループから毎フレーム呼ぶ。目標表情へ滑らかに遷移する。 */
+  tickExpression(): void;
   dispose(): void;
 }
 
@@ -131,11 +143,60 @@ export function buildGnmHead(
   group.add(headMesh);
   if (hair) group.add(hair.mesh);
 
+  // --- 表情 (GNM expression basis) ---
+  // 未変換のneutral頂点を保持し、表情係数を足してから相似変換して差し替える。
+  // UV/fallback/alphaはneutral時のまま使う (写真は表面に追従して動く)。
+  const neutralUntransformed = applyIdentity(model, fit.coeffs);
+  const exprCurrent = new Float32Array(model.expressionCount);
+  const exprTarget = new Float32Array(model.expressionCount);
+  const posAttr = geometry.getAttribute('position') as THREE.BufferAttribute;
+
+  const applyExpressionNow = (): void => {
+    const out = new Float32Array(neutralUntransformed);
+    for (let i = 0; i < model.expressionCount; i++) {
+      const c = exprCurrent[i];
+      if (c === 0) continue;
+      const cs = (c * model.expressionScales[i]) / 32767;
+      const base = i * model.vertexCount * 3;
+      for (let j = 0; j < model.vertexCount * 3; j++) out[j] += model.expressionBasisQ[base + j] * cs;
+    }
+    applySimilarityInPlace(out, fit.sim);
+    (posAttr.array as Float32Array).set(out);
+    posAttr.needsUpdate = true;
+  };
+
+  const gaussian = (): number => {
+    const u1 = Math.max(1e-12, Math.random());
+    const u2 = Math.random();
+    return Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+  };
+
   return {
     group,
     headMesh,
     hairMesh: hair?.mesh ?? null,
     fit,
+    setRandomExpression(intensity: number) {
+      for (let i = 0; i < model.expressionCount; i++) {
+        exprTarget[i] = Math.min(2.5, Math.max(-2.5, gaussian() * intensity));
+      }
+    },
+    setNeutralExpression() {
+      exprTarget.fill(0);
+    },
+    tickExpression() {
+      let maxDiff = 0;
+      for (let i = 0; i < model.expressionCount; i++) {
+        const diff = exprTarget[i] - exprCurrent[i];
+        if (Math.abs(diff) > maxDiff) maxDiff = Math.abs(diff);
+      }
+      if (maxDiff < 1e-3) return;
+      const t = 0.06; // フレームごとの追従率 (指数的な滑らかな遷移。自動アニメーション向けに緩め)
+      for (let i = 0; i < model.expressionCount; i++) {
+        exprCurrent[i] += (exprTarget[i] - exprCurrent[i]) * t;
+      }
+      applyExpressionNow();
+    },
     dispose() {
       geometry.dispose();
       headMaterial.dispose();

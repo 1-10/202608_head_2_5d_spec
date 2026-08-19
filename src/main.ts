@@ -161,6 +161,7 @@ let yawDeg = 0;
 let pitchDeg = 0;
 let blinkState: BlinkState = createBlinkState(performance.now(), params);
 let talkState: TalkState = createTalkState(performance.now());
+let gnmExprNextChangeAt = 0; // GNM表情自動アニメーションの次回遷移時刻
 
 function setStatus(message: string, isError = false): void {
   els.status.textContent = message;
@@ -654,6 +655,16 @@ const debugGui = setupDebugGui(els.guiContainer, params, {
   onGnmParamsChanged: () => {
     void ensureGnmHead(true);
   },
+  onGnmExpressionRandom: () => {
+    if (!sceneState?.gnmHead || params.headBackend !== 'GNM') {
+      setStatus('表情デモはHead Backend: GNM選択時のみ使えます。', true);
+      return;
+    }
+    sceneState.gnmHead.setRandomExpression(params.gnmExprIntensity);
+  },
+  onGnmExpressionNeutral: () => {
+    sceneState?.gnmHead?.setNeutralExpression();
+  },
   onYawRangeChanged: () => updateYaw(yawDeg),
   onPitchRangeChanged: () => updatePitch(pitchDeg),
   getSceneState: () => sceneState,
@@ -714,6 +725,14 @@ function animate(): void {
 
     updateMouthCavityGeometry(sceneState.faceOnlyCavity, sceneState.mouthAnchors, talkOpen, params);
     updateMouthCavityGeometry(sceneState.fullHeadCavity, sceneState.mouthAnchors, talkOpen, params);
+
+    // GNM表情の自動アニメーション: 一定間隔で新しいランダム表情を目標に設定し、
+    // tickExpressionの指数遷移で滑らかに繋ぐ
+    if (sceneState.gnmHead && params.headBackend === 'GNM' && params.gnmExprAuto && now >= gnmExprNextChangeAt) {
+      sceneState.gnmHead.setRandomExpression(params.gnmExprIntensity);
+      gnmExprNextChangeAt = now + 1500 + Math.random() * 2000;
+    }
+    sceneState.gnmHead?.tickExpression();
   }
 
   faceOnlyViewport.render();

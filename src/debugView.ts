@@ -26,6 +26,8 @@ export interface DebugGuiOptions {
   onSourceChanged: () => void;
   onBackendChanged: () => void; // Head Backend切替 (GNMは遅延ロード)
   onGnmParamsChanged: () => void; // GNMのフィット/髪シェルパラメータ変更 (再構築)
+  onGnmExpressionRandom: () => void; // ランダム表情 (GNMバックエンド時のみ有効)
+  onGnmExpressionNeutral: () => void;
   onYawRangeChanged: () => void;
   onPitchRangeChanged: () => void;
   getSceneState: () => SceneStateLike | null;
@@ -236,6 +238,26 @@ export function setupDebugGui(container: HTMLElement, params: Params, options: D
     .name('GNM Hair Rolloff')
     .onFinishChange(() => options.onGnmParamsChanged());
   sourceFolder.open();
+
+  // GNMバックエンド時のみ効く (GNMは383成分中、目20+下顔面20の表情基底を持つ)
+  const exprFolder = gui.addFolder('GNM Expression');
+  const exprAutoController = exprFolder.add(params, 'gnmExprAuto').name('Auto Animate');
+  exprFolder.add(params, 'gnmExprIntensity', 0, 2, 0.05).name('Intensity');
+  exprFolder
+    .add({ random: () => options.onGnmExpressionRandom() }, 'random')
+    .name('Random Expression');
+  exprFolder
+    .add(
+      {
+        neutral: () => {
+          params.gnmExprAuto = false; // Neutralが次のAuto遷移で上書きされないように
+          exprAutoController.updateDisplay();
+          options.onGnmExpressionNeutral();
+        },
+      },
+      'neutral',
+    )
+    .name('Neutral');
 
   const depthFolder = gui.addFolder('Depth Parameters');
   depthFolder.add(params, 'faceDepthScale', 0, 3, 0.01).name('Face Depth').onChange(notifyDepth);

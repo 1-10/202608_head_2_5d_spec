@@ -44,6 +44,8 @@ export interface Params {
   gnmIdentityReg: number; // identity係数のL2正則化強度 (大=平均顔寄り)
   gnmHairLift: number; // 髪シェルをGNM表面手前へ持ち上げる量 (モデル空間)
   gnmHairRolloff: number; // 髪シェル縁を後方へ巻き込む量 (モデル空間)
+  gnmExprIntensity: number; // ランダム表情の強さ (表情係数の標準偏差, z-score)
+  gnmExprAuto: boolean; // 一定間隔でランダム表情へ遷移し続ける
 
   // --- アニメーション (Blink) ---
   blinkEnabled: boolean;
@@ -108,6 +110,8 @@ export const DEFAULT_PARAMS: Params = {
   gnmIdentityReg: 1.0,
   gnmHairLift: 0.02,
   gnmHairRolloff: 0.08,
+  gnmExprIntensity: 1.0,
+  gnmExprAuto: true,
 
   blinkEnabled: true,
   blinkPeriodMinSec: 3,

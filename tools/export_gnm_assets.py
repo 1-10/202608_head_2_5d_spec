@@ -24,6 +24,10 @@ import numpy as np
 
 IDENTITY_BASIS_COUNT = 64  # 上位K成分 (ノルム降順を確認済み。K以降は寄与が微小)
 
+# 表情基底は領域ごとにPCA順 (ノルム降順を確認済み)。ランダム表情デモ用に
+# 主要領域の上位成分だけ持つ (舌・瞳孔は正面写真デモでは効果が薄いため除外)
+EXPRESSION_PICKS = {'left_eye_region': 10, 'right_eye_region': 10, 'lower_face_region': 20}
+
 
 def main() -> None:
     if len(sys.argv) < 2:
@@ -65,6 +69,15 @@ def main() -> None:
 
     ear_weight = np.clip(group('ears')[vertex_mask] * 255, 0, 255).astype(np.uint8)
 
+    expr_names = [str(n) for n in d['expression_names']]
+    expr_indices = []
+    for prefix, count in EXPRESSION_PICKS.items():
+        expr_indices += [i for i, n in enumerate(expr_names) if n.startswith(prefix)][:count]
+    expr_full = d['expression_basis'][expr_indices][:, vertex_mask, :]  # (M,N,3)
+    expr_scales = np.abs(expr_full).max(axis=(1, 2)).astype(np.float32)
+    expr_scales[expr_scales == 0] = 1.0
+    expr_q = np.round(expr_full / expr_scales[:, None, None] * 32767).astype(np.int16)
+
     sections = {
         'positions': positions,       # float32 (N,3)
         'triangles': triangles,       # uint32 (T,3)
@@ -72,6 +85,7 @@ def main() -> None:
         'landmarkIndices': lm_idx,    # uint32 (68,3)
         'landmarkWeights': lm_w,      # float32 (68,3)
         'earWeight': ear_weight,      # uint8 (N,)
+        'expressionBasisQ': expr_q,   # int16 (M,N,3)
     }
 
     payload = bytearray()
@@ -89,6 +103,9 @@ def main() -> None:
         'triangleCount': int(triangles.shape[0]),
         'identityBasisCount': IDENTITY_BASIS_COUNT,
         'identityBasisScales': [float(s) for s in scales],
+        'expressionBasisCount': len(expr_indices),
+        'expressionBasisScales': [float(s) for s in expr_scales],
+        'expressionNames': [expr_names[i] for i in expr_indices],
         'landmarkCount': int(lm_idx.shape[0]),
         'sections': section_meta,
     }
