@@ -14,8 +14,11 @@
 - Webカメラ撮影 / ローカル画像ファイルからの正面写真入力
 - MediaPipe Face Landmarkerによる顔ランドマーク検出
 - `FACE ONLY`: 顔ランドマークとcanonicalな顔Depth profileを混合した2.5D顔メッシュ
-- `FULL HEAD`: Face Depth Field + 擬似Head Depth + 輪郭ロールオフ + 髪ボリュームを合成した
-  頭部全体の連続メッシュ(`HEAD DEPTH ONLY` / `FACE + HEAD` / `FACE + HEAD + HAIR VOLUME`の3モード)
+- `FULL HEAD`: 頭部全体の連続メッシュ(`HEAD DEPTH ONLY` / `FACE + HEAD` / `FACE + HEAD + HAIR VOLUME`の3モード)。
+  シルエット・髪マスク・頭部Depthの供給源はGUIで切替できる:
+  - `MEASURED`(既定): MediaPipe Image Segmenter (SelfieMulticlass)による実測シルエット/髪マスク +
+    TensorFlow.js ARPortraitDepthによる実測人物Depth(前景dilation・外れ値clamp・平滑化済み)
+  - `ELLIPSE` / `HEURISTIC`: 楕円近似 + 擬似Head Depth(旧方式。品質比較用に残置)
 - 左右いずれかのビューをドラッグすると、両ビューが同じYaw(±可変)/Pitch角に同期回転
 - 周期的なBlink(目パチ)アニメーション
 - Mouth Seam(唇の境界)分離による古典的なTalk Animation / Mouth Cavity(生成AIによる口腔内補完は不使用)
@@ -42,10 +45,14 @@ npm run preview  # ビルド結果のプレビュー
 ## 技術スタック
 
 - Three.js (WebGL, CPU側でgeometry頂点を生成・更新する方式)
-- MediaPipe Face Landmarker (`@mediapipe/tasks-vision`)
+- MediaPipe Face Landmarker / Image Segmenter (SelfieMulticlass) (`@mediapipe/tasks-vision`)
+- TensorFlow.js ARPortraitDepth (`@tensorflow-models/depth-estimation`)
 - Delaunator (Face Mesh topologyのDelaunay三角形分割)
 - lil-gui (品質比較用パラメータパネル)
 - Vite + TypeScript
+
+採用しているMLモデルはすべてGoogle公式配布(Apache-2.0)で、モデルカード上、
+学習データもGoogle自社収集(同意取得済み)のもののみ。学習データまで商用クリーンな構成。
 
 ## ディレクトリ構成
 
@@ -57,8 +64,12 @@ src/
   faceDetector.ts  # MediaPipe Face Landmarkerのロードと推論
   faceTopology.ts  # landmark正規化・三角形分割・key landmark index
   faceDepth.ts     # canonical/MediaPipe Depthの合成、Face Depth Field
-  headMask.ts      # 頭部シルエットマスク(楕円近似)
+  fields.ts        # 画像UV空間の2Dスカラー場 (マスク・Depthの共通表現)
+  personSegmentation.ts # MediaPipe SelfieMulticlassによる実測シルエット/髪マスク
+  portraitDepth.ts # TF.js ARPortraitDepthによる実測人物Depthとクリーンアップ
+  headMask.ts      # 頭部シルエットマスク(楕円近似。比較用フォールバック)
   headDepth.ts     # Pseudo Head Depth / Edge Rolloff / Face-Head Blend / Hair Volume
+  meshUtils.ts     # メッシュ共通処理 (法線+Z固定など)
   faceOnlyMesh.ts  # FACE ONLYメッシュ生成
   fullHeadMesh.ts  # Head Grid Mesh生成 (FULL HEAD)
   mouthTalk.ts     # Mouth Seam / Talk Animation / Mouth Cavity

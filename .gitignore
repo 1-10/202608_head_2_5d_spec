@@ -1,6 +1,7 @@
 .claude/
 node_modules/
 dist/
+*.tsbuildinfo
 sample/
 *.local
 .DS_Store
