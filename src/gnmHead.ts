@@ -25,6 +25,12 @@ export interface GnmModel {
   expressionBasisQ: Int16Array; // (M,N,3) int16量子化
   expressionScales: Float32Array; // (M,)
   expressionNames: string[];
+  // 密対応 (MediaPipe 468点→GNM表面barycentric)。0 = 旧アセット (68点のみ)
+  denseCount: number;
+  denseMpIndices: Uint16Array; // (M,) MediaPipe landmark index
+  denseTriIndices: Uint32Array; // (M,3) GNM頂点index
+  denseBaryWeights: Float32Array; // (M,3)
+  denseFitWeights: Float32Array; // (M,) フィット重み (信頼度×領域重み)
 }
 
 /** MediaPipe FaceMesh 468点 → iBUG-68 の対応表 (顎17/眉10/鼻9/目12/口20)。 */
@@ -49,6 +55,7 @@ interface BinHeader {
   expressionBasisCount?: number;
   expressionBasisScales?: number[];
   expressionNames?: string[];
+  denseLandmarkCount?: number;
   landmarkCount: number;
   sections: Record<string, { offset: number; byteLength: number; dtype: string }>;
 }
@@ -104,6 +111,16 @@ export async function loadGnmModel(url = 'gnm/gnm_head_lite.bin'): Promise<GnmMo
       : new Int16Array(0),
     expressionScales: new Float32Array(header.expressionBasisScales ?? []),
     expressionNames: header.expressionNames ?? [],
+    denseCount: header.denseLandmarkCount ?? 0,
+    denseMpIndices: header.sections['denseMpIndices']
+      ? (() => {
+          const s = section('denseMpIndices');
+          return new Uint16Array(buf.slice(s.start, s.start + s.byteLength));
+        })()
+      : new Uint16Array(0),
+    denseTriIndices: header.sections['denseTriIndices'] ? u32('denseTriIndices') : new Uint32Array(0),
+    denseBaryWeights: header.sections['denseBaryWeights'] ? f32('denseBaryWeights') : new Float32Array(0),
+    denseFitWeights: header.sections['denseFitWeights'] ? f32('denseFitWeights') : new Float32Array(0),
   };
 }
 
@@ -125,20 +142,29 @@ export interface GnmFitResult {
   centerZ: number; // 頂点zの平均 (回転pivot用)
 }
 
-/** barycentricでGNMランドマーク位置を求める (係数適用済み頂点配列から)。 */
-function gnmLandmarkPositions(model: GnmModel, verts: Float32Array): Float32Array {
-  const n = model.landmarkIndices.length / 3;
-  const out = new Float32Array(n * 3);
-  for (let k = 0; k < n; k++) {
+/** barycentric対応 (indices (M,3) + weights (M,3)) で表面点位置を求める。 */
+function barycentricPositions(
+  verts: Float32Array,
+  indices: Uint32Array,
+  weights: Float32Array,
+  count: number,
+): Float32Array {
+  const out = new Float32Array(count * 3);
+  for (let k = 0; k < count; k++) {
     for (let j = 0; j < 3; j++) {
-      const vi = model.landmarkIndices[k * 3 + j];
-      const w = model.landmarkWeights[k * 3 + j];
+      const vi = indices[k * 3 + j];
+      const w = weights[k * 3 + j];
       out[k * 3 + 0] += verts[vi * 3 + 0] * w;
       out[k * 3 + 1] += verts[vi * 3 + 1] * w;
       out[k * 3 + 2] += verts[vi * 3 + 2] * w;
     }
   }
   return out;
+}
+
+/** HEAD_SPARSE_68のbarycentricでGNMランドマーク位置を求める。 */
+function gnmLandmarkPositions(model: GnmModel, verts: Float32Array): Float32Array {
+  return barycentricPositions(verts, model.landmarkIndices, model.landmarkWeights, model.landmarkIndices.length / 3);
 }
 
 /** identity係数を適用した頂点位置 (GNM座標系のまま)。 */
@@ -155,34 +181,45 @@ export function applyIdentity(model: GnmModel, coeffs: Float32Array): Float32Arr
   return out;
 }
 
-/** 2D相似フィット (最小二乗閉形式)。zはスケール共有でオフセットのみ合わせる。 */
-function fitSimilarity2D(src: Float32Array, dst: Float32Array, count: number): SimilarityTransform {
+/** 2D相似フィット (重み付き最小二乗閉形式)。zはスケール共有でオフセットのみ合わせる。 */
+function fitSimilarity2D(
+  src: Float32Array,
+  dst: Float32Array,
+  count: number,
+  weights: Float32Array | null = null,
+): SimilarityTransform {
+  const w = (i: number) => (weights ? weights[i] : 1);
+  let wSum = 0;
   let sxm = 0;
   let sym = 0;
   let dxm = 0;
   let dym = 0;
   for (let i = 0; i < count; i++) {
-    sxm += src[i * 3];
-    sym += src[i * 3 + 1];
-    dxm += dst[i * 3];
-    dym += dst[i * 3 + 1];
+    const wi = w(i);
+    wSum += wi;
+    sxm += src[i * 3] * wi;
+    sym += src[i * 3 + 1] * wi;
+    dxm += dst[i * 3] * wi;
+    dym += dst[i * 3 + 1] * wi;
   }
-  sxm /= count;
-  sym /= count;
-  dxm /= count;
-  dym /= count;
+  wSum = Math.max(1e-12, wSum);
+  sxm /= wSum;
+  sym /= wSum;
+  dxm /= wSum;
+  dym /= wSum;
 
   let dot = 0;
   let cross = 0;
   let norm = 0;
   for (let i = 0; i < count; i++) {
+    const wi = w(i);
     const ax = src[i * 3] - sxm;
     const ay = src[i * 3 + 1] - sym;
     const bx = dst[i * 3] - dxm;
     const by = dst[i * 3 + 1] - dym;
-    dot += ax * bx + ay * by;
-    cross += ax * by - ay * bx;
-    norm += ax * ax + ay * ay;
+    dot += (ax * bx + ay * by) * wi;
+    cross += (ax * by - ay * bx) * wi;
+    norm += (ax * ax + ay * ay) * wi;
   }
   const s = Math.hypot(dot, cross) / Math.max(1e-12, norm);
   const theta = Math.atan2(cross, dot);
@@ -192,8 +229,8 @@ function fitSimilarity2D(src: Float32Array, dst: Float32Array, count: number): S
   const ty = dym - s * (sin * sxm + cos * sym);
 
   let tz = 0;
-  for (let i = 0; i < count; i++) tz += dst[i * 3 + 2] - s * src[i * 3 + 2];
-  tz /= count;
+  for (let i = 0; i < count; i++) tz += (dst[i * 3 + 2] - s * src[i * 3 + 2]) * w(i);
+  tz /= wSum;
 
   return { s, cos, sin, tx, ty, tz };
 }
@@ -246,16 +283,23 @@ export function fitGnmToLandmarks(
   landmarks: NormalizedFaceLandmark[],
   identityReg: number,
 ): GnmFitResult {
-  const lmCount = MEDIAPIPE_IBUG68.length;
+  // 対応点: 密対応 (最大468点。目・口・輪郭の精度と横幅追従のため) があればそれを、
+  // 無ければ旧68点 (HEAD_SPARSE_68) を使う
+  const useDense = model.denseCount > 0;
+  const lmCount = useDense ? model.denseCount : MEDIAPIPE_IBUG68.length;
+  const corrIdx = useDense ? model.denseTriIndices : model.landmarkIndices;
+  const corrBary = useDense ? model.denseBaryWeights : model.landmarkWeights;
+  const fitWeights = useDense ? model.denseFitWeights : null;
+
   const targets = new Float32Array(lmCount * 3);
-  for (let k = 0; k < lmCount; k++) {
-    const lm = landmarks[MEDIAPIPE_IBUG68[k]];
-    targets[k * 3 + 0] = lm.x;
-    targets[k * 3 + 1] = lm.y;
-    targets[k * 3 + 2] = 0; // zはフィット対象外 (fitSimilarity2Dのtzは後で上書き)
+  for (let m = 0; m < lmCount; m++) {
+    const lm = landmarks[useDense ? model.denseMpIndices[m] : MEDIAPIPE_IBUG68[m]];
+    targets[m * 3 + 0] = lm.x;
+    targets[m * 3 + 1] = lm.y;
+    targets[m * 3 + 2] = 0; // zはフィット対象外 (fitSimilarity2Dのtzは後で上書き)
   }
 
-  // 各基底のランドマーク位置への寄与 (K,68,3) を先に射影しておく
+  // 各基底の対応点位置への寄与 (K,M,3) を先に射影しておく
   const k = model.basisCount;
   const lmBasis = new Float32Array(k * lmCount * 3);
   for (let i = 0; i < k; i++) {
@@ -263,15 +307,15 @@ export function fitGnmToLandmarks(
     const base = i * model.vertexCount * 3;
     for (let m = 0; m < lmCount; m++) {
       for (let j = 0; j < 3; j++) {
-        const vi = model.landmarkIndices[m * 3 + j];
-        const w = model.landmarkWeights[m * 3 + j] * scale;
+        const vi = corrIdx[m * 3 + j];
+        const w = corrBary[m * 3 + j] * scale;
         lmBasis[(i * lmCount + m) * 3 + 0] += model.basisQ[base + vi * 3 + 0] * w;
         lmBasis[(i * lmCount + m) * 3 + 1] += model.basisQ[base + vi * 3 + 1] * w;
         lmBasis[(i * lmCount + m) * 3 + 2] += model.basisQ[base + vi * 3 + 2] * w;
       }
     }
   }
-  const meanLm = gnmLandmarkPositions(model, model.positions); // 平均形状のLM位置 (固定)
+  const meanLm = barycentricPositions(model.positions, corrIdx, corrBary, lmCount); // 平均形状の対応点 (固定)
 
   // shapedLm(c) = meanLm + Σ cᵢ · lmBasisᵢ
   const shapedLm = (coeffs: Float32Array): Float32Array => {
@@ -285,7 +329,10 @@ export function fitGnmToLandmarks(
   };
 
   let coeffs = new Float32Array(k);
-  let sim = fitSimilarity2D(meanLm, targets, lmCount);
+  let sim = fitSimilarity2D(meanLm, targets, lmCount, fitWeights);
+
+  // coarse-to-fine: 前半の反復は強い正則化で大域 (サイズ・輪郭) を決め、後半で緩めて細部を追従させる
+  const lambdaSchedule = [3, 1, 0.3];
 
   for (let iter = 0; iter < FIT_ITERATIONS; iter++) {
     // 相似固定で絶対係数を解く: sim(meanLm + B c) = sim(meanLm) + sR·(B c)
@@ -305,22 +352,24 @@ export function fitGnmToLandmarks(
         A[(m * 2 + 1) * k + i] = sim.s * (sim.sin * bx + sim.cos * by);
       }
     }
-    // 正規方程式 (AᵀA + λI) c = Aᵀr
+    // 重み付き正規方程式 (AᵀWA + λI) c = AᵀWr
     const ata = new Float64Array(k * k);
     const atr = new Float64Array(k);
     for (let row = 0; row < rows; row++) {
-      const rv = r[row];
+      const rw = fitWeights ? fitWeights[row >> 1] : 1; // x/y行は同じ点重みを共有
+      const rv = r[row] * rw;
       for (let i = 0; i < k; i++) {
         const av = A[row * k + i];
         atr[i] += av * rv;
-        for (let j = 0; j <= i; j++) ata[i * k + j] += av * A[row * k + j];
+        for (let j = 0; j <= i; j++) ata[i * k + j] += av * A[row * k + j] * rw;
       }
     }
     for (let i = 0; i < k; i++) {
       for (let j = i + 1; j < k; j++) ata[i * k + j] = ata[j * k + i];
-      // 係数はz-scoreスケールなのでλはそのまま単位行列に足す。
+      // 係数はz-scoreスケール (公式デモが±3スライダーで直接使用しており確認済み) なので
+      // 一様な単位行列リッジがガウス事前分布として正しい。
       // 2D残差の典型スケール(≈1e-2)に対しGUI値1.0で程よく効くよう1e-3を掛ける。
-      ata[i * k + i] += identityReg * 1e-3;
+      ata[i * k + i] += identityReg * 1e-3 * lambdaSchedule[Math.min(iter, lambdaSchedule.length - 1)];
     }
     const solved = solveSPD(ata, atr, k);
     const next = new Float32Array(k);
@@ -328,7 +377,7 @@ export function fitGnmToLandmarks(
     coeffs = next;
 
     // 係数を反映した形状で相似を取り直す
-    sim = fitSimilarity2D(shapedLm(coeffs), targets, lmCount);
+    sim = fitSimilarity2D(shapedLm(coeffs), targets, lmCount, fitWeights);
   }
 
   // 最終頂点の生成とtzの決定: 鼻先(30)のzを既存reliefの鼻位置感覚(≈0.1)に合わせ、

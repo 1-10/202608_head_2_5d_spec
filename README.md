@@ -51,8 +51,10 @@ Webカメラ機能を使う場合はHTTPS、またはlocalhost経由でのアク
 
 ```bash
 git clone --depth 1 https://github.com/google/GNM.git /tmp/GNM
-python tools/export_gnm_assets.py /tmp/GNM/gnm/shape/data/versions/v3_0/gnm_head.npz
-# → public/gnm/gnm_head_lite.bin (約5MB) が生成される
+curl -LO https://raw.githubusercontent.com/google-ai-edge/mediapipe/master/mediapipe/modules/face_geometry/data/canonical_face_model.obj
+python tools/export_gnm_assets.py /tmp/GNM/gnm/shape/data/versions/v3_0/gnm_head.npz canonical_face_model.obj
+# → public/gnm/gnm_head_lite.bin (約8.5MB) が生成される
+# .obj (MediaPipe canonical face model) を省略すると468点密対応が省かれ、フィットが68点フォールバックになる
 ```
 
 ### その他コマンド
