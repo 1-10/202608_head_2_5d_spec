@@ -34,7 +34,9 @@ EXPRESSION_PICKS = {'left_eye_region': 10, 'right_eye_region': 10, 'lower_face_r
 # MediaPipe FaceMesh 468点 → iBUG-68 の対応表 (src/gnmHead.ts と同一の定数)。
 # 密対応構築時の初期整列 (Umeyama+TPS) の制御点に使う
 MEDIAPIPE_IBUG68 = [
-    162, 234, 93, 58, 172, 136, 149, 148, 152, 377, 378, 365, 397, 288, 323, 454, 389,
+    # 顎ライン。GNMのhead_sparse_68はiBUG 2〜6 (向かって左顎) を空間的に逆順
+    # (顎寄り→耳寄り) で定義しているため、MediaPipe側も149→93の逆順で合わせる
+    162, 234, 149, 136, 172, 58, 93, 148, 152, 377, 378, 365, 397, 288, 323, 454, 389,
     70, 63, 105, 66, 107, 336, 296, 334, 293, 300,
     168, 197, 5, 4, 75, 97, 2, 326, 305,
     33, 160, 158, 133, 153, 144, 362, 385, 387, 263, 373, 380,
@@ -136,6 +138,38 @@ def build_dense_correspondence(
 
     scale, r, t = umeyama_similarity(can68, gnm68)
     aligned = canonical @ (scale * r).T + t
+
+    # 対応表の並び検証: iBUGの連続チェーン (顎・眉・鼻・目・唇) に沿って、
+    # canonical側とGNM側の差分ベクトルが同方向 (内積>0) であることを確認する。
+    # 逆順セグメントがあると対応が交差し、TPSがそれを「正しく」補間して面が折り返る
+    # (実例: GNMのhead_sparse_68は左顎iBUG 2〜6が空間的に逆順。対応表側で逆順に合わせ済み)
+    chains = [
+        list(range(0, 17)),               # 顎
+        list(range(17, 22)),              # 眉左
+        list(range(22, 27)),              # 眉右
+        list(range(27, 31)),              # 鼻梁
+        list(range(31, 36)),              # 鼻底
+        list(range(36, 42)) + [36],       # 目左 (リング)
+        list(range(42, 48)) + [42],       # 目右 (リング)
+        list(range(48, 60)) + [48],       # 唇外周 (リング)
+        list(range(60, 68)) + [60],       # 唇内周 (リング)
+    ]
+    ctrl = aligned[MEDIAPIPE_IBUG68]
+    reversed_pairs = []
+    for chain in chains:
+        for a, b in zip(chain, chain[1:]):
+            dg = gnm68[b] - gnm68[a]
+            dc = ctrl[b] - ctrl[a]
+            # 近接点 (<1mm) は方向が定まらないため除外
+            if np.linalg.norm(dg) < 1e-3 or np.linalg.norm(dc) < 1e-3:
+                continue
+            if float(dg @ dc) < 0:
+                reversed_pairs.append((a, b))
+    if reversed_pairs:
+        detail = ', '.join(f'iBUG{a}-{b}' for a, b in reversed_pairs)
+        raise SystemExit(f'対応の並び反転を検出 ({len(reversed_pairs)}区間): {detail}\n'
+                         'MEDIAPIPE_IBUG68 の並びとGNM head_sparse_68 の並びを確認してください')
+
     # 68点対応を厳密一致させるTPSで残差 (頬・額のトポロジ差) を吸収する
     aligned = tps_warp(aligned[MEDIAPIPE_IBUG68], gnm68, aligned)
 
