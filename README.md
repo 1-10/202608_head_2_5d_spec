@@ -44,9 +44,10 @@ npm run dev
 `npm run dev`後、表示されたローカルURL(既定 `http://localhost:5173`)をブラウザで開いてください。
 Webカメラ機能を使う場合はHTTPS、またはlocalhost経由でのアクセスが必要です。
 
-### GNMアセットの生成 (Head Backend: GNM を使う場合のみ)
+### GNMアセットの再生成
 
-GNM Headのモデルファイルはリポジトリに含まれない。以下で生成する (Python + numpy が必要):
+生成済みの `public/gnm/gnm_head_lite.bin` (約8.5MB) はリポジトリに同梱している。
+成分数などを変えて再生成する場合のみ以下を実行する (Python + numpy が必要):
 
 ```bash
 git clone --depth 1 https://github.com/google/GNM.git /tmp/GNM
