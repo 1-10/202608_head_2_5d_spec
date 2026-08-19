@@ -21,6 +21,7 @@ export function applyDebugVisualization(gnmHead: GnmHeadBuild | null, params: Pa
   if (gnmHead.hairMesh) {
     (gnmHead.hairMesh.material as THREE.MeshStandardMaterial).wireframe = params.showWireframe;
   }
+  gnmHead.landmarkOverlay.visible = params.showLandmarks;
 }
 
 export function setupDebugGui(container: HTMLElement, params: Params, options: DebugGuiOptions): GUI {
@@ -111,6 +112,10 @@ export function setupDebugGui(container: HTMLElement, params: Params, options: D
   debugFolder
     .add(params, 'showWireframe')
     .name('Show Wireframe')
+    .onChange(() => applyDebugVisualization(options.getGnmHead(), params));
+  debugFolder
+    .add(params, 'showLandmarks')
+    .name('Show Landmarks')
     .onChange(() => applyDebugVisualization(options.getGnmHead(), params));
 
   return gui;

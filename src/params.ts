@@ -58,6 +58,8 @@ export interface Params {
 
   // --- デバッグ表示 ---
   showWireframe: boolean;
+  // 写真ランドマーク(色点)とGNM表面対応点からの残差(白線)の重畳表示
+  showLandmarks: boolean;
 
   // --- カメラ ---
   cameraFovDeg: number;
@@ -99,6 +101,7 @@ export const DEFAULT_PARAMS: Params = {
   blinkDurationMaxMs: 250,
 
   showWireframe: false,
+  showLandmarks: false,
 
   cameraFovDeg: 30,
   cameraDistanceRatio: 3.4,
