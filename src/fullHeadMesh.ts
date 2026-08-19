@@ -28,11 +28,45 @@ import { applyFlatNormals } from './meshUtils';
 import { rasterizeMaskCanvas, type SegmentationResult } from './personSegmentation';
 import type { FullHeadMode, Params } from './params';
 
-/** 実測ソース一式。取得に失敗したものはnull (その項目はヒューリスティックへフォールバック)。 */
+/**
+ * 実測/ニューラルソース一式。取得に失敗した(または未取得の)ものはnull。
+ * NEURAL系がnullのままNEURALを選ぶとMEASURED系へ、それもnullなら
+ * 楕円/ヒューリスティックへフォールバックする。
+ */
 export interface MeasuredHeadData {
-  segmentation: SegmentationResult | null;
-  depth: ScalarField | null; // 相対Depth (0-1)
+  segmentation: SegmentationResult | null; // MediaPipe SelfieMulticlass
+  depth: ScalarField | null; // ARPortraitDepth 相対Depth (0-1)
   depthFit: { scale: number; offset: number } | null; // 相対Depth→モデル空間Z
+  neuralSegmentation: SegmentationResult | null; // BiRefNet×MediaPipe合成 (遅延取得)
+  neuralDepth: ScalarField | null; // Depth Anything V2 (遅延取得)
+  neuralDepthFit: { scale: number; offset: number } | null;
+}
+
+/** maskSourceに応じたセグメンテーションを選ぶ (NEURAL未取得時はMEASUREDへフォールバック)。 */
+export function selectSegmentation(ctx: FullHeadBuildContext, params: Params): SegmentationResult | null {
+  const m = ctx.measured;
+  if (!m) return null;
+  if (params.maskSource === 'NEURAL') return m.neuralSegmentation ?? m.segmentation;
+  if (params.maskSource === 'MEASURED') return m.segmentation;
+  return null;
+}
+
+function selectDepth(
+  ctx: FullHeadBuildContext,
+  params: Params,
+): { depth: ScalarField; fit: { scale: number; offset: number } } | null {
+  const m = ctx.measured;
+  if (!m) return null;
+  if (params.depthSource === 'NEURAL') {
+    if (m.neuralDepth && m.neuralDepthFit) return { depth: m.neuralDepth, fit: m.neuralDepthFit };
+    if (m.depth && m.depthFit) return { depth: m.depth, fit: m.depthFit };
+    return null;
+  }
+  if (params.depthSource === 'MEASURED') {
+    if (m.depth && m.depthFit) return { depth: m.depth, fit: m.depthFit };
+    return null;
+  }
+  return null;
 }
 
 export interface FullHeadBuildContext {
@@ -109,9 +143,10 @@ function createVertexEvaluator(ctx: FullHeadBuildContext, ellipse: HeadMaskEllip
   const headTopY = ellipse.cy + ellipse.ry;
   const blendWidth = params.blendWidthRatio;
 
-  const seg = params.maskSource === 'MEASURED' ? (ctx.measured?.segmentation ?? null) : null;
-  const depth = params.depthSource === 'MEASURED' ? (ctx.measured?.depth ?? null) : null;
-  const depthFit = params.depthSource === 'MEASURED' ? (ctx.measured?.depthFit ?? null) : null;
+  const seg = selectSegmentation(ctx, params);
+  const selected = selectDepth(ctx, params);
+  const depth = selected?.depth ?? null;
+  const depthFit = selected?.fit ?? null;
   const useMeasuredDepth = depth !== null && depthFit !== null;
 
   return (x: number, y: number, u: number, v: number): VertexChannels => {
@@ -161,7 +196,7 @@ function computeGridBounds(
   ellipse: HeadMaskEllipse,
   params: Params,
 ): { xMin: number; xMax: number; yMin: number; yMax: number } {
-  const seg = params.maskSource === 'MEASURED' ? (ctx.measured?.segmentation ?? null) : null;
+  const seg = selectSegmentation(ctx, params);
   if (seg) {
     const uvBounds = fieldBoundsUv(seg.head, 0.1);
     if (uvBounds) {
@@ -244,9 +279,9 @@ export function buildHeadGridGeometry(ctx: FullHeadBuildContext, texture: THREE.
   geometry.setIndex(new THREE.BufferAttribute(indices, 1));
   applyFlatNormals(geometry);
 
-  const seg = params.maskSource === 'MEASURED' ? (ctx.measured?.segmentation ?? null) : null;
+  const seg = selectSegmentation(ctx, params);
   const maskCanvas = seg
-    ? rasterizeMaskCanvas(seg.head)
+    ? rasterizeMaskCanvas(seg.head, seg.head.width >= 512 ? 1024 : 512)
     : rasterizeHeadMaskCanvas(ellipse, ctx.headCenterPx, ctx.faceWidthPx, ctx.imageWidth, ctx.imageHeight);
   const alphaTexture = new THREE.CanvasTexture(maskCanvas);
   alphaTexture.wrapS = THREE.ClampToEdgeWrapping;

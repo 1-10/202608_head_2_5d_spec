@@ -314,14 +314,15 @@ export function setupDebugGui(container: HTMLElement, params: Params, options: D
   };
 
   const sourceFolder = gui.addFolder('Data Sources');
+  // MEASURED=Google公式モデル(商用クリーン) / NEURAL=BiRefNet・DepthAnythingV2(高品質・比較用) / 旧方式
   sourceFolder
-    .add(params, 'maskSource', ['MEASURED', 'ELLIPSE'])
+    .add(params, 'maskSource', ['MEASURED', 'NEURAL', 'ELLIPSE'])
     .name('Mask Source')
     .onChange(() => {
       options.onSourceChanged();
     });
   sourceFolder
-    .add(params, 'depthSource', ['MEASURED', 'HEURISTIC'])
+    .add(params, 'depthSource', ['MEASURED', 'NEURAL', 'HEURISTIC'])
     .name('Depth Source')
     .onChange(() => {
       options.onSourceChanged();
