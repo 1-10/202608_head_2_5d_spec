@@ -4,10 +4,12 @@
 
 export type FullHeadMode = 'HEAD_DEPTH_ONLY' | 'FACE_HEAD' | 'FACE_HEAD_HAIR';
 
-// FULL HEADのデータ供給源。MEASURED = 実測(Segmenter/ARPortraitDepth)、
-// ELLIPSE/HEURISTIC = 従来の楕円+ヒューリスティック (比較用に残す)。
-export type MaskSource = 'MEASURED' | 'ELLIPSE';
-export type DepthSource = 'MEASURED' | 'HEURISTIC';
+// FULL HEADのデータ供給源。
+// MEASURED = Google公式モデル (SelfieMulticlass / ARPortraitDepth。学習データまで商用クリーン)
+// NEURAL   = 高品質ニューラル (BiRefNet / Depth Anything V2。重みは商用可だが学習データはグレー。比較用)
+// ELLIPSE/HEURISTIC = 楕円+ヒューリスティック (旧方式。比較用)
+export type MaskSource = 'MEASURED' | 'NEURAL' | 'ELLIPSE';
+export type DepthSource = 'MEASURED' | 'NEURAL' | 'HEURISTIC';
 
 export interface Params {
   // --- GUIへ露出する主要パラメータ（spec: 品質比較用UI表） ---

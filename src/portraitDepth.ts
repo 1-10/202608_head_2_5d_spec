@@ -86,7 +86,8 @@ export class PortraitDepthEstimator {
 const CORE_ERODE_ITERATIONS = 2; // 境界の混合画素(halo)を信頼しない幅
 const SMOOTH_PASSES = 2; // 3x3 box blurの回数
 
-function cleanupDepthField(depth: ScalarField, personMask: ScalarField): void {
+/** Depth場のシルエット際halo/外れ値対策 (erode→clamp→前景dilation→平滑化)。他のDepth供給源からも使う。 */
+export function cleanupDepthField(depth: ScalarField, personMask: ScalarField): void {
   const { width, height, data, rect } = depth;
   const total = width * height;
 
@@ -195,18 +196,19 @@ function cleanupDepthField(depth: ScalarField, personMask: ScalarField): void {
   }
 }
 
-/** 頭部中心にモデルアスペクト比のcrop矩形を取る (顔幅の約3.2倍を横幅目安)。 */
-function computeHeadCrop(
+/** 頭部中心に指定アスペクト比(w/h)のcrop矩形を取る (顔幅の約3.2倍を横幅目安)。 */
+export function computeHeadCrop(
   imageWidth: number,
   imageHeight: number,
   headCenterPx: { x: number; y: number },
   faceWidthPx: number,
+  aspect: number = MODEL_ASPECT,
 ): { x: number; y: number; w: number; h: number } {
   let w = Math.min(imageWidth, faceWidthPx * 3.2);
-  let h = w / MODEL_ASPECT;
+  let h = w / aspect;
   if (h > imageHeight) {
     h = imageHeight;
-    w = h * MODEL_ASPECT;
+    w = h * aspect;
   }
   // 頭頂側に多め(0.55)・顎下側に少なめの余白で配置
   let x = headCenterPx.x - w / 2;

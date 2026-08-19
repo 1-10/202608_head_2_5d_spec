@@ -18,6 +18,8 @@
   シルエット・髪マスク・頭部Depthの供給源はGUIで切替できる:
   - `MEASURED`(既定): MediaPipe Image Segmenter (SelfieMulticlass)による実測シルエット/髪マスク +
     TensorFlow.js ARPortraitDepthによる実測人物Depth(前景dilation・外れ値clamp・平滑化済み)
+  - `NEURAL`: MODNetのアルファマット(MediaPipeの意味分けと合成) + Depth Anything V2 SmallのDepth。
+    選択時に初めてtransformers.jsごと遅延ロードする(下記ライセンス注意を参照)
   - `ELLIPSE` / `HEURISTIC`: 楕円近似 + 擬似Head Depth(旧方式。品質比較用に残置)
 - 左右いずれかのビューをドラッグすると、両ビューが同じYaw(±可変)/Pitch角に同期回転
 - 周期的なBlink(目パチ)アニメーション
@@ -47,12 +49,18 @@ npm run preview  # ビルド結果のプレビュー
 - Three.js (WebGL, CPU側でgeometry頂点を生成・更新する方式)
 - MediaPipe Face Landmarker / Image Segmenter (SelfieMulticlass) (`@mediapipe/tasks-vision`)
 - TensorFlow.js ARPortraitDepth (`@tensorflow-models/depth-estimation`)
+- transformers.js (`@huggingface/transformers`): Depth Anything V2 Small / MODNet (NEURALソース選択時のみ遅延ロード)
 - Delaunator (Face Mesh topologyのDelaunay三角形分割)
 - lil-gui (品質比較用パラメータパネル)
 - Vite + TypeScript
 
-採用しているMLモデルはすべてGoogle公式配布(Apache-2.0)で、モデルカード上、
-学習データもGoogle自社収集(同意取得済み)のもののみ。学習データまで商用クリーンな構成。
+### モデルのライセンス
+
+- `MEASURED`系 (MediaPipe / ARPortraitDepth): すべてGoogle公式配布(Apache-2.0)で、モデルカード上、
+  学習データもGoogle自社収集(同意取得済み)のもののみ。**学習データまで商用クリーン**
+- `NEURAL`系 (Depth Anything V2 Small / MODNet): **重みは商用可**(Apache-2.0)だが、
+  学習データに非商用/非開示のもの(VKITTI2, SA-1B, 私有データ等)を含む。
+  MEASURED系との**品質比較・評価用**の位置づけ。商用出荷物に含める場合は要法務判断
 
 ## ディレクトリ構成
 
@@ -67,6 +75,7 @@ src/
   fields.ts        # 画像UV空間の2Dスカラー場 (マスク・Depthの共通表現)
   personSegmentation.ts # MediaPipe SelfieMulticlassによる実測シルエット/髪マスク
   portraitDepth.ts # TF.js ARPortraitDepthによる実測人物Depthとクリーンアップ
+  neuralSources.ts # Depth Anything V2 / MODNet (NEURALソース。遅延ロード)
   headMask.ts      # 頭部シルエットマスク(楕円近似。比較用フォールバック)
   headDepth.ts     # Pseudo Head Depth / Edge Rolloff / Face-Head Blend / Hair Volume
   meshUtils.ts     # メッシュ共通処理 (法線+Z固定など)

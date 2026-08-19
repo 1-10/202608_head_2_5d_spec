@@ -102,6 +102,7 @@ class Viewport {
 
 interface SceneState {
   ctx: FullHeadBuildContext;
+  sourceCanvas: HTMLCanvasElement; // NEURAL系の遅延推論で再利用する入力画像
   normalized: NormalizedFaceResult;
   faceOnly: FaceOnlyBuild;
   fullHead: FullHeadBuild;
@@ -142,6 +143,12 @@ const inputManager = new InputManager(els.video);
 const faceDetector = new FaceDetector();
 const personSegmenter = new PersonSegmenter();
 const portraitDepth = new PortraitDepthEstimator();
+
+// NEURAL系 (transformers.js) はモデル・ランタイムとも大きいため、
+// ソースとして選択されて初めてdynamic importする。
+let neuralModule: typeof import('./neuralSources') | null = null;
+let neuralDepthEst: import('./neuralSources').NeuralDepthEstimator | null = null;
+let neuralMatteEst: import('./neuralSources').NeuralMatteEstimator | null = null;
 
 let sceneState: SceneState | null = null;
 let yawDeg = 0;
@@ -228,8 +235,15 @@ async function acquireMeasuredData(
   captured: CapturedImage,
   normalized: NormalizedFaceResult,
   faceZFinal: Float32Array,
-): Promise<MeasuredHeadData | null> {
-  const measured: MeasuredHeadData = { segmentation: null, depth: null, depthFit: null };
+): Promise<MeasuredHeadData> {
+  const measured: MeasuredHeadData = {
+    segmentation: null,
+    depth: null,
+    depthFit: null,
+    neuralSegmentation: null,
+    neuralDepth: null,
+    neuralDepthFit: null,
+  };
 
   try {
     setStatus('頭部をセグメントしています…');
@@ -261,8 +275,75 @@ async function acquireMeasuredData(
     }
   }
 
-  if (!measured.segmentation && !measured.depth) return null;
   return measured;
+}
+
+let neuralAcquisitionBusy = false;
+
+/**
+ * NEURALソース (BiRefNetマット / Depth Anything V2) を必要時に遅延取得する。
+ * モデルDLが大きい(数十〜数百MB)ため、ソースとして選択されて初めてロードする。
+ * 取得済みならそのまま、未取得なら推論してctx.measuredへ格納し、FULL HEADを再構築する。
+ */
+async function ensureNeuralSources(): Promise<void> {
+  if (!sceneState || neuralAcquisitionBusy) return;
+  const s = sceneState;
+  const m = s.ctx.measured;
+  if (!m) return;
+
+  const needMatte = params.maskSource === 'NEURAL' && !m.neuralSegmentation;
+  const needDepth = params.depthSource === 'NEURAL' && !m.neuralDepth;
+  if (!needMatte && !needDepth) return;
+
+  neuralAcquisitionBusy = true;
+  try {
+    const mod = (neuralModule ??= await import('./neuralSources'));
+
+    if (needMatte) {
+      if (!m.segmentation) {
+        setStatus('NEURALマスクにはMediaPipeセグメンテーションが必要です (意味分けに使用)。', true);
+      } else {
+        setStatus('BiRefNetでマットを推定しています… (初回はモデルDLで時間がかかります)');
+        neuralMatteEst ??= new mod.NeuralMatteEstimator();
+        await neuralMatteEst.init();
+        const matte = await neuralMatteEst.estimate(s.sourceCanvas);
+        m.neuralSegmentation = mod.refineSegmentationWithMatte(m.segmentation, matte);
+      }
+    }
+
+    if (needDepth) {
+      const personMask = m.neuralSegmentation?.person ?? m.segmentation?.person ?? null;
+      if (!personMask) {
+        setStatus('NEURAL Depthには人物マスクが必要です (セグメンテーション取得失敗)。', true);
+      } else {
+        setStatus('Depth Anything V2でDepthを推定しています… (初回はモデルDLで時間がかかります)');
+        neuralDepthEst ??= new mod.NeuralDepthEstimator();
+        await neuralDepthEst.init();
+        const field = await neuralDepthEst.estimate(
+          s.sourceCanvas,
+          personMask,
+          s.normalized.headCenterPx,
+          s.normalized.faceWidth,
+        );
+        const fit = fitDepthToModelSpace(field, s.normalized.landmarks, s.ctx.faceZFinal);
+        if (fit) {
+          m.neuralDepth = field;
+          m.neuralDepthFit = fit;
+        } else {
+          setStatus('NEURAL Depthのフィットに失敗しました。MEASUREDへフォールバックします。', true);
+        }
+      }
+    }
+
+    rebuildFullHead();
+    if (!els.status.classList.contains('error')) setStatus('');
+  } catch (err) {
+    console.error('NEURALソースの取得に失敗しました。', err);
+    setStatus('NEURALソースの取得に失敗しました。フォールバックで表示しています。', true);
+    rebuildFullHead();
+  } finally {
+    neuralAcquisitionBusy = false;
+  }
 }
 
 async function processImage(captured: CapturedImage): Promise<void> {
@@ -330,6 +411,7 @@ async function processImage(captured: CapturedImage): Promise<void> {
 
     sceneState = {
       ctx,
+      sourceCanvas: captured.canvas,
       normalized,
       faceOnly,
       fullHead,
@@ -355,13 +437,16 @@ async function processImage(captured: CapturedImage): Promise<void> {
     updatePitch(0);
     applyDebugVisualization(sceneState, params);
 
-    if (!measured) {
+    if (!measured.segmentation && !measured.depth) {
       setStatus('実測ソースを取得できず、ヒューリスティック方式で表示しています。', true);
     } else if (!measured.depth) {
       setStatus('Depth計測に失敗したため、シルエットのみ実測を使用しています。');
     } else {
       setStatus('');
     }
+
+    // NEURALソースが選択済みの状態で新しい画像が来た場合は遅延取得を開始する
+    void ensureNeuralSources();
   } catch (err) {
     if (err instanceof FaceDetectionError) {
       setStatus(err.message, true);
@@ -484,7 +569,11 @@ window.addEventListener('resize', () => {
 // --- GUIパラメータパネル ---
 const debugGui = setupDebugGui(els.guiContainer, params, {
   onDepthParamsChanged: () => rebuildDepthOnly(),
-  onSourceChanged: () => rebuildFullHead(),
+  onSourceChanged: () => {
+    // まず取得済みソースで即時再構築し、NEURAL系が未取得なら裏で取得して再構築する
+    rebuildFullHead();
+    void ensureNeuralSources();
+  },
   onYawRangeChanged: () => updateYaw(yawDeg),
   onPitchRangeChanged: () => updatePitch(pitchDeg),
   getSceneState: () => sceneState,
