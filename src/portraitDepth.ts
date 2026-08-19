@@ -1,12 +1,11 @@
 // TF.js ARPortraitDepth による実測人物Depth。
-// 楕円Pseudo Head Depthを置き換える「計測された頭部凹凸」の供給源。
+// GNM髪シェルの厚み推定に使う「計測された頭部凹凸」の供給源。
 // モデルはGoogle自前収集データで学習・Apache-2.0 (学習データまで商用クリーン)。
 // すべての処理はブラウザ内 (WebGL) で完結し、画像を外部へ送信しない。
 
 import '@tensorflow/tfjs-backend-webgl';
 import * as depthEstimation from '@tensorflow-models/depth-estimation';
 import { sampleField, type ScalarField } from './fields';
-import type { NormalizedFaceLandmark } from './faceTopology';
 
 // ARPortraitDepthの入力解像度 (h x w = 256 x 192)。crop比率をこれに合わせる。
 const MODEL_ASPECT = 192 / 256; // w / h
@@ -216,40 +215,4 @@ export function computeHeadCrop(
   x = Math.min(Math.max(0, x), imageWidth - w);
   y = Math.min(Math.max(0, y), imageHeight - h);
   return { x: Math.round(x), y: Math.round(y), w: Math.round(w), h: Math.round(h) };
-}
-
-/**
- * 相対Depth (0-1) をモデル空間Z (faceWidth正規化・手前が+) へ写像する係数を、
- * 顔ランドマーク位置のDepthサンプルと既存Face Depth (faceZFinal) の最小二乗フィットで求める。
- * z ≈ scale * d + offset
- */
-export function fitDepthToModelSpace(
-  depth: ScalarField,
-  landmarks: NormalizedFaceLandmark[],
-  faceZFinal: Float32Array,
-): { scale: number; offset: number } | null {
-  let n = 0;
-  let sumD = 0;
-  let sumZ = 0;
-  let sumDD = 0;
-  let sumDZ = 0;
-  for (let i = 0; i < landmarks.length; i++) {
-    const lm = landmarks[i];
-    const { u0, v0, u1, v1 } = depth.rect;
-    if (lm.u < u0 || lm.u > u1 || lm.v < v0 || lm.v > v1) continue;
-    const d = sampleField(depth, lm.u, lm.v);
-    const z = faceZFinal[i];
-    n++;
-    sumD += d;
-    sumZ += z;
-    sumDD += d * d;
-    sumDZ += d * z;
-  }
-  if (n < 20) return null;
-  const denom = n * sumDD - sumD * sumD;
-  if (Math.abs(denom) < 1e-9) return null;
-  const scale = (n * sumDZ - sumD * sumZ) / denom;
-  const offset = (sumZ - scale * sumD) / n;
-  if (!Number.isFinite(scale) || !Number.isFinite(offset)) return null;
-  return { scale, offset };
 }

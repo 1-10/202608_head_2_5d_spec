@@ -1,16 +1,17 @@
-// GNM Headバックエンドのメッシュ構築 (真3D頭部 + 実測髪シェルのハイブリッド)。
+// GNM Headのメッシュ構築 (真3D頭部 + 実測髪シェルのハイブリッド)。
 //
 // 構成:
 // - Head: GNMフィット結果の真3Dメッシュ。正面写真を頂点UVへ平行投影し、
 //   背面/グレージング/シルエット外は「マスク内へクランプした写真色」(頂点色) へフェード。
 // - Hair Shell: 実測髪マスク+実測Depthの前面シェルをGNMの手前に重ねる。
-//   Depthのスケールは既存reliefのfaceZFinalではなく「フィット済GNM表面のz」へ
-//   最小二乗で合わせる (頭部が実比率の奥行きを持つため)。
+//   Depthのスケールは「フィット済GNM表面のz」へ最小二乗で合わせる
+//   (頭部が実比率の奥行きを持つため)。
 // - 髪で覆われた人は髪シェルのalphaがGNMの耳/頭皮を手前で隠し、
 //   耳が出ている人はGNMの真3D耳が見える (Z順で自動解決。ケース分岐なし)。
 
 import * as THREE from 'three';
 import { sampleField, fieldBoundsUv, type ScalarField } from './fields';
+import type { NormalizedFaceLandmark } from './faceTopology';
 import {
   MEDIAPIPE_IBUG68,
   applySimilarityInPlace,
@@ -21,11 +22,48 @@ import {
 } from './gnmHead';
 import { GNM_EXPRESSION_PRESETS } from './gnmExpressions';
 import { applyResidualWarp, fillNostrils } from './gnmRefine';
-import { smoothstep } from './headDepth';
-import { applyFlatNormals, buildGridIndices } from './meshUtils';
-import { rasterizeMaskCanvas } from './personSegmentation';
-import { selectDepth, selectSegmentation, type FullHeadBuildContext } from './fullHeadMesh';
+import { applyFlatNormals, buildGridIndices, smoothstep } from './meshUtils';
+import { rasterizeMaskCanvas, type SegmentationResult } from './personSegmentation';
 import type { Params } from './params';
+
+/**
+ * 実測/ニューラルソース一式。取得に失敗した(または未取得の)ものはnull。
+ * NEURAL系がnullのままNEURALを選ぶとMEASURED系へフォールバックする。
+ */
+export interface MeasuredHeadData {
+  segmentation: SegmentationResult | null; // MediaPipe SelfieMulticlass
+  depth: ScalarField | null; // ARPortraitDepth 相対Depth (0-1)
+  neuralSegmentation: SegmentationResult | null; // BiRefNet×MediaPipe合成 (遅延取得)
+  neuralDepth: ScalarField | null; // Depth Anything V2 (遅延取得)
+}
+
+/** GNM頭部の構築に必要な入力一式 (画像1枚から導出される)。 */
+export interface GnmBuildContext {
+  landmarks: NormalizedFaceLandmark[];
+  headCenterPx: { x: number; y: number };
+  faceWidthPx: number;
+  imageWidth: number;
+  imageHeight: number;
+  measured: MeasuredHeadData | null;
+}
+
+/** maskSourceに応じたセグメンテーションを選ぶ (NEURAL未取得時はMEASUREDへフォールバック)。 */
+export function selectSegmentation(ctx: GnmBuildContext, params: Params): SegmentationResult | null {
+  const m = ctx.measured;
+  if (!m) return null;
+  if (params.maskSource === 'NEURAL') return m.neuralSegmentation ?? m.segmentation;
+  if (params.maskSource === 'MEASURED') return m.segmentation;
+  return null;
+}
+
+/** depthSourceに応じたDepth場を選ぶ (NEURAL未取得時はMEASUREDへフォールバック)。 */
+export function selectDepth(ctx: GnmBuildContext, params: Params): ScalarField | null {
+  const m = ctx.measured;
+  if (!m) return null;
+  if (params.depthSource === 'NEURAL') return m.neuralDepth ?? m.depth;
+  if (params.depthSource === 'MEASURED') return m.depth;
+  return null;
+}
 
 export interface GnmHeadBuild {
   group: THREE.Group;
@@ -49,7 +87,7 @@ const UV_CLAMP_STEPS = 80; // シルエット外UVを頭部中心へ歩かせる
 
 export function buildGnmHead(
   model: GnmModel,
-  ctx: FullHeadBuildContext,
+  ctx: GnmBuildContext,
   sourceCanvas: HTMLCanvasElement,
   texture: THREE.Texture,
   params: Params,
@@ -135,7 +173,7 @@ export function buildGnmHead(
   geometry.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
   geometry.setAttribute('aFallback', new THREE.BufferAttribute(fallback, 3));
   geometry.setAttribute('aPhotoW', new THREE.BufferAttribute(photoW, 1));
-  applyFlatNormals(geometry); // reliefと同じ「写真の陰影のみ」のライティング方針に揃える
+  applyFlatNormals(geometry); // ライティングは「写真の陰影のみ」の方針 (偽の影の帯を防ぐ)
 
   const headMaterial = new THREE.MeshStandardMaterial({
     map: texture,
@@ -149,7 +187,7 @@ export function buildGnmHead(
   // --- Hair shell (実測髪マスク+実測Depth) ---
   const hair = buildHairShell(ctx, texture, fit, params);
 
-  // 回転pivotは頭部の重心z (真3Dなのでreliefのpivot比率ではなく実重心を使う)
+  // 回転pivotは頭部の実重心z (真3Dのため固定比率ではなく実測で決める)
   const pivotZ = fit.centerZ;
   headMesh.position.z = -pivotZ;
   if (hair) hair.mesh.position.z = -pivotZ;
@@ -282,15 +320,14 @@ interface HairShellBuild {
  * モデル空間zへ写像する (実比率スケール)。
  */
 function buildHairShell(
-  ctx: FullHeadBuildContext,
+  ctx: GnmBuildContext,
   texture: THREE.Texture,
   fit: GnmFitResult,
   params: Params,
 ): HairShellBuild | null {
   const seg = selectSegmentation(ctx, params);
-  const selected = selectDepth(ctx, params);
-  if (!seg || !selected) return null;
-  const depth = selected.depth;
+  const depth = selectDepth(ctx, params);
+  if (!seg || !depth) return null;
 
   const hairFit = fitDepthToGnmZ(depth, ctx, fit);
   if (!hairFit) return null;
@@ -307,8 +344,8 @@ function buildHairShell(
   const yMin = toY(uvBounds.vMin) - marginY;
   const yMax = toY(uvBounds.vMax) + marginY;
 
-  const cols = params.headGridCols;
-  const rows = params.headGridRows;
+  const cols = params.hairGridCols;
+  const rows = params.hairGridRows;
   const positions = new Float32Array(cols * rows * 3);
   const uvs = new Float32Array(cols * rows * 2);
   const maskPerVertex = new Float32Array(cols * rows);
@@ -401,7 +438,7 @@ function buildHairShell(
     roughness: 0.95,
     metalness: 0.0,
     side: THREE.DoubleSide,
-    // GRIDより高め: シェル縁は頭蓋の外に浮くため、feather裾の薄い断面が
+    // シェル縁は頭蓋の外に浮くため、feather裾の薄い断面が
     // グレージング視で筋状に見える。裾を早めに切って背後のGNMに任せる
     alphaTest: 0.3,
   });
@@ -485,7 +522,7 @@ function buildScalpZBuffer(
 /** 相対Depth→モデル空間z (GNM表面スケール) の線形フィット。68点ランドマークで解く。 */
 function fitDepthToGnmZ(
   depth: ScalarField,
-  ctx: FullHeadBuildContext,
+  ctx: GnmBuildContext,
   fit: GnmFitResult,
 ): { scale: number; offset: number } | null {
   let n = 0;

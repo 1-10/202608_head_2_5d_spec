@@ -1,11 +1,10 @@
-// GNM Head (github.com/google/GNM, Apache-2.0) による真3D頭部バックエンドの
+// GNM Head (github.com/google/GNM, Apache-2.0) による真3D頭部の
 // アセット読込と写真へのフィッティング。
 //
 // - アセットは tools/export_gnm_assets.py が生成する gnm_head_lite.bin
 //   (skin_exterior+eye_exteriorsサブセット / identity基底上位64成分int16 / iBUG-68 barycentric)
 // - フィットは「2D相似 (x,y) + identity係数の正則化最小二乗」を交互に数回。
-//   zは相似の等方スケールに従う (=頭部は実比率の奥行きを持つ)。既存reliefの
-//   平坦化されたfaceZFinalにはフィットさせない — それがGNM導入の目的のため。
+//   zは相似の等方スケールに従う (=頭部は実比率の奥行きを持つ)。
 // - MediaPipe 468点からiBUG-68への対応表はコミュニティで広く使われる定数。
 
 import type { NormalizedFaceLandmark } from './faceTopology';
@@ -402,8 +401,8 @@ export function fitGnmToLandmarks(
     sim = fitSimilarity2D(shapedLm(coeffs), targets, lmCount, fitWeights);
   }
 
-  // 最終頂点の生成とtzの決定: 鼻先(30)のzを既存reliefの鼻位置感覚(≈0.1)に合わせ、
-  // カメラフレーミングをGRIDバックエンドと揃える。
+  // 最終頂点の生成とtzの決定: 鼻先(30)のzをモデル空間の基準位置(≈0.1)に置き、
+  // カメラフレーミングを画像・パラメータによらず一定に保つ。
   const vertices = applyIdentity(model, coeffs);
   const finalLm = gnmLandmarkPositions(model, vertices);
   const noseZGnm = finalLm[30 * 3 + 2];

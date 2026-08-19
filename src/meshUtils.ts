@@ -2,13 +2,17 @@
 
 import * as THREE from 'three';
 
+export function smoothstep(edge0: number, edge1: number, x: number): number {
+  const t = Math.min(1, Math.max(0, (x - edge0) / (edge1 - edge0)));
+  return t * t * (3 - 2 * t);
+}
+
 /**
  * 全頂点の法線を+Z(正面)に固定する。
- * 写真テクスチャのrelief表示では、Depth段差(生え際・輪郭)の斜面が
+ * 写真テクスチャの表示では、Depth段差(生え際・輪郭)の斜面が
  * ジオメトリ陰影で「偽の影の帯」として見えてしまう。
  * 法線を+Zへ固定するとライティング応答が全頂点で一様になり、
  * 立体感はテクスチャ(写真の陰影)と視差だけで表現される。
- * FACE ONLY / FULL HEAD両方に適用し、比較の公平性を保つ。
  */
 export function applyFlatNormals(geometry: THREE.BufferGeometry): void {
   const count = (geometry.getAttribute('position') as THREE.BufferAttribute).count;

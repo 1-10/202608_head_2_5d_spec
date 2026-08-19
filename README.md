@@ -1,38 +1,41 @@
 # 202608_head_2_5d_spec
 
-1枚の正面人物写真から、MediaPipe Face Landmarkerと古典的なDepth補間だけで疑似3D頭部を生成し、
-`FACE ONLY`(顔メッシュのみ)と`FULL HEAD`(頭部シルエット・髪ボリュームを含む1枚の連続メッシュ)を
-同一画面で左右比較できる、品質検証用WebGLプロトタイプです。
-
-詳細な設計方針・アルゴリズムは [claude_code_head_2_5d_spec.md](./claude_code_head_2_5d_spec.md) を参照してください。
+1枚の正面人物写真から、Google GNM Head (真3Dパラメトリック頭部モデル, Apache-2.0) を
+468点顔ランドマークへフィットし、写真を投影テクスチャとして貼った疑似3D頭部を
+ブラウザ内で生成・アニメーションさせるWebGLプロトタイプです。
 
 3D Gaussian Splatting・NeRF・Diffusion・Novel View Synthesis・生成AIによる不可視領域補完は使用していません。
 すべての処理はブラウザ内(クライアントサイド)で完結し、画像を外部サーバーへ送信することはありません。
 
+初期の2.5D relief方式 (FACE ONLY / FULL HEAD比較プロトタイプ) の設計資料は
+[claude_code_head_2_5d_spec.md](./claude_code_head_2_5d_spec.md) に残っていますが、
+実装はGNM方式へ完全移行済みです。
+
 ## できること
 
 - Webカメラ撮影 / ローカル画像ファイルからの正面写真入力
-- MediaPipe Face Landmarkerによる顔ランドマーク検出
-- `FACE ONLY`: 顔ランドマークとcanonicalな顔Depth profileを混合した2.5D顔メッシュ
-- `FULL HEAD`: 頭部全体の連続メッシュ(`HEAD DEPTH ONLY` / `FACE + HEAD` / `FACE + HEAD + HAIR VOLUME`の3モード)。
-  シルエット・髪マスク・頭部Depthの供給源はGUIで切替できる:
+- MediaPipe Face Landmarkerによる顔ランドマーク検出 (468点)
+- GNM Headのフィッティングと描画:
+  - 468点密対応 (barycentric) の正則化最小二乗フィット (GUIで68点フィットと比較可)
+  - 残差ワープ: identity係数では張り切れない目・唇の位置残差をneutral頂点へ焼き込み、
+    まばたき・開口が写真の目・口の位置で起こる
+  - 鼻孔の内壁を平滑化で封止 (穴のジオメトリは不要 — 写真の鼻孔の暗さで表現)
+  - 正面写真の平行投影テクスチャ + シルエット外/背面は写真色の頂点色へフェード
+- 実測髪シェル: 実測髪マスク+実測Depthの前面シェルをGNMの手前に重ねる。
+  シルエット・髪マスク・Depthの供給源はGUIで切替できる:
   - `MEASURED`(既定): MediaPipe Image Segmenter (SelfieMulticlass)による実測シルエット/髪マスク +
     TensorFlow.js ARPortraitDepthによる実測人物Depth(前景dilation・外れ値clamp・平滑化済み)
-  - `NEURAL`: MODNetのアルファマット(MediaPipeの意味分けと合成) + Depth Anything V2 SmallのDepth。
+  - `NEURAL`: BiRefNetのアルファマット(MediaPipeの意味分けと合成) + Depth Anything V2 SmallのDepth。
     選択時に初めてtransformers.jsごと遅延ロードする(下記ライセンス注意を参照)
-  - `ELLIPSE` / `HEURISTIC`: 楕円近似 + 擬似Head Depth(旧方式。品質比較用に残置)
-- `FULL HEAD`の`Head Backend`切替 (GUI):
-  - `GRID`(既定): 上記のHead Grid Mesh (2.5D relief)
-  - `GNM`: Google GNM Head (真3Dパラメトリック頭部) を468点ランドマークへフィットし、
-    正面写真を投影テクスチャとして貼った真3D頭部 + 実測髪マスク/Depthによる前面髪シェルのハイブリッド。
-    Yaw±40°程度まで破綻しにくい (下記「GNMアセットの生成」参照。選択時に約8MBを遅延ロード)。
-    GNMの表情基底 (目20+下顔面20成分) によるランダム表情デモ付き (GUI: GNM Expression)。
-    テクスチャは正面写真の焼き付きのため大表情では歪む。開口時の口腔は未対応
-- 左右いずれかのビューをドラッグすると、両ビューが同じYaw(±可変)/Pitch角に同期回転
-- 周期的なBlink(目パチ)アニメーション
-- Mouth Seam(唇の境界)分離による古典的なTalk Animation / Mouth Cavity(生成AIによる口腔内補完は不使用)
-- 品質比較用GUI: Depthパラメータ、Camera/Rotation、Talk/Mouth、各種デバッグ表示
-  (Wireframe / Landmarks / Head Mask / Face Depth / Final Depth / Mouth Seam / Mouth Region)
+  - `NONE`: 不使用 (UVクランプ・髪シェルなしの素のGNM)
+- 表情アニメーション (GNM公式ExpressionSampler由来のプリセット):
+  - `Auto`: 喜怒哀楽驚の感情プリセットを自動巡回 (感情→ニュートラル→別の感情…)
+  - 感情固定 / `Manual` (Mouth Open・Smile・Eyes Close等のパーツ別スライダー合成)
+  - 周期的なBlink(目パチ)を表情へ合成
+- ビューをドラッグするとYaw(±可変)/Pitch角に回転
+- GUI: フィット/髪シェルパラメータ、表情、Camera/Rotation、Wireframe表示
+
+既知の制約: テクスチャは正面写真の焼き付きのため大表情では歪む。開口時の口腔は未対応 (黒い開口)。
 
 ## セットアップ
 
@@ -66,19 +69,19 @@ npm run preview  # ビルド結果のプレビュー
 
 ## 技術スタック
 
-- Three.js (WebGL, CPU側でgeometry頂点を生成・更新する方式)
+- Three.js (WebGL)
+- Google GNM Head (真3Dパラメトリック頭部。identity 64成分 + 表情40成分の線形basis)
 - MediaPipe Face Landmarker / Image Segmenter (SelfieMulticlass) (`@mediapipe/tasks-vision`)
 - TensorFlow.js ARPortraitDepth (`@tensorflow-models/depth-estimation`)
-- transformers.js (`@huggingface/transformers`): Depth Anything V2 Small / MODNet (NEURALソース選択時のみ遅延ロード)
-- Delaunator (Face Mesh topologyのDelaunay三角形分割)
-- lil-gui (品質比較用パラメータパネル)
+- transformers.js (`@huggingface/transformers`): Depth Anything V2 Small / BiRefNet (NEURALソース選択時のみ遅延ロード)
+- lil-gui (パラメータパネル)
 - Vite + TypeScript
 
 ### モデルのライセンス
 
 - `MEASURED`系 (MediaPipe / ARPortraitDepth): すべてGoogle公式配布(Apache-2.0)で、モデルカード上、
   学習データもGoogle自社収集(同意取得済み)のもののみ。**学習データまで商用クリーン**
-- `NEURAL`系 (Depth Anything V2 Small / MODNet): **重みは商用可**(Apache-2.0)だが、
+- `NEURAL`系 (Depth Anything V2 Small / BiRefNet): **重みは商用可**(Apache-2.0)だが、
   学習データに非商用/非開示のもの(VKITTI2, SA-1B, 私有データ等)を含む。
   MEASURED系との**品質比較・評価用**の位置づけ。商用出荷物に含める場合は要法務判断
 - `GNM Head` (google/GNM): **Apache-2.0**。学習データは約5,000人の自社スタジオ収録3Dスキャン
@@ -95,27 +98,22 @@ src/
   main.ts          # エントリポイント。UI配線・シーン構築・レンダーループ
   input.ts         # Webcam / ファイル入力
   faceDetector.ts  # MediaPipe Face Landmarkerのロードと推論
-  faceTopology.ts  # landmark正規化・三角形分割・key landmark index
-  faceDepth.ts     # canonical/MediaPipe Depthの合成、Face Depth Field
+  faceTopology.ts  # landmark正規化 (モデル空間・テクスチャ空間)
   fields.ts        # 画像UV空間の2Dスカラー場 (マスク・Depthの共通表現)
   personSegmentation.ts # MediaPipe SelfieMulticlassによる実測シルエット/髪マスク
   portraitDepth.ts # TF.js ARPortraitDepthによる実測人物Depthとクリーンアップ
-  neuralSources.ts # Depth Anything V2 / MODNet (NEURALソース。遅延ロード)
-  gnmHead.ts       # GNM Headのアセット読込と写真へのフィッティング (遅延ロード)
-  gnmHeadMesh.ts   # GNMバックエンドのメッシュ構築 (真3D頭部+実測髪シェル)
-  headMask.ts      # 頭部シルエットマスク(楕円近似。比較用フォールバック)
-  headDepth.ts     # Pseudo Head Depth / Edge Rolloff / Face-Head Blend / Hair Volume
-  meshUtils.ts     # メッシュ共通処理 (法線+Z固定など)
-  faceOnlyMesh.ts  # FACE ONLYメッシュ生成
-  fullHeadMesh.ts  # Head Grid Mesh生成 (FULL HEAD)
-  mouthTalk.ts     # Mouth Seam / Talk Animation / Mouth Cavity
-  animation.ts     # Blinkアニメーション
+  neuralSources.ts # Depth Anything V2 / BiRefNet (NEURALソース。遅延ロード)
+  gnmHead.ts       # GNM Headのアセット読込と写真へのフィッティング
+  gnmHeadMesh.ts   # GNMメッシュ構築 (真3D頭部+実測髪シェル) と表情機構
+  gnmRefine.ts     # 残差ワープ・鼻孔封止などフィット後の品質改善
+  gnmExpressions.ts # 公式ExpressionSampler由来の表情プリセット (生成物)
+  meshUtils.ts     # メッシュ共通処理 (法線+Z固定・格子index・smoothstep)
+  blink.ts         # Blink(目パチ)の周期エンベロープ
   interaction.ts   # ドラッグによるYaw/Pitch操作
-  debugView.ts     # GUIパラメータパネル・デバッグ表示
+  debugView.ts     # GUIパラメータパネル
   params.ts        # 調整パラメータの一元管理
 ```
 
 ## 品質目標・評価対象外の範囲
 
-Yaw ±15°程度の限定視点を対象とし、完全な3D復元は目的としていません。品質目標や比較の観点の詳細は
-[claude_code_head_2_5d_spec.md](./claude_code_head_2_5d_spec.md) の「品質目標」章を参照してください。
+Yaw ±15°程度の限定視点を対象とし、完全な3D復元は目的としていません。

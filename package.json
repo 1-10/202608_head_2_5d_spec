@@ -1,5 +1,5 @@
 {
-  "name": "avatar-2_5d-compare",
+  "name": "gnm-head-avatar",
   "private": true,
   "version": "0.1.0",
   "type": "module",
@@ -15,7 +15,6 @@
     "@tensorflow/tfjs-backend-webgl": "^4.22.0",
     "@tensorflow/tfjs-converter": "^4.22.0",
     "@tensorflow/tfjs-core": "^4.22.0",
-    "delaunator": "^5.0.1",
     "lil-gui": "^0.19.2",
     "three": "^0.169.0"
   },
