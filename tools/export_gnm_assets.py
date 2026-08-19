@@ -41,12 +41,6 @@ MEDIAPIPE_IBUG68 = [
     61, 39, 37, 0, 267, 269, 291, 405, 314, 17, 84, 181, 78, 82, 13, 312, 308, 317, 14, 87,
 ]
 
-# MediaPipe FACEMESH_FACE_OVAL の36点 (顔輪郭。フィット時の横幅追従のため高重み)
-MEDIAPIPE_FACE_OVAL = [
-    10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288, 397, 365, 379, 378, 400,
-    377, 152, 148, 176, 149, 150, 136, 172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109,
-]
-
 DENSE_MAX_RESIDUAL_M = 0.008  # 整列後の投影残差がこれを超える点は対応から除外
 
 
@@ -219,6 +213,18 @@ def main() -> None:
     lm_idx = old_to_new[lm_idx_old].astype(np.uint32)
 
     ear_weight = np.clip(group('ears')[vertex_mask] * 255, 0, 255).astype(np.uint8)
+    # 眼球グループ重み (現在ランタイム未使用。眼球分離を試行した名残 — 再挑戦用に同梱)
+    eye_weight = np.clip(group('eyes')[vertex_mask] * 255, 0, 255).astype(np.uint8)
+    # 鼻孔の内壁 = skinに含まれるがskin_exteriorに含まれない鼻先近傍の頂点。
+    # 穴のジオメトリは角度によって黒い穴/影として破綻し、写真の鼻孔の暗さだけで
+    # 十分表現できるため、ランタイムで平滑化して膜状に塞ぐ対象としてマークする
+    interior = (group('skin') > 0.5) & (group('skin_exterior') < 0.5)
+    lm_pos = (d['template_vertex_positions'][lm_idx_old] * lm_w[..., None]).sum(axis=1)
+    nose_tip = lm_pos[30]  # iBUG-68の30番 = 鼻先
+    dist = np.linalg.norm(d['template_vertex_positions'] - nose_tip, axis=1)
+    nostril = interior & (dist < 0.03)
+    nostril_weight = (nostril[vertex_mask] * 255).astype(np.uint8)
+    print(f'鼻孔内壁: {int(nostril[vertex_mask].sum())} 頂点 / 眼球: {int((eye_weight >= 128).sum())} 頂点')
 
     expr_names = [str(n) for n in d['expression_names']]
     expr_indices = []
@@ -238,10 +244,10 @@ def main() -> None:
             canonical, positions.astype(np.float64), triangles.astype(np.int64), lm_idx.astype(np.int64), lm_w, exclude[vertex_mask],
         )
         mp_idx_arr, dense_tri, dense_w, dense_conf = dense
-        # 顔輪郭 (face oval) は横幅追従のため高重みにする
-        oval = np.isin(mp_idx_arr, MEDIAPIPE_FACE_OVAL)
-        dense_weight = (dense_conf * np.where(oval, 1.6, 1.0)).astype(np.float32)
-        print(f'密対応: {len(mp_idx_arr)}/468 点 (残差>{DENSE_MAX_RESIDUAL_M*1000:.0f}mm除外, 輪郭{oval.sum()}点は重み1.6)')
+        # フィット重みは投影信頼度のみ (意味的な手決め重みは持たない —
+        # 恣意的な数値がフィットを歪める疑いがあり、素の最小二乗と比較するため)
+        dense_weight = dense_conf.astype(np.float32)
+        print(f'密対応: {len(mp_idx_arr)}/468 点 (残差>{DENSE_MAX_RESIDUAL_M*1000:.0f}mm除外, 重み=信頼度のみ)')
 
     sections = {
         'positions': positions,       # float32 (N,3)
@@ -250,13 +256,15 @@ def main() -> None:
         'landmarkIndices': lm_idx,    # uint32 (68,3)
         'landmarkWeights': lm_w,      # float32 (68,3)
         'earWeight': ear_weight,      # uint8 (N,)
+        'eyeWeight': eye_weight,      # uint8 (N,) 眼球グループ重み
+        'nostrilWeight': nostril_weight,  # uint8 (N,) 鼻孔内壁 (平滑化で塞ぐ対象)
         'expressionBasisQ': expr_q,   # int16 (M,N,3)
     }
     if dense is not None:
         sections['denseMpIndices'] = dense[0]      # uint16 (M,) MediaPipe landmark index
         sections['denseTriIndices'] = dense[1]     # uint32 (M,3)
         sections['denseBaryWeights'] = dense[2]    # float32 (M,3)
-        sections['denseFitWeights'] = dense_weight  # float32 (M,) フィット重み (信頼度×領域重み)
+        sections['denseFitWeights'] = dense_weight  # float32 (M,) フィット重み (投影信頼度)
 
     payload = bytearray()
     section_meta = {}
