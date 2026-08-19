@@ -46,20 +46,68 @@ MEDIAPIPE_FACE_OVAL = [
     10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288, 397, 365, 379, 378, 400,
     377, 152, 148, 176, 149, 150, 136, 172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109,
 ]
+# 生え際寄りのoval点 (髪遮蔽でMediaPipeの推定が幻覚気味になるため低重み)
+MEDIAPIPE_HAIRLINE = [10, 338, 297, 332, 67, 103, 109, 21, 54, 284, 251]
+MEDIAPIPE_LIPS = [
+    61, 146, 91, 181, 84, 17, 314, 405, 321, 375, 291, 308, 324, 318, 402, 317, 14, 87, 178, 88,
+    95, 185, 40, 39, 37, 0, 267, 269, 270, 409, 415, 310, 311, 312, 13, 82, 81, 42, 183, 78,
+]
+MEDIAPIPE_EYES = [
+    33, 7, 163, 144, 145, 153, 154, 155, 133, 173, 157, 158, 159, 160, 161, 246,
+    263, 249, 390, 373, 374, 380, 381, 382, 362, 398, 384, 385, 386, 387, 388, 466,
+]
+MEDIAPIPE_BROWS = [70, 63, 105, 66, 107, 46, 53, 52, 65, 55, 300, 293, 334, 296, 336, 276, 283, 282, 295, 285]
+MEDIAPIPE_NOSE = [1, 2, 4, 5, 6, 19, 94, 97, 98, 326, 327, 168, 195, 197]
 
 DENSE_MAX_RESIDUAL_M = 0.008  # 整列後の投影残差がこれを超える点は対応から除外
 
 
-def load_canonical_obj(path: Path) -> np.ndarray:
+def semantic_weight(mp_idx: int) -> float:
+    """意味重み: 位置決めに効く目・唇・鼻・輪郭を強く、眉 (整容で動く)・生え際 (幻覚気味) を弱く。"""
+    if mp_idx in MEDIAPIPE_HAIRLINE:
+        return 0.3
+    if mp_idx in MEDIAPIPE_LIPS or mp_idx in MEDIAPIPE_EYES:
+        return 2.0
+    if mp_idx in MEDIAPIPE_BROWS:
+        return 0.7
+    if mp_idx in MEDIAPIPE_NOSE:
+        return 1.5
+    if mp_idx in MEDIAPIPE_FACE_OVAL:
+        return 1.5
+    return 1.0  # 頬・額など
+
+
+def load_canonical_obj(path: Path) -> tuple[np.ndarray, np.ndarray]:
     """MediaPipe canonical_face_model.obj (頂点i = landmark i, 468頂点) を読む。"""
     verts = []
+    faces = []
     with open(path, encoding='utf-8') as f:
         for line in f:
             if line.startswith('v '):
                 verts.append([float(x) for x in line.split()[1:4]])
+            elif line.startswith('f '):
+                idx = [int(t.split('/')[0]) - 1 for t in line.split()[1:]]
+                for j in range(1, len(idx) - 1):  # 四角形にも対応 (fan分割)
+                    faces.append([idx[0], idx[j], idx[j + 1]])
     v = np.asarray(verts, dtype=np.float64)
     assert v.shape[0] == 468, f'canonical face modelの頂点数が468ではない: {v.shape[0]}'
-    return v
+    return v, np.asarray(faces, dtype=np.int64)
+
+
+def vertex_area_weights(verts: np.ndarray, faces: np.ndarray) -> np.ndarray:
+    """頂点あたりのVoronoi近似面積 (隣接三角形面積/3の和) を平均1に正規化して返す。
+
+    MediaPipeの点は目・唇に極端に密集するため、これで補正しないと
+    最小二乗が目口に支配され輪郭が置き去りになる (面積重みが本質)。
+    """
+    tri = verts[faces]
+    area = 0.5 * np.linalg.norm(np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0]), axis=1)
+    out = np.zeros(len(verts))
+    for j in range(3):
+        np.add.at(out, faces[:, j], area / 3)
+    mean = out[out > 0].mean()
+    out[out == 0] = mean  # 孤立頂点は平均扱い
+    return out / mean
 
 
 def umeyama_similarity(src: np.ndarray, dst: np.ndarray) -> tuple[float, np.ndarray, np.ndarray]:
@@ -232,16 +280,19 @@ def main() -> None:
     # 密対応 (MediaPipe 468点 → GNM表面barycentric)。canonical_face_model.obj があれば構築
     dense = None
     if canonical_path is not None:
-        canonical = load_canonical_obj(canonical_path)
+        canonical, can_faces = load_canonical_obj(canonical_path)
         exclude = (group('ears') > 0.5) | (group('eyes') > 0.5)
         dense = build_dense_correspondence(
             canonical, positions.astype(np.float64), triangles.astype(np.int64), lm_idx.astype(np.int64), lm_w, exclude[vertex_mask],
         )
         mp_idx_arr, dense_tri, dense_w, dense_conf = dense
-        # 顔輪郭 (face oval) は横幅追従のため高重みにする
-        oval = np.isin(mp_idx_arr, MEDIAPIPE_FACE_OVAL)
-        dense_weight = (dense_conf * np.where(oval, 1.6, 1.0)).astype(np.float32)
-        print(f'密対応: {len(mp_idx_arr)}/468 点 (残差>{DENSE_MAX_RESIDUAL_M*1000:.0f}mm除外, 輪郭{oval.sum()}点は重み1.6)')
+        # フィット重み = 投影信頼度 × Voronoi面積 (点密度補正) × 意味重み
+        area_w = vertex_area_weights(canonical, can_faces)
+        sem_w = np.array([semantic_weight(int(i)) for i in mp_idx_arr])
+        dense_weight = (dense_conf * area_w[mp_idx_arr] * sem_w).astype(np.float32)
+        dense_weight /= dense_weight.mean()
+        print(f'密対応: {len(mp_idx_arr)}/468 点 (残差>{DENSE_MAX_RESIDUAL_M*1000:.0f}mm除外)。'
+              f'重み範囲 {dense_weight.min():.2f}〜{dense_weight.max():.2f}')
 
     sections = {
         'positions': positions,       # float32 (N,3)

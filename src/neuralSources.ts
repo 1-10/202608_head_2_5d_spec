@@ -135,6 +135,7 @@ export function refineSegmentationWithMatte(seg: SegmentationResult, matte: Scal
   const head = new Float32Array(width * height);
   const hair = new Float32Array(width * height);
   const faceSkin = new Float32Array(width * height);
+  const overlay = new Float32Array(width * height);
 
   for (let y = 0; y < height; y++) {
     const v = 1 - (y + 0.5) / height;
@@ -147,6 +148,7 @@ export function refineSegmentationWithMatte(seg: SegmentationResult, matte: Scal
       head[i] = a * smoothWeight(sampleField(seg.head, u, v));
       hair[i] = a * smoothWeight(sampleField(seg.hair, u, v));
       faceSkin[i] = a * smoothWeight(sampleField(seg.faceSkin, u, v));
+      overlay[i] = a * smoothWeight(sampleField(seg.overlay, u, v));
     }
   }
 
@@ -155,6 +157,7 @@ export function refineSegmentationWithMatte(seg: SegmentationResult, matte: Scal
     head: { width, height, data: head, rect },
     hair: { width, height, data: hair, rect },
     faceSkin: { width, height, data: faceSkin, rect },
+    overlay: { width, height, data: overlay, rect },
   };
 }
 

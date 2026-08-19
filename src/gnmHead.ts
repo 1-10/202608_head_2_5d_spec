@@ -271,8 +271,14 @@ function solveSPD(a: Float64Array, b: Float64Array, n: number): Float64Array {
   return x;
 }
 
-const FIT_ITERATIONS = 3;
+const FIT_ITERATIONS = 5;
 const COEFF_CLAMP = 3.0; // 係数はz-scoreスケール。統計的に妥当な範囲へクランプ
+// z方向の弱拘束の重み (xy比)。MediaPipeのzは相対値でノイズが多いが、
+// xyだけではz方向にしか効かない係数が正則化任せ (≒0埋め) になる縮退を切る
+const Z_CONSTRAINT_WEIGHT = 0.15;
+// Σw正規化後の正則化の単位。正規化前の実装 (λ×1e-3を非正規化AᵀAへ加算, 対応数~458)
+// と実効強度が揃うよう 1e-3/(2×458×平均重み1) ≈ 1e-6 とする
+const REG_UNIT = 1e-6;
 
 /**
  * GNM Headを顔ランドマークへフィットする。
@@ -296,7 +302,7 @@ export function fitGnmToLandmarks(
     const lm = landmarks[useDense ? model.denseMpIndices[m] : MEDIAPIPE_IBUG68[m]];
     targets[m * 3 + 0] = lm.x;
     targets[m * 3 + 1] = lm.y;
-    targets[m * 3 + 2] = 0; // zはフィット対象外 (fitSimilarity2Dのtzは後で上書き)
+    targets[m * 3 + 2] = lm.zMediapipe; // 弱拘束としてのみ使用 (Z_CONSTRAINT_WEIGHT)
   }
 
   // 各基底の対応点位置への寄与 (K,M,3) を先に射影しておく
@@ -332,31 +338,66 @@ export function fitGnmToLandmarks(
   let sim = fitSimilarity2D(meanLm, targets, lmCount, fitWeights);
 
   // coarse-to-fine: 前半の反復は強い正則化で大域 (サイズ・輪郭) を決め、後半で緩めて細部を追従させる
-  const lambdaSchedule = [3, 1, 0.3];
+  const lambdaSchedule = [3, 1.7, 1, 0.55, 0.3];
 
   for (let iter = 0; iter < FIT_ITERATIONS; iter++) {
+    // z拘束のスケール/オフセット: 現在の形状zとMediaPipe zの重み付き1D最小二乗。
+    // 大域の奥行きスケール差はszZ/tzZに吸収させ、係数には「相対的な凹凸」だけ効かせる
+    const shaped = shapedLm(coeffs);
+    let szZ = 1;
+    let tzZ = 0;
+    {
+      let n = 0;
+      let sd = 0;
+      let st = 0;
+      let sdd = 0;
+      let sdt = 0;
+      for (let m = 0; m < lmCount; m++) {
+        const w = fitWeights ? fitWeights[m] : 1;
+        const d = shaped[m * 3 + 2];
+        const t = targets[m * 3 + 2];
+        n += w;
+        sd += d * w;
+        st += t * w;
+        sdd += d * d * w;
+        sdt += d * t * w;
+      }
+      const denom = n * sdd - sd * sd;
+      if (Math.abs(denom) > 1e-9) {
+        szZ = (n * sdt - sd * st) / denom;
+        tzZ = (st - szZ * sd) / n;
+      }
+    }
+
     // 相似固定で絶対係数を解く: sim(meanLm + B c) = sim(meanLm) + sR·(B c)
-    // → A c = targets − sim(meanLm)。x,yのみ (2×68行)。
-    const rows = lmCount * 2;
+    // → A c = targets − sim(meanLm)。x,y + 弱いz (3×M行)。
+    const rows = lmCount * 3;
     const A = new Float64Array(rows * k);
     const r = new Float64Array(rows);
     for (let m = 0; m < lmCount; m++) {
       const gx = meanLm[m * 3];
       const gy = meanLm[m * 3 + 1];
-      r[m * 2] = targets[m * 3] - (sim.s * (sim.cos * gx - sim.sin * gy) + sim.tx);
-      r[m * 2 + 1] = targets[m * 3 + 1] - (sim.s * (sim.sin * gx + sim.cos * gy) + sim.ty);
+      const gz = meanLm[m * 3 + 2];
+      r[m * 3] = targets[m * 3] - (sim.s * (sim.cos * gx - sim.sin * gy) + sim.tx);
+      r[m * 3 + 1] = targets[m * 3 + 1] - (sim.s * (sim.sin * gx + sim.cos * gy) + sim.ty);
+      r[m * 3 + 2] = targets[m * 3 + 2] - (szZ * gz + tzZ);
       for (let i = 0; i < k; i++) {
         const bx = lmBasis[(i * lmCount + m) * 3];
         const by = lmBasis[(i * lmCount + m) * 3 + 1];
-        A[m * 2 * k + i] = sim.s * (sim.cos * bx - sim.sin * by);
-        A[(m * 2 + 1) * k + i] = sim.s * (sim.sin * bx + sim.cos * by);
+        const bz = lmBasis[(i * lmCount + m) * 3 + 2];
+        A[m * 3 * k + i] = sim.s * (sim.cos * bx - sim.sin * by);
+        A[(m * 3 + 1) * k + i] = sim.s * (sim.sin * bx + sim.cos * by);
+        A[(m * 3 + 2) * k + i] = szZ * bz;
       }
     }
-    // 重み付き正規方程式 (AᵀWA + λI) c = AᵀWr
+    // 重み付き正規方程式 ((AᵀWA + λI)/Σw基準) c = AᵀWr/Σw
     const ata = new Float64Array(k * k);
     const atr = new Float64Array(k);
+    let wTotal = 0;
     for (let row = 0; row < rows; row++) {
-      const rw = fitWeights ? fitWeights[row >> 1] : 1; // x/y行は同じ点重みを共有
+      const pw = fitWeights ? fitWeights[(row / 3) | 0] : 1;
+      const rw = row % 3 === 2 ? pw * Z_CONSTRAINT_WEIGHT : pw; // z行は弱く
+      wTotal += rw;
       const rv = r[row] * rw;
       for (let i = 0; i < k; i++) {
         const av = A[row * k + i];
@@ -364,12 +405,16 @@ export function fitGnmToLandmarks(
         for (let j = 0; j <= i; j++) ata[i * k + j] += av * A[row * k + j] * rw;
       }
     }
+    // Σwで正規化する — しないと対応点数に比例してAᵀAが育ち、
+    // λの実効強度が点数で変わってしまう (68点→458点で1/6に弱まる)
+    const invW = 1 / Math.max(1e-12, wTotal);
+    for (let i = 0; i < k * k; i++) ata[i] *= invW;
+    for (let i = 0; i < k; i++) atr[i] *= invW;
     for (let i = 0; i < k; i++) {
       for (let j = i + 1; j < k; j++) ata[i * k + j] = ata[j * k + i];
       // 係数はz-scoreスケール (公式デモが±3スライダーで直接使用しており確認済み) なので
-      // 一様な単位行列リッジがガウス事前分布として正しい。
-      // 2D残差の典型スケール(≈1e-2)に対しGUI値1.0で程よく効くよう1e-3を掛ける。
-      ata[i * k + i] += identityReg * 1e-3 * lambdaSchedule[Math.min(iter, lambdaSchedule.length - 1)];
+      // 一様な単位行列リッジがガウス事前分布として正しい
+      ata[i * k + i] += identityReg * REG_UNIT * lambdaSchedule[Math.min(iter, lambdaSchedule.length - 1)];
     }
     const solved = solveSPD(ata, atr, k);
     const next = new Float32Array(k);

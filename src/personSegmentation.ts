@@ -26,6 +26,8 @@ export interface SegmentationResult {
   faceSkin: ScalarField;
   /** 頭部シルエット: hair + faceSkin + accessories + (顎より上のbodySkin=耳など) */
   head: ScalarField;
+  /** 頭部の「上物」: 髪 + 帽子等のaccessories (顎より上)。GNMの髪シェルのマスクに使う */
+  overlay: ScalarField;
 }
 
 export class PersonSegmenter {
@@ -83,6 +85,7 @@ export class PersonSegmenter {
     const fadeRows = height * 0.04;
 
     const head = new Float32Array(width * height);
+    const overlay = new Float32Array(width * height);
     for (let y = 0; y < height; y++) {
       // 顎より上=1、顎から下へfadeRowsかけて0
       const aboveChin = clamp01(1 - (y - chinRow) / Math.max(1, fadeRows));
@@ -93,6 +96,8 @@ export class PersonSegmenter {
         const h = hair[i] + (faceSkin[i] + accessories[i] + bodySkin[i]) * aboveChin;
         // personマスクとの積で背景誤検出を抑える
         head[i] = clamp01(h) * person[i];
+        // 上物 = 髪 (顎下のロングヘア・あごひげ含む) + 帽子等のaccessories (顎より上)
+        overlay[i] = clamp01(hair[i] + accessories[i] * aboveChin) * person[i];
       }
     }
 
@@ -102,6 +107,7 @@ export class PersonSegmenter {
       hair: { width, height, data: hair, rect },
       faceSkin: { width, height, data: faceSkin, rect },
       head: { width, height, data: head, rect },
+      overlay: { width, height, data: overlay, rect },
     };
   }
 }

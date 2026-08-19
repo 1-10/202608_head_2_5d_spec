@@ -254,8 +254,12 @@ function buildHairShell(
   const hairFit = fitDepthToGnmZ(depth, ctx, fit);
   if (!hairFit) return null;
 
-  const uvBounds = fieldBoundsUv(seg.hair, 0.08);
-  if (!uvBounds) return null; // 髪が写っていない (スキンヘッド等) → GNM単体で成立する
+  // シェルの対象は「上物」= 髪 + 帽子等 (あごひげはSelfieMulticlassがhair扱いすることが多い)。
+  // 旧構造のSegmentationResultにはoverlayが無いため髪のみへフォールバック
+  const shellMask = seg.overlay ?? seg.hair;
+
+  const uvBounds = fieldBoundsUv(shellMask, 0.08);
+  if (!uvBounds) return null; // 上物が写っていない (スキンヘッド等) → GNM単体で成立する
 
   const toX = (u: number) => (u * ctx.imageWidth - ctx.headCenterPx.x) / ctx.faceWidthPx;
   const toY = (v: number) => (ctx.headCenterPx.y - (1 - v) * ctx.imageHeight) / ctx.faceWidthPx;
@@ -276,8 +280,9 @@ function buildHairShell(
   // 髪シェルは「頭皮z + 実測髪厚」でアンカーする — Depthフィットの外挿を
   // そのままzに使うと頭頂で過大になり、シェルが頭蓋から浮くため。
   const scalp = buildScalpZBuffer(fit.vertices, { xMin, xMax, yMin, yMax });
-  // 厚みを厚くしすぎるとピッチ回転時にシェルと頭皮の隙間が下から見える
-  const maxThickness = 0.16; // モデル空間 (faceWidth≈1) での髪厚上限
+  // 厚みを厚くしすぎるとピッチ回転時にシェルと頭皮の隙間が下から見える。
+  // 帽子は髪より体積があるため上限はやや広めに取る
+  const maxThickness = 0.22; // モデル空間 (faceWidth≈1) での上物の厚み上限
   const minThickness = 0.02;
 
   for (let row = 0; row < rows; row++) {
@@ -288,7 +293,7 @@ function buildHairShell(
       const u = (x * ctx.faceWidthPx + ctx.headCenterPx.x) / ctx.imageWidth;
       const v = 1 - (ctx.headCenterPx.y - y * ctx.faceWidthPx) / ctx.imageHeight;
 
-      const hairMask = sampleField(seg.hair, u, v);
+      const hairMask = sampleField(shellMask, u, v);
       maskPerVertex[idx] = hairMask;
       const d = sampleField(depth, u, v);
       const zMeasured = (d * hairFit.scale + hairFit.offset) * params.measuredDepthGain;
@@ -349,7 +354,7 @@ function buildHairShell(
   geometry.setIndex(new THREE.BufferAttribute(new Uint32Array(kept), 1));
   applyFlatNormals(geometry);
 
-  const alphaTexture = new THREE.CanvasTexture(rasterizeMaskCanvas(seg.hair, 512));
+  const alphaTexture = new THREE.CanvasTexture(rasterizeMaskCanvas(shellMask, 512));
   alphaTexture.wrapS = THREE.ClampToEdgeWrapping;
   alphaTexture.wrapT = THREE.ClampToEdgeWrapping;
 
