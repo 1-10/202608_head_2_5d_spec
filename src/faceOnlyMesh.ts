@@ -4,6 +4,7 @@
 import * as THREE from 'three';
 import { FACE_KEY_INDICES, type FaceTriangulation, type NormalizedFaceLandmark } from './faceTopology';
 import { buildCanonicalFaceDepth, computeFinalFaceDepthPerVertex } from './faceDepth';
+import { applyFlatNormals } from './meshUtils';
 import type { Params } from './params';
 
 export interface FaceOnlyBuild {
@@ -64,7 +65,7 @@ export function buildFaceOnlyMesh(
   geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
   geometry.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
   geometry.setIndex(new THREE.BufferAttribute(triangulation.triangles, 1));
-  geometry.computeVertexNormals();
+  applyFlatNormals(geometry);
 
   const material = new THREE.MeshStandardMaterial({
     map: texture,
@@ -105,7 +106,6 @@ export function recomputeFaceOnlyDepth(build: FaceOnlyBuild, params: Params): vo
     posAttr.setZ(i, zFinal[i]);
   }
   posAttr.needsUpdate = true;
-  build.geometry.computeVertexNormals();
   build.mesh.position.z = -params.pivotZRatio;
   build.group.position.z = params.pivotZRatio;
 }

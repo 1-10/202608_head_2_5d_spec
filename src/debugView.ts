@@ -22,6 +22,7 @@ export interface SceneStateLike {
 
 export interface DebugGuiOptions {
   onDepthParamsChanged: () => void;
+  onSourceChanged: () => void;
   onYawRangeChanged: () => void;
   onPitchRangeChanged: () => void;
   getSceneState: () => SceneStateLike | null;
@@ -150,8 +151,9 @@ export function applyDebugVisualization(state: SceneStateLike | null, params: Pa
     mouthSeamLine.visible = false;
   }
 
-  let mode: 'none' | 'mask' | 'faceDepth' | 'finalDepth' | 'mouthRegion' = 'none';
+  let mode: 'none' | 'mask' | 'hairMask' | 'faceDepth' | 'finalDepth' | 'mouthRegion' = 'none';
   if (params.showHeadMask) mode = 'mask';
+  else if (params.showHairMask) mode = 'hairMask';
   else if (params.showFaceDepth) mode = 'faceDepth';
   else if (params.showFinalDepth) mode = 'finalDepth';
   else if (params.showMouthRegion) mode = 'mouthRegion';
@@ -166,6 +168,8 @@ export function applyDebugVisualization(state: SceneStateLike | null, params: Pa
   let colors: Float32Array;
   if (mode === 'mask') {
     colors = buildMaskVertexColors(state.fullHead.maskValues);
+  } else if (mode === 'hairMask') {
+    colors = buildMaskVertexColors(state.fullHead.hairMaskValues);
   } else if (mode === 'faceDepth') {
     colors = buildDebugVertexColors(state.fullHead.debug.faceDepth);
   } else if (mode === 'finalDepth') {
@@ -179,7 +183,7 @@ export function applyDebugVisualization(state: SceneStateLike | null, params: Pa
   fhMat.needsUpdate = true;
 }
 
-const EXCLUSIVE_DEBUG_MODES = ['showHeadMask', 'showFaceDepth', 'showFinalDepth', 'showMouthRegion'] as const;
+const EXCLUSIVE_DEBUG_MODES = ['showHeadMask', 'showHairMask', 'showFaceDepth', 'showFinalDepth', 'showMouthRegion'] as const;
 
 export function setupDebugGui(container: HTMLElement, params: Params, options: DebugGuiOptions): DebugGuiHandle {
   const gui = new GUI({ container, title: 'Quality Parameters' });
@@ -188,6 +192,23 @@ export function setupDebugGui(container: HTMLElement, params: Params, options: D
     options.onDepthParamsChanged();
     applyDebugVisualization(options.getSceneState(), params);
   };
+
+  const sourceFolder = gui.addFolder('Data Sources');
+  sourceFolder
+    .add(params, 'maskSource', ['MEASURED', 'ELLIPSE'])
+    .name('Mask Source')
+    .onChange(() => {
+      options.onSourceChanged();
+    });
+  sourceFolder
+    .add(params, 'depthSource', ['MEASURED', 'HEURISTIC'])
+    .name('Depth Source')
+    .onChange(() => {
+      options.onSourceChanged();
+    });
+  sourceFolder.add(params, 'measuredRegularize', 0, 1, 0.01).name('Depth Regularize').onChange(notifyDepth);
+  sourceFolder.add(params, 'measuredDepthGain', 0, 3, 0.05).name('Depth Gain').onChange(notifyDepth);
+  sourceFolder.open();
 
   const depthFolder = gui.addFolder('Depth Parameters');
   depthFolder.add(params, 'faceDepthScale', 0, 3, 0.01).name('Face Depth').onChange(notifyDepth);
@@ -263,6 +284,7 @@ export function setupDebugGui(container: HTMLElement, params: Params, options: D
     exclusiveControllers.push(controller);
   };
   makeExclusiveToggle('showHeadMask', 'Show Head Mask');
+  makeExclusiveToggle('showHairMask', 'Show Hair Mask');
   makeExclusiveToggle('showFaceDepth', 'Show Face Depth');
   makeExclusiveToggle('showFinalDepth', 'Show Final Depth');
   makeExclusiveToggle('showMouthRegion', 'Show Mouth Region');

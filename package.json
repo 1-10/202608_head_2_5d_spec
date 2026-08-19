@@ -10,6 +10,10 @@
   },
   "dependencies": {
     "@mediapipe/tasks-vision": "^0.10.17",
+    "@tensorflow-models/depth-estimation": "^0.0.4",
+    "@tensorflow/tfjs-backend-webgl": "^4.22.0",
+    "@tensorflow/tfjs-converter": "^4.22.0",
+    "@tensorflow/tfjs-core": "^4.22.0",
     "delaunator": "^5.0.1",
     "lil-gui": "^0.19.2",
     "three": "^0.169.0"

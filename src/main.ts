@@ -8,7 +8,15 @@ import { FaceDetectionError, FaceDetector } from './faceDetector';
 import { normalizeFaceLandmarks, triangulateFaceLandmarks, type NormalizedFaceResult } from './faceTopology';
 import { buildCanonicalFaceDepth, buildFaceDepthField, computeFinalFaceDepthPerVertex } from './faceDepth';
 import { buildFaceOnlyMesh, recomputeFaceOnlyDepth, type FaceOnlyBuild } from './faceOnlyMesh';
-import { buildHeadGridGeometry, recomputeFullHeadDepth, type FullHeadBuild, type FullHeadBuildContext } from './fullHeadMesh';
+import {
+  buildHeadGridGeometry,
+  recomputeFullHeadDepth,
+  type FullHeadBuild,
+  type FullHeadBuildContext,
+  type MeasuredHeadData,
+} from './fullHeadMesh';
+import { PersonSegmenter } from './personSegmentation';
+import { fitDepthToModelSpace, PortraitDepthEstimator } from './portraitDepth';
 import {
   applyFaceOnlyBlink,
   applyFullHeadBlink,
@@ -132,6 +140,8 @@ const fullHeadViewport = new Viewport(els.paneFullHead);
 
 const inputManager = new InputManager(els.video);
 const faceDetector = new FaceDetector();
+const personSegmenter = new PersonSegmenter();
+const portraitDepth = new PortraitDepthEstimator();
 
 let sceneState: SceneState | null = null;
 let yawDeg = 0;
@@ -192,7 +202,9 @@ function disposeSceneState(): void {
   sceneState.faceOnly.geometry.dispose();
   sceneState.fullHead.geometry.dispose();
   (sceneState.faceOnly.mesh.material as THREE.Material).dispose();
-  (sceneState.fullHead.mesh.material as THREE.Material).dispose();
+  const fullHeadMat = sceneState.fullHead.mesh.material as THREE.MeshStandardMaterial;
+  fullHeadMat.alphaMap?.dispose();
+  fullHeadMat.dispose();
   sceneState.faceOnlyCavity.geometry.dispose();
   sceneState.fullHeadCavity.geometry.dispose();
   (sceneState.faceOnlyCavity.mesh.material as THREE.Material).dispose();
@@ -206,6 +218,51 @@ function attachMouthCavity(build: MouthCavityBuild, parentGroup: THREE.Group): v
   build.mesh.position.z = -params.pivotZRatio;
   parentGroup.add(build.mesh);
   setMouthCavityDarkness(build, params.mouthCavityDarkness);
+}
+
+/**
+ * 実測ソース (セグメンテーション+Depth) を取得する。
+ * 失敗した項目はnullとし、fullHeadMeshが自動的にヒューリスティックへフォールバックする。
+ */
+async function acquireMeasuredData(
+  captured: CapturedImage,
+  normalized: NormalizedFaceResult,
+  faceZFinal: Float32Array,
+): Promise<MeasuredHeadData | null> {
+  const measured: MeasuredHeadData = { segmentation: null, depth: null, depthFit: null };
+
+  try {
+    setStatus('頭部をセグメントしています…');
+    await personSegmenter.init();
+    measured.segmentation = personSegmenter.segment(captured.canvas, normalized.landmarks);
+  } catch (err) {
+    console.warn('セグメンテーションに失敗。楕円マスクへフォールバックします。', err);
+  }
+
+  if (measured.segmentation) {
+    try {
+      setStatus('Depthを推定しています…');
+      await portraitDepth.init();
+      measured.depth = await portraitDepth.estimate(
+        captured.canvas,
+        measured.segmentation.person,
+        normalized.headCenterPx,
+        normalized.faceWidth,
+      );
+      measured.depthFit = fitDepthToModelSpace(measured.depth, normalized.landmarks, faceZFinal);
+      if (!measured.depthFit) {
+        console.warn('Depthフィットに失敗。ヒューリスティックDepthへフォールバックします。');
+        measured.depth = null;
+      }
+    } catch (err) {
+      console.warn('Depth推定に失敗。ヒューリスティックDepthへフォールバックします。', err);
+      measured.depth = null;
+      measured.depthFit = null;
+    }
+  }
+
+  if (!measured.segmentation && !measured.depth) return null;
+  return measured;
 }
 
 async function processImage(captured: CapturedImage): Promise<void> {
@@ -232,6 +289,8 @@ async function processImage(captured: CapturedImage): Promise<void> {
       params.faceDepthFieldSize,
     );
 
+    const measured = await acquireMeasuredData(captured, normalized, faceZFinal);
+
     const texture = new THREE.CanvasTexture(captured.canvas);
     texture.colorSpace = THREE.SRGBColorSpace;
     texture.needsUpdate = true;
@@ -249,6 +308,7 @@ async function processImage(captured: CapturedImage): Promise<void> {
       faceWidthPx: normalized.faceWidth,
       imageWidth: captured.width,
       imageHeight: captured.height,
+      measured,
     };
     const fullHead = buildHeadGridGeometry(ctx, texture, params);
     const fullHeadMasks = buildFullHeadAnimationMasks(fullHead, normalized.landmarks);
@@ -295,7 +355,13 @@ async function processImage(captured: CapturedImage): Promise<void> {
     updatePitch(0);
     applyDebugVisualization(sceneState, params);
 
-    setStatus('');
+    if (!measured) {
+      setStatus('実測ソースを取得できず、ヒューリスティック方式で表示しています。', true);
+    } else if (!measured.depth) {
+      setStatus('Depth計測に失敗したため、シルエットのみ実測を使用しています。');
+    } else {
+      setStatus('');
+    }
   } catch (err) {
     if (err instanceof FaceDetectionError) {
       setStatus(err.message, true);
@@ -310,6 +376,35 @@ function updateCameras(): void {
   const distance = params.cameraDistanceRatio;
   faceOnlyViewport.updateCamera(params.cameraFovDeg, distance);
   fullHeadViewport.updateCamera(params.cameraFovDeg, distance);
+}
+
+/**
+ * Mask/Depthソース切替時にFULL HEADメッシュを再構築する。
+ * grid境界・UV・alphaMapがソースに依存するため、Depth再計算では足りない。
+ */
+function rebuildFullHead(): void {
+  if (!sceneState) return;
+  const s = sceneState;
+  fullHeadViewport.clear();
+  s.fullHead.geometry.dispose();
+  const oldMat = s.fullHead.mesh.material as THREE.MeshStandardMaterial;
+  oldMat.alphaMap?.dispose();
+  oldMat.dispose();
+
+  const fullHead = buildHeadGridGeometry(s.ctx, s.texture, params);
+  fullHead.group.rotation.order = 'YXZ';
+  s.fullHead = fullHead;
+  s.fullHeadMasks = buildFullHeadAnimationMasks(fullHead, s.normalized.landmarks);
+  s.fullHeadMouthTable = buildMouthDeformTable(
+    fullHead.cols * fullHead.rows,
+    (i) => ({ x: fullHead.basePositions[i * 3], y: fullHead.basePositions[i * 3 + 1] }),
+    s.mouthAnchors,
+  );
+  fullHeadViewport.setGroup(fullHead.group);
+  attachMouthCavity(s.fullHeadCavity, fullHead.group);
+  updateYaw(yawDeg);
+  updatePitch(pitchDeg);
+  applyDebugVisualization(sceneState, params);
 }
 
 /** Depth系GUIパラメータ変更時、landmark再検出なしでgeometry/mouthAnchorsのZのみ再計算する。 */
@@ -389,6 +484,7 @@ window.addEventListener('resize', () => {
 // --- GUIパラメータパネル ---
 const debugGui = setupDebugGui(els.guiContainer, params, {
   onDepthParamsChanged: () => rebuildDepthOnly(),
+  onSourceChanged: () => rebuildFullHead(),
   onYawRangeChanged: () => updateYaw(yawDeg),
   onPitchRangeChanged: () => updatePitch(pitchDeg),
   getSceneState: () => sceneState,
@@ -446,8 +542,6 @@ function animate(): void {
     );
     faceOnlyPosAttr.needsUpdate = true;
     fullHeadPosAttr.needsUpdate = true;
-    sceneState.faceOnly.geometry.computeVertexNormals();
-    sceneState.fullHead.geometry.computeVertexNormals();
 
     updateMouthCavityGeometry(sceneState.faceOnlyCavity, sceneState.mouthAnchors, talkOpen, params);
     updateMouthCavityGeometry(sceneState.fullHeadCavity, sceneState.mouthAnchors, talkOpen, params);
