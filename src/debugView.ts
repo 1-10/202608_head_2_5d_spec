@@ -280,7 +280,12 @@ export function setupDebugGui(container: HTMLElement, params: Params, options: D
     .name('Max Pitch')
     .onChange(() => options.onPitchRangeChanged());
   cameraFolder.add(params, 'cameraFovDeg', 15, 60, 1).name('Camera FOV').onChange(notifyDepth);
-  cameraFolder.add(params, 'cameraDistanceRatio', 1.5, 8, 0.1).name('Camera Distance').onChange(notifyDepth);
+  cameraFolder
+    .add(params, 'cameraDistanceRatio', 1.5, 8, 0.1)
+    .name('Camera Distance')
+    .onChange(notifyDepth)
+    // GNMの透視補正UVはカメラ距離に依存するため、確定時に再ベイクする
+    .onFinishChange(() => options.onGnmParamsChanged());
 
   // --- Talk Animation / Mouth Cavity ---
   const talkFolder = gui.addFolder('Talk / Mouth');

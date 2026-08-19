@@ -50,6 +50,17 @@ export function buildGnmHead(
   const fit = fitGnmToLandmarks(model, ctx.landmarks, params.gnmIdentityReg);
   const seg = selectSegmentation(ctx, params);
 
+  // 透視補正UVの基準: 写真は「ホームカメラ (0,0,D) から見た透視像」として貼る。
+  // UVを平行投影で焼くと、透視レンダとの視差で目・輪郭が写真からズレる
+  // (目3〜6px・こめかみ20px超)。u = ((x·(D−z0)/(D−z))·fw+cx)/W で補正すると
+  // 静止時のレンダが写真と画素単位で一致する。z0は顔ランドマークzの平均
+  // (FACE ONLYと見かけスケールが揃う基準面)。
+  const camD = params.cameraDistanceRatio;
+  let z0 = 0;
+  for (let i = 0; i < fit.landmarkZ.length; i++) z0 += fit.landmarkZ[i];
+  z0 /= fit.landmarkZ.length;
+  const perspFactor = (z: number) => (camD - z0) / Math.max(0.2, camD - z);
+
   // --- Head geometry ---
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute('position', new THREE.BufferAttribute(fit.vertices, 3));
@@ -70,11 +81,13 @@ export function buildGnmHead(
   for (let i = 0; i < n; i++) {
     const x = fit.vertices[i * 3];
     const y = fit.vertices[i * 3 + 1];
+    const z = fit.vertices[i * 3 + 2];
     const nz = realNormals[i * 3 + 2];
 
-    // モデル空間 → 画像UV (平行投影)
-    let u = (x * ctx.faceWidthPx + ctx.headCenterPx.x) / ctx.imageWidth;
-    let v = 1 - (ctx.headCenterPx.y - y * ctx.faceWidthPx) / ctx.imageHeight;
+    // モデル空間 → 画像UV (ホームカメラからの透視投影)
+    const p = perspFactor(z);
+    let u = (x * p * ctx.faceWidthPx + ctx.headCenterPx.x) / ctx.imageWidth;
+    let v = 1 - (ctx.headCenterPx.y - y * p * ctx.faceWidthPx) / ctx.imageHeight;
 
     // シルエット外のUVは頭部中心方向へ歩かせてマスク内へクランプ (edge-extend)。
     // 歩幅は細かく取る — 頭頂では髪の帯が薄く、粗い歩幅だと帯を飛び越えて
@@ -131,7 +144,7 @@ export function buildGnmHead(
   const headMesh = new THREE.Mesh(geometry, headMaterial);
 
   // --- Hair shell (実測髪マスク+実測Depth) ---
-  const hair = buildHairShell(ctx, texture, fit, params);
+  const hair = buildHairShell(ctx, texture, fit, params, perspFactor);
 
   // 回転pivotは頭部の重心z (真3Dなのでreliefのpivot比率ではなく実重心を使う)
   const pivotZ = fit.centerZ;
@@ -245,6 +258,7 @@ function buildHairShell(
   texture: THREE.Texture,
   fit: GnmFitResult,
   params: Params,
+  perspFactor: (z: number) => number,
 ): HairShellBuild | null {
   const seg = selectSegmentation(ctx, params);
   const selected = selectDepth(ctx, params);
@@ -290,18 +304,36 @@ function buildHairShell(
     for (let col = 0; col < cols; col++) {
       const x = xMin + (xMax - xMin) * (col / (cols - 1));
       const idx = row * cols + col;
-      const u = (x * ctx.faceWidthPx + ctx.headCenterPx.x) / ctx.imageWidth;
-      const v = 1 - (ctx.headCenterPx.y - y * ctx.faceWidthPx) / ctx.imageHeight;
-
-      const hairMask = sampleField(shellMask, u, v);
-      maskPerVertex[idx] = hairMask;
-      const d = sampleField(depth, u, v);
-      const zMeasured = (d * hairFit.scale + hairFit.offset) * params.measuredDepthGain;
+      // 1パス目: 平行投影UVでzを見積もり、透視補正UVで取り直す
+      // (頭部と同じ透視補正を入れないと生え際で額とズレる)
+      let u = (x * ctx.faceWidthPx + ctx.headCenterPx.x) / ctx.imageWidth;
+      let v = 1 - (ctx.headCenterPx.y - y * ctx.faceWidthPx) / ctx.imageHeight;
       const scalpZ = scalp(x, y);
-      const thickness = Math.min(maxThickness, Math.max(minThickness, zMeasured - scalpZ));
-      // feather帯では厚みを頭皮へ絞る (縁の浮き対策。rolloffは絞り増強として作用)
-      const edge = smoothstep(0.08, 0.5, hairMask);
-      const z = scalpZ + params.gnmHairLift + thickness * edge - params.gnmHairRolloff * (1 - edge);
+
+      const evalZ = (uu: number, vv: number): { zGeom: number; zUv: number; mask: number } => {
+        const mask = sampleField(shellMask, uu, vv);
+        const d = sampleField(depth, uu, vv);
+        const zMeasured = (d * hairFit.scale + hairFit.offset) * params.measuredDepthGain;
+        const thickness = Math.min(maxThickness, Math.max(minThickness, zMeasured - scalpZ));
+        // feather帯では厚みを頭皮へ絞る (縁の浮き対策。rolloffは絞り増強として作用)
+        const edge = smoothstep(0.08, 0.5, mask);
+        const zGeom = scalpZ + params.gnmHairLift + thickness * edge - params.gnmHairRolloff * (1 - edge);
+        // UV用zは「実測の髪表面z」(安全クランプのみ)。zGeom (クランプ・テーパー後) を
+        // 使う案、厚み未テーパー案も試したが、いずれも生え際が花輪状に痩せて悪化した。
+        // 実測面が経験的に最も髪の帯を保つ
+        const zUv = Math.min(scalpZ + 0.5, Math.max(scalpZ - 0.3, zMeasured));
+        return { zGeom, zUv, mask };
+      };
+
+      const first = evalZ(u, v);
+      // セル間引きは平行投影マスクで判定する (透視補正でuvが数%動くと
+      // 薄い髪の帯のセルが不安定に消えて生え際が鋸歯状になる)
+      maskPerVertex[idx] = first.mask;
+      // 透視補正uv (髪表面zで補正) で取り直す
+      const p = perspFactor(first.zUv);
+      u = (x * p * ctx.faceWidthPx + ctx.headCenterPx.x) / ctx.imageWidth;
+      v = 1 - (ctx.headCenterPx.y - y * p * ctx.faceWidthPx) / ctx.imageHeight;
+      const z = evalZ(u, v).zGeom;
 
       positions[idx * 3] = x;
       positions[idx * 3 + 1] = y;
@@ -367,7 +399,8 @@ function buildHairShell(
     side: THREE.DoubleSide,
     // GRIDより高め: シェル縁は頭蓋の外に浮くため、feather裾の薄い断面が
     // グレージング視で筋状に見える。裾を早めに切って背後のGNMに任せる
-    alphaTest: 0.3,
+    // (0.3では透視補正UVとの組合せで生え際がパッチ状に欠けるため少し緩める)
+    alphaTest: 0.15,
   });
 
   return { mesh: new THREE.Mesh(geometry, material), alphaTexture };
