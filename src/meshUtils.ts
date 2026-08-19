@@ -18,3 +18,24 @@ export function applyFlatNormals(geometry: THREE.BufferGeometry): void {
   }
   geometry.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
 }
+
+/** cols×rowsの格子(行優先)を三角形2枚/セルでインデックス化する。 */
+export function buildGridIndices(cols: number, rows: number): Uint32Array {
+  const indices = new Uint32Array((cols - 1) * (rows - 1) * 6);
+  let p = 0;
+  for (let row = 0; row < rows - 1; row++) {
+    for (let col = 0; col < cols - 1; col++) {
+      const a = row * cols + col;
+      const b = a + 1;
+      const c = a + cols;
+      const d = c + 1;
+      indices[p++] = a;
+      indices[p++] = c;
+      indices[p++] = b;
+      indices[p++] = b;
+      indices[p++] = c;
+      indices[p++] = d;
+    }
+  }
+  return indices;
+}

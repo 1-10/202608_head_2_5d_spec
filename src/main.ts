@@ -106,6 +106,7 @@ interface SceneState {
   normalized: NormalizedFaceResult;
   faceOnly: FaceOnlyBuild;
   fullHead: FullHeadBuild;
+  gnmHead: import('./gnmHeadMesh').GnmHeadBuild | null; // GNMバックエンド (遅延構築)
   fullHeadMasks: FullHeadAnimationMasks;
   texture: THREE.Texture;
   mouthAnchors: MouthAnchors;
@@ -150,6 +151,11 @@ let neuralModule: typeof import('./neuralSources') | null = null;
 let neuralDepthEst: import('./neuralSources').NeuralDepthEstimator | null = null;
 let neuralMatteEst: import('./neuralSources').NeuralMatteEstimator | null = null;
 
+// GNM Headバックエンドはアセット(約5MB)ごと遅延ロードする。
+let gnmMeshModule: typeof import('./gnmHeadMesh') | null = null;
+let gnmModel: import('./gnmHead').GnmModel | null = null;
+let gnmBusy = false;
+
 let sceneState: SceneState | null = null;
 let yawDeg = 0;
 let pitchDeg = 0;
@@ -176,6 +182,7 @@ function updateYaw(deg: number): void {
   if (sceneState) {
     sceneState.faceOnly.group.rotation.y = THREE.MathUtils.degToRad(yawDeg);
     sceneState.fullHead.group.rotation.y = THREE.MathUtils.degToRad(yawDeg);
+    if (sceneState.gnmHead) sceneState.gnmHead.group.rotation.y = THREE.MathUtils.degToRad(yawDeg);
   }
 }
 
@@ -185,6 +192,7 @@ function updatePitch(deg: number): void {
   if (sceneState) {
     sceneState.faceOnly.group.rotation.x = THREE.MathUtils.degToRad(pitchDeg);
     sceneState.fullHead.group.rotation.x = THREE.MathUtils.degToRad(pitchDeg);
+    if (sceneState.gnmHead) sceneState.gnmHead.group.rotation.x = THREE.MathUtils.degToRad(pitchDeg);
   }
 }
 
@@ -216,6 +224,7 @@ function disposeSceneState(): void {
   sceneState.fullHeadCavity.geometry.dispose();
   (sceneState.faceOnlyCavity.mesh.material as THREE.Material).dispose();
   (sceneState.fullHeadCavity.mesh.material as THREE.Material).dispose();
+  sceneState.gnmHead?.dispose();
   sceneState.texture.dispose();
   sceneState = null;
 }
@@ -346,6 +355,62 @@ async function ensureNeuralSources(): Promise<void> {
   }
 }
 
+/** headBackendに応じてFULL HEADビューへ表示するgroupを差し替える。 */
+function applyHeadBackend(): void {
+  if (!sceneState) return;
+  if (params.headBackend === 'GNM' && sceneState.gnmHead) {
+    fullHeadViewport.setGroup(sceneState.gnmHead.group);
+  } else {
+    fullHeadViewport.setGroup(sceneState.fullHead.group);
+  }
+  updateYaw(yawDeg);
+  updatePitch(pitchDeg);
+}
+
+/**
+ * GNMバックエンドを必要時に遅延構築する。
+ * アセット(gnm_head_lite.bin 約5MB)とモジュールは初回のみロードし、
+ * 画像・パラメータが変わったときはrebuild=trueで作り直す。
+ */
+async function ensureGnmHead(rebuild = false): Promise<void> {
+  if (!sceneState || gnmBusy) return;
+  if (params.headBackend !== 'GNM') return;
+  const s = sceneState;
+  if (s.gnmHead && !rebuild) {
+    applyHeadBackend();
+    return;
+  }
+
+  gnmBusy = true;
+  try {
+    if (!gnmModel) setStatus('GNM Headアセットを読み込んでいます…');
+    gnmMeshModule ??= await import('./gnmHeadMesh');
+    if (!gnmModel) {
+      const headModule = await import('./gnmHead');
+      gnmModel = await headModule.loadGnmModel();
+    }
+    setStatus('GNM Headをフィットしています…');
+    s.gnmHead?.dispose();
+    const build = gnmMeshModule.buildGnmHead(gnmModel, s.ctx, s.sourceCanvas, s.texture, params);
+    build.group.rotation.order = 'YXZ';
+    s.gnmHead = build;
+    applyHeadBackend();
+    applyDebugVisualization(sceneState, params);
+    if (!build.hairMesh) {
+      setStatus('GNM: 髪シェルを構築できなかったため頭部のみ表示しています。');
+    } else {
+      setStatus('');
+    }
+  } catch (err) {
+    console.error('GNM Headの構築に失敗しました。', err);
+    setStatus('GNM Headの構築に失敗しました。GRIDバックエンドで表示しています。', true);
+    params.headBackend = 'GRID';
+    applyHeadBackend();
+  } finally {
+    gnmBusy = false;
+  }
+}
+
 async function processImage(captured: CapturedImage): Promise<void> {
   setStatus('顔を検出しています…');
   try {
@@ -415,6 +480,7 @@ async function processImage(captured: CapturedImage): Promise<void> {
       normalized,
       faceOnly,
       fullHead,
+      gnmHead: null,
       fullHeadMasks,
       texture,
       mouthAnchors,
@@ -445,8 +511,9 @@ async function processImage(captured: CapturedImage): Promise<void> {
       setStatus('');
     }
 
-    // NEURALソースが選択済みの状態で新しい画像が来た場合は遅延取得を開始する
+    // NEURAL/GNMが選択済みの状態で新しい画像が来た場合は遅延取得・構築を開始する
     void ensureNeuralSources();
+    void ensureGnmHead();
   } catch (err) {
     if (err instanceof FaceDetectionError) {
       setStatus(err.message, true);
@@ -490,6 +557,12 @@ function rebuildFullHead(): void {
   updateYaw(yawDeg);
   updatePitch(pitchDeg);
   applyDebugVisualization(sceneState, params);
+
+  // GNM表示中はソース変更が髪シェル/テクスチャゲートにも効くため作り直す
+  if (params.headBackend === 'GNM') {
+    applyHeadBackend();
+    void ensureGnmHead(true);
+  }
 }
 
 /** Depth系GUIパラメータ変更時、landmark再検出なしでgeometry/mouthAnchorsのZのみ再計算する。 */
@@ -573,6 +646,13 @@ const debugGui = setupDebugGui(els.guiContainer, params, {
     // まず取得済みソースで即時再構築し、NEURAL系が未取得なら裏で取得して再構築する
     rebuildFullHead();
     void ensureNeuralSources();
+  },
+  onBackendChanged: () => {
+    applyHeadBackend();
+    void ensureGnmHead();
+  },
+  onGnmParamsChanged: () => {
+    void ensureGnmHead(true);
   },
   onYawRangeChanged: () => updateYaw(yawDeg),
   onPitchRangeChanged: () => updatePitch(pitchDeg),

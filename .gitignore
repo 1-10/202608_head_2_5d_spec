@@ -7,3 +7,6 @@ sample/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# GNM Headアセット (tools/export_gnm_assets.py で生成。53MBのnpz由来のため非コミット)
+public/gnm/

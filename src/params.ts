@@ -11,6 +11,12 @@ export type FullHeadMode = 'HEAD_DEPTH_ONLY' | 'FACE_HEAD' | 'FACE_HEAD_HAIR';
 export type MaskSource = 'MEASURED' | 'NEURAL' | 'ELLIPSE';
 export type DepthSource = 'MEASURED' | 'NEURAL' | 'HEURISTIC';
 
+// FULL HEADビューの頭部バックエンド。
+// GRID = Head Grid Mesh (2.5D relief。従来方式)
+// GNM  = Google GNM Head (真3Dパラメトリック頭部, Apache-2.0) + 実測髪シェル。
+//        アセットは tools/export_gnm_assets.py で生成し、選択時に遅延ロードする
+export type HeadBackend = 'GRID' | 'GNM';
+
 export interface Params {
   // --- GUIへ露出する主要パラメータ（spec: 品質比較用UI表） ---
   faceDepthScale: number; // Face Depth: MediaPipe顔凹凸倍率
@@ -32,6 +38,12 @@ export interface Params {
   depthSource: DepthSource;
   measuredRegularize: number; // 0-1: 計測Depthを楕円Head Depthへ引き戻す正則化強度
   measuredDepthGain: number; // 計測Depthの振幅倍率 (フィット後のscaleに乗算)
+
+  // --- GNM Head バックエンド ---
+  headBackend: HeadBackend;
+  gnmIdentityReg: number; // identity係数のL2正則化強度 (大=平均顔寄り)
+  gnmHairLift: number; // 髪シェルをGNM表面手前へ持ち上げる量 (モデル空間)
+  gnmHairRolloff: number; // 髪シェル縁を後方へ巻き込む量 (モデル空間)
 
   // --- アニメーション (Blink) ---
   blinkEnabled: boolean;
@@ -91,6 +103,11 @@ export const DEFAULT_PARAMS: Params = {
   depthSource: 'MEASURED',
   measuredRegularize: 0.25,
   measuredDepthGain: 1.0,
+
+  headBackend: 'GRID',
+  gnmIdentityReg: 1.0,
+  gnmHairLift: 0.02,
+  gnmHairRolloff: 0.08,
 
   blinkEnabled: true,
   blinkPeriodMinSec: 3,

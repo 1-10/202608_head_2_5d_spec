@@ -24,7 +24,7 @@ import {
   computeHeadDepthFinal,
   smoothstep,
 } from './headDepth';
-import { applyFlatNormals } from './meshUtils';
+import { applyFlatNormals, buildGridIndices } from './meshUtils';
 import { rasterizeMaskCanvas, type SegmentationResult } from './personSegmentation';
 import type { FullHeadMode, Params } from './params';
 
@@ -51,7 +51,8 @@ export function selectSegmentation(ctx: FullHeadBuildContext, params: Params): S
   return null;
 }
 
-function selectDepth(
+/** depthSourceに応じたDepth場を選ぶ (NEURAL未取得時はMEASUREDへフォールバック)。 */
+export function selectDepth(
   ctx: FullHeadBuildContext,
   params: Params,
 ): { depth: ScalarField; fit: { scale: number; offset: number } } | null {
@@ -336,26 +337,6 @@ function computeZForMode(mode: FullHeadMode, zHeadOutside: number, blended: numb
     default:
       return blended;
   }
-}
-
-function buildGridIndices(cols: number, rows: number): Uint32Array {
-  const indices = new Uint32Array((cols - 1) * (rows - 1) * 6);
-  let p = 0;
-  for (let row = 0; row < rows - 1; row++) {
-    for (let col = 0; col < cols - 1; col++) {
-      const a = row * cols + col;
-      const b = a + 1;
-      const c = a + cols;
-      const d = c + 1;
-      indices[p++] = a;
-      indices[p++] = c;
-      indices[p++] = b;
-      indices[p++] = b;
-      indices[p++] = c;
-      indices[p++] = d;
-    }
-  }
-  return indices;
 }
 
 /**

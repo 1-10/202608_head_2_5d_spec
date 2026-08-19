@@ -21,6 +21,11 @@
   - `NEURAL`: MODNetのアルファマット(MediaPipeの意味分けと合成) + Depth Anything V2 SmallのDepth。
     選択時に初めてtransformers.jsごと遅延ロードする(下記ライセンス注意を参照)
   - `ELLIPSE` / `HEURISTIC`: 楕円近似 + 擬似Head Depth(旧方式。品質比較用に残置)
+- `FULL HEAD`の`Head Backend`切替 (GUI):
+  - `GRID`(既定): 上記のHead Grid Mesh (2.5D relief)
+  - `GNM`: Google GNM Head (真3Dパラメトリック頭部) を468点ランドマークへフィットし、
+    正面写真を投影テクスチャとして貼った真3D頭部 + 実測髪マスク/Depthによる前面髪シェルのハイブリッド。
+    Yaw±40°程度まで破綻しにくい (下記「GNMアセットの生成」参照。選択時に約5MBを遅延ロード)
 - 左右いずれかのビューをドラッグすると、両ビューが同じYaw(±可変)/Pitch角に同期回転
 - 周期的なBlink(目パチ)アニメーション
 - Mouth Seam(唇の境界)分離による古典的なTalk Animation / Mouth Cavity(生成AIによる口腔内補完は不使用)
@@ -36,6 +41,16 @@ npm run dev
 
 `npm run dev`後、表示されたローカルURL(既定 `http://localhost:5173`)をブラウザで開いてください。
 Webカメラ機能を使う場合はHTTPS、またはlocalhost経由でのアクセスが必要です。
+
+### GNMアセットの生成 (Head Backend: GNM を使う場合のみ)
+
+GNM Headのモデルファイルはリポジトリに含まれない。以下で生成する (Python + numpy が必要):
+
+```bash
+git clone --depth 1 https://github.com/google/GNM.git /tmp/GNM
+python tools/export_gnm_assets.py /tmp/GNM/gnm/shape/data/versions/v3_0/gnm_head.npz
+# → public/gnm/gnm_head_lite.bin (約5MB) が生成される
+```
 
 ### その他コマンド
 
@@ -61,11 +76,16 @@ npm run preview  # ビルド結果のプレビュー
 - `NEURAL`系 (Depth Anything V2 Small / MODNet): **重みは商用可**(Apache-2.0)だが、
   学習データに非商用/非開示のもの(VKITTI2, SA-1B, 私有データ等)を含む。
   MEASURED系との**品質比較・評価用**の位置づけ。商用出荷物に含める場合は要法務判断
+- `GNM Head` (google/GNM): **Apache-2.0**。学習データは約5,000人の自社スタジオ収録3Dスキャン
+  (arXiv:2607.23687) だが、被写体同意の明示記載はモデルカード/論文で未確認。
+  商用出荷物に含める場合は同意取得の確認を推奨
 
 ## ディレクトリ構成
 
 ```text
 index.html
+tools/
+  export_gnm_assets.py # GNM Head npz → ブラウザ用軽量アセット変換 (ビルド時)
 src/
   main.ts          # エントリポイント。UI配線・シーン構築・レンダーループ
   input.ts         # Webcam / ファイル入力
@@ -76,6 +96,8 @@ src/
   personSegmentation.ts # MediaPipe SelfieMulticlassによる実測シルエット/髪マスク
   portraitDepth.ts # TF.js ARPortraitDepthによる実測人物Depthとクリーンアップ
   neuralSources.ts # Depth Anything V2 / MODNet (NEURALソース。遅延ロード)
+  gnmHead.ts       # GNM Headのアセット読込と写真へのフィッティング (遅延ロード)
+  gnmHeadMesh.ts   # GNMバックエンドのメッシュ構築 (真3D頭部+実測髪シェル)
   headMask.ts      # 頭部シルエットマスク(楕円近似。比較用フォールバック)
   headDepth.ts     # Pseudo Head Depth / Edge Rolloff / Face-Head Blend / Hair Volume
   meshUtils.ts     # メッシュ共通処理 (法線+Z固定など)

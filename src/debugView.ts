@@ -15,6 +15,7 @@ export interface SceneStateLike {
   normalized: NormalizedFaceResult;
   faceOnly: FaceOnlyBuild;
   fullHead: FullHeadBuild;
+  gnmHead?: { headMesh: THREE.Mesh; hairMesh: THREE.Mesh | null } | null;
   texture: THREE.Texture;
   mouthAnchors: MouthAnchors;
   fullHeadMouthTable: MouthDeformEntry[];
@@ -23,6 +24,8 @@ export interface SceneStateLike {
 export interface DebugGuiOptions {
   onDepthParamsChanged: () => void;
   onSourceChanged: () => void;
+  onBackendChanged: () => void; // Head Backend切替 (GNMは遅延ロード)
+  onGnmParamsChanged: () => void; // GNMのフィット/髪シェルパラメータ変更 (再構築)
   onYawRangeChanged: () => void;
   onPitchRangeChanged: () => void;
   getSceneState: () => SceneStateLike | null;
@@ -136,6 +139,12 @@ export function applyDebugVisualization(state: SceneStateLike | null, params: Pa
   const fhMat = state.fullHead.mesh.material as THREE.MeshStandardMaterial;
   foMat.wireframe = params.showWireframe;
   fhMat.wireframe = params.showWireframe;
+  if (state.gnmHead) {
+    (state.gnmHead.headMesh.material as THREE.MeshStandardMaterial).wireframe = params.showWireframe;
+    if (state.gnmHead.hairMesh) {
+      (state.gnmHead.hairMesh.material as THREE.MeshStandardMaterial).wireframe = params.showWireframe;
+    }
+  }
 
   if (params.showLandmarks) {
     const pts = ensureLandmarkPoints(state.faceOnly);
@@ -209,6 +218,23 @@ export function setupDebugGui(container: HTMLElement, params: Params, options: D
     });
   sourceFolder.add(params, 'measuredRegularize', 0, 1, 0.01).name('Depth Regularize').onChange(notifyDepth);
   sourceFolder.add(params, 'measuredDepthGain', 0, 3, 0.05).name('Depth Gain').onChange(notifyDepth);
+  // GRID=2.5D relief / GNM=真3D頭部(Google GNM Head)+実測髪シェル
+  sourceFolder
+    .add(params, 'headBackend', ['GRID', 'GNM'])
+    .name('Head Backend')
+    .onChange(() => options.onBackendChanged());
+  sourceFolder
+    .add(params, 'gnmIdentityReg', 0.05, 10, 0.05)
+    .name('GNM Identity Reg')
+    .onFinishChange(() => options.onGnmParamsChanged());
+  sourceFolder
+    .add(params, 'gnmHairLift', 0, 0.2, 0.005)
+    .name('GNM Hair Lift')
+    .onFinishChange(() => options.onGnmParamsChanged());
+  sourceFolder
+    .add(params, 'gnmHairRolloff', 0, 1, 0.01)
+    .name('GNM Hair Rolloff')
+    .onFinishChange(() => options.onGnmParamsChanged());
   sourceFolder.open();
 
   const depthFolder = gui.addFolder('Depth Parameters');
