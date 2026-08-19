@@ -55,6 +55,12 @@ export function buildGnmHead(
   // 試したが、髪シェルの縁でレイ整合が壊れて生え際が痩せる副作用が大きく、
   // 「表示側を正射影に揃える」方が全バックエンドで一貫すると判断した。
 
+  // 耳の縮小: 耳はフィット拘束点が無く統計平均の形状のままで、写真の耳と
+  // 位置・形が合わずテクスチャが滲んで実際より大きく見える。左右それぞれの
+  // 耳重心へ向けてearWeightで滑らかに縮め (境界は係数0で頭部と連続)、
+  // さらに人物シルエットからはみ出す頂点は頭部中心へ引き込む。
+  applyEarReduction(model, fit.vertices, ctx, seg, params.gnmEarScale);
+
   // --- Head geometry ---
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute('position', new THREE.BufferAttribute(fit.vertices, 3));
@@ -151,7 +157,9 @@ export function buildGnmHead(
   // --- 表情 (GNM expression basis) ---
   // 未変換のneutral頂点を保持し、表情係数を足してから相似変換して差し替える。
   // UV/fallback/alphaはneutral時のまま使う (写真は表面に追従して動く)。
-  const neutralUntransformed = applyIdentity(model, fit.coeffs);
+  // 注意: applyIdentityから作り直すと耳縮小などの後処理が毎フレーム消えるため、
+  // 最終頂点 (fit.vertices) を逆相似変換して作る。
+  const neutralUntransformed = invertSimilarity(fit.vertices, fit.sim);
   const exprCurrent = new Float32Array(model.expressionCount);
   const exprTarget = new Float32Array(model.expressionCount);
   const posAttr = geometry.getAttribute('position') as THREE.BufferAttribute;
@@ -376,6 +384,78 @@ function buildHairShell(
   });
 
   return { mesh: new THREE.Mesh(geometry, material), alphaTexture };
+}
+
+/** 相似変換の逆変換 (新しい配列を返す)。 */
+function invertSimilarity(
+  verts: Float32Array,
+  sim: { s: number; cos: number; sin: number; tx: number; ty: number; tz: number },
+): Float32Array {
+  const out = new Float32Array(verts.length);
+  for (let i = 0; i < verts.length; i += 3) {
+    const dx = verts[i] - sim.tx;
+    const dy = verts[i + 1] - sim.ty;
+    out[i] = (sim.cos * dx + sim.sin * dy) / sim.s;
+    out[i + 1] = (-sim.sin * dx + sim.cos * dy) / sim.s;
+    out[i + 2] = (verts[i + 2] - sim.tz) / sim.s;
+  }
+  return out;
+}
+
+/**
+ * 耳頂点を左右それぞれの耳重心へ向けて縮める + シルエットからのはみ出しを引き込む。
+ * 縮小係数はearWeightで滑らかに効かせる (境界付近は0で頭部メッシュと連続)。
+ */
+function applyEarReduction(
+  model: GnmModel,
+  vertices: Float32Array,
+  ctx: FullHeadBuildContext,
+  seg: ReturnType<typeof selectSegmentation>,
+  earScale: number,
+): void {
+  if (earScale >= 0.999 && !seg) return;
+
+  // 左右の耳重心 (earWeight加重)
+  const centroid = { left: [0, 0, 0, 0], right: [0, 0, 0, 0] }; // x,y,z,weightSum
+  for (let i = 0; i < model.vertexCount; i++) {
+    const ew = model.earWeight[i] / 255;
+    if (ew < 0.1) continue;
+    const side = vertices[i * 3] < 0 ? centroid.left : centroid.right;
+    side[0] += vertices[i * 3] * ew;
+    side[1] += vertices[i * 3 + 1] * ew;
+    side[2] += vertices[i * 3 + 2] * ew;
+    side[3] += ew;
+  }
+  for (const side of [centroid.left, centroid.right]) {
+    if (side[3] > 0) {
+      side[0] /= side[3];
+      side[1] /= side[3];
+      side[2] /= side[3];
+    }
+  }
+
+  for (let i = 0; i < model.vertexCount; i++) {
+    const ew = model.earWeight[i] / 255;
+    if (ew < 0.05) continue;
+    const c = vertices[i * 3] < 0 ? centroid.left : centroid.right;
+    const k = 1 - (1 - earScale) * ew; // 境界(ew→0)で1=無変形
+    vertices[i * 3] = c[0] + (vertices[i * 3] - c[0]) * k;
+    vertices[i * 3 + 1] = c[1] + (vertices[i * 3 + 1] - c[1]) * k;
+    vertices[i * 3 + 2] = c[2] + (vertices[i * 3 + 2] - c[2]) * k;
+
+    // 人物シルエットからはみ出す耳頂点は頭部中心へ引き込む (髪で隠れている人など)
+    if (seg && ew > 0.3) {
+      let ex = vertices[i * 3];
+      const ey = vertices[i * 3 + 1];
+      for (let s = 0; s < 24; s++) {
+        const eu = (ex * ctx.faceWidthPx + ctx.headCenterPx.x) / ctx.imageWidth;
+        const evv = 1 - (ctx.headCenterPx.y - ey * ctx.faceWidthPx) / ctx.imageHeight;
+        if (sampleField(seg.person, eu, evv) >= 0.45) break;
+        ex *= 0.96;
+      }
+      vertices[i * 3] = ex;
+    }
+  }
 }
 
 const SCALP_BINS_X = 96;

@@ -45,6 +45,9 @@ export interface Params {
   gnmHairLift: number; // 髪シェルをGNM表面手前へ持ち上げる量 (モデル空間)
   gnmHairRolloff: number; // 髪シェル縁を後方へ巻き込む量 (モデル空間)
   gnmExprIntensity: number; // ランダム表情の強さ (表情係数の標準偏差, z-score)
+  // 耳の縮小率 (1=GNM統計形状のまま)。耳はフィット拘束点が無く統計平均のままで、
+  // 写真の耳と位置・形が合わずテクスチャが滲むため、縮めて目立たなくする
+  gnmEarScale: number;
   gnmExprAuto: boolean; // 一定間隔でランダム表情へ遷移し続ける
 
   // --- アニメーション (Blink) ---
@@ -117,6 +120,7 @@ export const DEFAULT_PARAMS: Params = {
   gnmHairRolloff: 0.08,
   gnmExprIntensity: 1.0,
   gnmExprAuto: true,
+  gnmEarScale: 0.7,
 
   blinkEnabled: true,
   blinkPeriodMinSec: 3,

@@ -237,6 +237,10 @@ export function setupDebugGui(container: HTMLElement, params: Params, options: D
     .add(params, 'gnmHairRolloff', 0, 1, 0.01)
     .name('GNM Hair Rolloff')
     .onFinishChange(() => options.onGnmParamsChanged());
+  sourceFolder
+    .add(params, 'gnmEarScale', 0.3, 1, 0.05)
+    .name('GNM Ear Scale')
+    .onFinishChange(() => options.onGnmParamsChanged());
   sourceFolder.open();
 
   // GNMバックエンド時のみ効く (GNMは383成分中、目20+下顔面20の表情基底を持つ)
