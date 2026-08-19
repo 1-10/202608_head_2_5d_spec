@@ -120,7 +120,9 @@ export const DEFAULT_PARAMS: Params = {
   gnmHairRolloff: 0.08,
   gnmExprIntensity: 1.0,
   gnmExprAuto: true,
-  gnmEarScale: 0.7,
+  // 0.4: 耳は実測シェル (overlayの顎上bodySkin) が正面〜±30°を担い、
+  // 縮小したGNM統計耳は深い角度でのボリューム保険として背後に残す
+  gnmEarScale: 0.4,
 
   blinkEnabled: true,
   blinkPeriodMinSec: 3,

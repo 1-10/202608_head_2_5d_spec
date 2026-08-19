@@ -26,7 +26,7 @@ export interface SegmentationResult {
   faceSkin: ScalarField;
   /** 頭部シルエット: hair + faceSkin + accessories + (顎より上のbodySkin=耳など) */
   head: ScalarField;
-  /** 頭部の「上物」: 髪 + 帽子等のaccessories (顎より上)。GNMの髪シェルのマスクに使う */
+  /** 頭部の「上物」: 髪 + (帽子等accessories + 耳≒bodySkin)(顎より上)。GNMのシェルのマスクに使う */
   overlay: ScalarField;
 }
 
@@ -97,7 +97,8 @@ export class PersonSegmenter {
         // personマスクとの積で背景誤検出を抑える
         head[i] = clamp01(h) * person[i];
         // 上物 = 髪 (顎下のロングヘア・あごひげ含む) + 帽子等のaccessories (顎より上)
-        overlay[i] = clamp01(hair[i] + accessories[i] * aboveChin) * person[i];
+        // + 顎上のbodySkin (≒耳。実測シェルで本人の耳を立体化し、GNM統計耳の代替にする)
+        overlay[i] = clamp01(hair[i] + (accessories[i] + bodySkin[i]) * aboveChin) * person[i];
       }
     }
 
