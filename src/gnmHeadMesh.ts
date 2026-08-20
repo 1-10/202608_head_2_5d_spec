@@ -72,6 +72,12 @@ export interface GnmHeadBuild {
   hairMesh: THREE.Mesh | null;
   /** ランドマーク重畳デバッグ表示 (既定で非表示。Show Landmarksで切替)。 */
   landmarkOverlay: THREE.Object3D;
+  /** headに実際に投影している画像 (Hair Skin Fill / bald適用後)。デバッグ表示用 */
+  headCanvas: HTMLCanvasElement;
+  /** 髪シェルが描く髪だけの画像 (写真×髪マスクalpha)。セグメンテーション無しはnull */
+  hairLayerCanvas: HTMLCanvasElement | null;
+  /** レイヤー画像プレビューの頭部クロップ (画像に対する割合 0-1, yは上から)。 */
+  layerPreviewCrop: { x: number; y: number; w: number; h: number };
   fit: GnmFitResult;
   setNeutralExpression(): void;
   /** 表情係数を直接目標に設定する (長さexpressionCount。感情プリセット用)。 */
@@ -297,6 +303,9 @@ export function buildGnmHead(
     headMesh,
     hairMesh: hair?.mesh ?? null,
     landmarkOverlay: landmarkOverlay.object,
+    headCanvas,
+    hairLayerCanvas: seg ? buildHairLayerCanvas(sourceCanvas, seg) : null,
+    layerPreviewCrop: computeHeadCropFraction(ctx),
     fit,
     setNeutralExpression() {
       exprTarget.fill(0);
@@ -338,6 +347,47 @@ export function buildGnmHead(
       }
     },
   };
+}
+
+/** 頭部まわりのクロップ矩形を画像割合 (0-1) で求める (プレビュー表示用)。 */
+function computeHeadCropFraction(ctx: GnmBuildContext): { x: number; y: number; w: number; h: number } {
+  const cx = ctx.headCenterPx.x / ctx.imageWidth;
+  const cy = ctx.headCenterPx.y / ctx.imageHeight;
+  const fw = ctx.faceWidthPx / ctx.imageWidth;
+  const fh = ctx.faceWidthPx / ctx.imageHeight;
+  // 髪を含む頭部全体が入る余裕 (横±1.5faceWidth, 上2.0 / 下1.6faceWidth)
+  const x0 = Math.max(0, cx - fw * 1.5);
+  const x1 = Math.min(1, cx + fw * 1.5);
+  const y0 = Math.max(0, cy - fh * 2.0);
+  const y1 = Math.min(1, cy + fh * 1.6);
+  return { x: x0, y: y0, w: Math.max(1e-6, x1 - x0), h: Math.max(1e-6, y1 - y0) };
+}
+
+const HAIR_LAYER_PREVIEW_MAX_DIM = 512;
+
+/** 写真×髪マスクalphaの「髪だけの画像」を作る (レイヤー分離のデバッグ表示用)。 */
+function buildHairLayerCanvas(
+  sourceCanvas: HTMLCanvasElement,
+  seg: SegmentationResult,
+): HTMLCanvasElement {
+  const scale = Math.min(1, HAIR_LAYER_PREVIEW_MAX_DIM / Math.max(sourceCanvas.width, sourceCanvas.height));
+  const w = Math.max(2, Math.round(sourceCanvas.width * scale));
+  const h = Math.max(2, Math.round(sourceCanvas.height * scale));
+  const canvas = document.createElement('canvas');
+  canvas.width = w;
+  canvas.height = h;
+  const c = canvas.getContext('2d')!;
+  c.drawImage(sourceCanvas, 0, 0, w, h);
+  const img = c.getImageData(0, 0, w, h);
+  for (let y = 0; y < h; y++) {
+    const v = 1 - (y + 0.5) / h;
+    for (let x = 0; x < w; x++) {
+      const u = (x + 0.5) / w;
+      img.data[(y * w + x) * 4 + 3] = Math.round(sampleField(seg.hair, u, v) * 255);
+    }
+  }
+  c.putImageData(img, 0, 0);
+  return canvas;
 }
 
 const MOUTH_INTERIOR_BINS_X = 96;

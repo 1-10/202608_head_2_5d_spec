@@ -65,6 +65,8 @@ export interface Params {
   showWireframe: boolean;
   // 写真ランドマーク(色点)とGNM表面対応点からの残差(白線)の重畳表示
   showLandmarks: boolean;
+  // レイヤー分離画像 (headテクスチャ / 髪だけの画像) を画面隅に表示
+  showLayerImages: boolean;
 
   // --- カメラ ---
   cameraFovDeg: number;
@@ -110,6 +112,7 @@ export const DEFAULT_PARAMS: Params = {
 
   showWireframe: false,
   showLandmarks: false,
+  showLayerImages: false,
 
   cameraFovDeg: 30,
   cameraDistanceRatio: 3.4,

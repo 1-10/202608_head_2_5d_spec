@@ -22,6 +22,62 @@ export function applyDebugVisualization(gnmHead: GnmHeadBuild | null, params: Pa
     (gnmHead.hairMesh.material as THREE.MeshStandardMaterial).wireframe = params.showWireframe;
   }
   gnmHead.landmarkOverlay.visible = params.showLandmarks;
+  updateLayerPreview(gnmHead, params.showLayerImages);
+}
+
+const LAYER_PREVIEW_ID = 'gnm-layer-preview';
+const LAYER_PREVIEW_HEIGHT = 160; // 各サムネイルの表示高さ (px)
+
+/**
+ * レイヤー分離画像 (headテクスチャ / 髪だけの画像) を画面左下へ表示する。
+ * パネルはbody直下のシングルトンで、再構築のたびに描き直す。
+ */
+function updateLayerPreview(gnmHead: GnmHeadBuild, visible: boolean): void {
+  let panel = document.getElementById(LAYER_PREVIEW_ID);
+  if (!visible) {
+    if (panel) panel.style.display = 'none';
+    return;
+  }
+  if (!panel) {
+    panel = document.createElement('div');
+    panel.id = LAYER_PREVIEW_ID;
+    panel.style.cssText =
+      'position:fixed;left:12px;bottom:40px;z-index:20;display:flex;gap:8px;' +
+      'pointer-events:none;font:11px sans-serif;color:#ddd;';
+    document.body.appendChild(panel);
+  }
+  panel.style.display = 'flex';
+  panel.replaceChildren();
+
+  const items: Array<{ label: string; source: HTMLCanvasElement }> = [
+    { label: '顔テクスチャ (head)', source: gnmHead.headCanvas },
+  ];
+  if (gnmHead.hairLayerCanvas) items.push({ label: '髪レイヤー (shell)', source: gnmHead.hairLayerCanvas });
+
+  // 頭部まわりだけをクロップして表示する (全身写真だと頭部が小さすぎるため)
+  const crop = gnmHead.layerPreviewCrop;
+  for (const item of items) {
+    const fig = document.createElement('div');
+    fig.style.cssText = 'display:flex;flex-direction:column;gap:2px;align-items:flex-start;';
+    const thumb = document.createElement('canvas');
+    const sx = crop.x * item.source.width;
+    const sy = crop.y * item.source.height;
+    const sw = crop.w * item.source.width;
+    const sh = crop.h * item.source.height;
+    thumb.width = Math.max(1, Math.round((sw / sh) * LAYER_PREVIEW_HEIGHT));
+    thumb.height = LAYER_PREVIEW_HEIGHT;
+    // 透明部分 (髪レイヤーの髪以外) が見えるようダークグレー下地を敷く
+    thumb.style.cssText = 'background:#2a2a2a;border:1px solid #555;border-radius:3px;';
+    const c = thumb.getContext('2d')!;
+    c.imageSmoothingEnabled = true;
+    c.imageSmoothingQuality = 'high';
+    c.drawImage(item.source, sx, sy, sw, sh, 0, 0, thumb.width, thumb.height);
+    const caption = document.createElement('span');
+    caption.textContent = item.label;
+    caption.style.cssText = 'background:rgba(0,0,0,0.5);padding:1px 4px;border-radius:2px;';
+    fig.append(thumb, caption);
+    panel.appendChild(fig);
+  }
 }
 
 export function setupDebugGui(container: HTMLElement, params: Params, options: DebugGuiOptions): GUI {
@@ -128,6 +184,10 @@ export function setupDebugGui(container: HTMLElement, params: Params, options: D
   debugFolder
     .add(params, 'showLandmarks')
     .name('Show Landmarks')
+    .onChange(() => applyDebugVisualization(options.getGnmHead(), params));
+  debugFolder
+    .add(params, 'showLayerImages')
+    .name('Show Layer Images')
     .onChange(() => applyDebugVisualization(options.getGnmHead(), params));
 
   return gui;
