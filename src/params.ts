@@ -4,10 +4,12 @@
 
 // 実測ソース (テクスチャUVクランプ・髪シェル用) の供給源。
 // MEASURED = Google公式モデル (SelfieMulticlass / ARPortraitDepth。学習データまで商用クリーン)
+// DAVID    = Microsoft DAViD (人物特化Depth。100%合成データ学習+MIT = 商用クリーン。
+//            初回のみモデルDL 110-215MB)
 // NEURAL   = 高品質ニューラル (BiRefNet / Depth Anything V2。重みは商用可だが学習データはグレー。比較用)
 // NONE     = 不使用 (マスクなし=UVクランプ無効、Depthなし=髪シェル無効)
 export type MaskSource = 'MEASURED' | 'NEURAL' | 'NONE';
-export type DepthSource = 'MEASURED' | 'NEURAL' | 'NONE';
+export type DepthSource = 'MEASURED' | 'DAVID' | 'NEURAL' | 'NONE';
 
 // GNMの表情感情 (AUTO=自動巡回, MANUAL=パーツ別スライダー)。
 // キーは main.ts の感情→プリセット表と対応する

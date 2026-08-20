@@ -212,6 +212,7 @@ async function acquireMeasuredData(
   const measured: MeasuredHeadData = {
     segmentation: null,
     depth: null,
+    davidDepth: null,
     neuralSegmentation: null,
     neuralDepth: null,
   };
@@ -255,6 +256,48 @@ async function acquireMeasuredData(
   }
 
   return measured;
+}
+
+let davidAcquisitionBusy = false;
+let davidEstimator: import('./davidDepth').DavidDepthEstimator | null = null;
+
+/**
+ * DAViD Depth (商用クリーンな人物特化Depth) を必要時に遅延取得する。
+ * モデルDL (110-215MB) が大きいため、ソースとして選択されて初めてロードする。
+ */
+async function ensureDavidDepth(): Promise<void> {
+  if (!sceneState || davidAcquisitionBusy) return;
+  const s = sceneState;
+  const m = s.ctx.measured;
+  if (!m || params.depthSource !== 'DAVID' || m.davidDepth) return;
+  const personMask = m.segmentation?.person ?? null;
+  if (!personMask) {
+    setStatus('DAViD Depthには人物マスクが必要です (セグメンテーション取得失敗)。', true);
+    return;
+  }
+
+  davidAcquisitionBusy = true;
+  try {
+    setStatus('DAViDでDepthを推定しています… (初回はモデルDLで時間がかかります)');
+    const mod = await import('./davidDepth');
+    davidEstimator ??= new mod.DavidDepthEstimator();
+    await davidEstimator.init();
+    const t0 = performance.now();
+    m.davidDepth = await davidEstimator.estimate(
+      s.sourceCanvas,
+      personMask,
+      s.normalized.headCenterPx,
+      s.normalized.faceWidth,
+    );
+    console.debug(`DAViD Depth推定: ${(performance.now() - t0).toFixed(0)}ms`);
+    await rebuildGnmHead();
+    if (!els.status.classList.contains('error')) setStatus('');
+  } catch (err) {
+    console.error('DAViD Depthの取得に失敗しました。', err);
+    setStatus('DAViD Depthの取得に失敗しました。ARPortraitDepthで表示しています。', true);
+  } finally {
+    davidAcquisitionBusy = false;
+  }
 }
 
 let neuralAcquisitionBusy = false;
@@ -438,7 +481,8 @@ async function processImage(captured: CapturedImage): Promise<void> {
 
     await rebuildGnmHead();
 
-    // NEURALが選択済みの状態で新しい画像が来た場合は遅延取得を開始する
+    // DAVID/NEURALが選択済みの状態で新しい画像が来た場合は遅延取得を開始する
+    void ensureDavidDepth();
     void ensureNeuralSources();
   } catch (err) {
     if (err instanceof FaceDetectionError) {
@@ -506,8 +550,10 @@ window.addEventListener('resize', () => viewport.resize());
 // --- GUIパラメータパネル ---
 setupDebugGui(els.guiContainer, params, {
   onSourceChanged: () => {
-    // まず取得済みソースで即時再構築し、NEURAL系が未取得なら裏で取得して再構築する
-    void rebuildGnmHead().then(() => ensureNeuralSources());
+    // まず取得済みソースで即時再構築し、DAVID/NEURAL系が未取得なら裏で取得して再構築する
+    void rebuildGnmHead()
+      .then(() => ensureDavidDepth())
+      .then(() => ensureNeuralSources());
   },
   onGnmParamsChanged: () => {
     void rebuildGnmHead();

@@ -53,6 +53,7 @@ function updateLayerPreview(gnmHead: GnmHeadBuild, visible: boolean, scale: numb
     { label: '顔テクスチャ (head)', source: gnmHead.headCanvas },
   ];
   if (gnmHead.hairLayerCanvas) items.push({ label: '髪レイヤー (shell)', source: gnmHead.hairLayerCanvas });
+  if (gnmHead.depthCanvas) items.push({ label: '深度 (depth)', source: gnmHead.depthCanvas });
 
   // 頭部まわりだけをクロップして表示する (全身写真だと頭部が小さすぎるため)
   const crop = gnmHead.layerPreviewCrop;
@@ -92,7 +93,7 @@ export function setupDebugGui(container: HTMLElement, params: Params, options: D
     .name('Mask Source')
     .onChange(() => options.onSourceChanged());
   sourceFolder
-    .add(params, 'depthSource', ['MEASURED', 'NEURAL', 'NONE'])
+    .add(params, 'depthSource', ['MEASURED', 'DAVID', 'NEURAL', 'NONE'])
     .name('Depth Source')
     .onChange(() => options.onSourceChanged());
   sourceFolder

@@ -34,6 +34,7 @@ import type { Params } from './params';
 export interface MeasuredHeadData {
   segmentation: SegmentationResult | null; // MediaPipe SelfieMulticlass
   depth: ScalarField | null; // ARPortraitDepth 相対Depth (0-1)
+  davidDepth: ScalarField | null; // DAViD 人物相対Depth (遅延取得。商用クリーン)
   neuralSegmentation: SegmentationResult | null; // BiRefNet×MediaPipe合成 (遅延取得)
   neuralDepth: ScalarField | null; // Depth Anything V2 (遅延取得)
 }
@@ -60,10 +61,11 @@ export function selectSegmentation(ctx: GnmBuildContext, params: Params): Segmen
   return seg;
 }
 
-/** depthSourceに応じたDepth場を選ぶ (NEURAL未取得時はMEASUREDへフォールバック)。 */
+/** depthSourceに応じたDepth場を選ぶ (DAVID/NEURAL未取得時はMEASUREDへフォールバック)。 */
 export function selectDepth(ctx: GnmBuildContext, params: Params): ScalarField | null {
   const m = ctx.measured;
   if (!m) return null;
+  if (params.depthSource === 'DAVID') return m.davidDepth ?? m.depth;
   if (params.depthSource === 'NEURAL') return m.neuralDepth ?? m.depth;
   if (params.depthSource === 'MEASURED') return m.depth;
   return null;
@@ -79,6 +81,8 @@ export interface GnmHeadBuild {
   headCanvas: HTMLCanvasElement;
   /** 髪シェルが描く髪だけの画像 (写真×髪マスクalpha)。セグメンテーション無しはnull */
   hairLayerCanvas: HTMLCanvasElement | null;
+  /** 使用中のDepth場のグレースケール可視化 (白=手前)。Depth無しはnull */
+  depthCanvas: HTMLCanvasElement | null;
   /** レイヤー画像プレビューの頭部クロップ (画像に対する割合 0-1, yは上から)。 */
   layerPreviewCrop: { x: number; y: number; w: number; h: number };
   fit: GnmFitResult;
@@ -346,6 +350,7 @@ export function buildGnmHead(
     landmarkOverlay: landmarkOverlay.object,
     headCanvas,
     hairLayerCanvas: seg ? buildHairLayerCanvas(sourceCanvas, seg) : null,
+    depthCanvas: buildDepthPreviewCanvas(ctx, params),
     layerPreviewCrop: computeHeadCropFraction(ctx),
     fit,
     setNeutralExpression() {
@@ -462,6 +467,46 @@ function buildHairLayerCanvas(
     for (let x = 0; x < w; x++) {
       const u = (x + 0.5) / w;
       img.data[(y * w + x) * 4 + 3] = Math.round(sampleField(seg.hair, u, v) * 255);
+    }
+  }
+  c.putImageData(img, 0, 0);
+  return canvas;
+}
+
+const DEPTH_PREVIEW_MAX_DIM = 512;
+
+/** 使用中のDepth場を画像全体空間のグレースケールへ可視化する (白=手前、rect外=黒)。 */
+function buildDepthPreviewCanvas(ctx: GnmBuildContext, params: Params): HTMLCanvasElement | null {
+  const depth = selectDepth(ctx, params);
+  if (!depth) return null;
+  const scale = Math.min(1, DEPTH_PREVIEW_MAX_DIM / Math.max(ctx.imageWidth, ctx.imageHeight));
+  const w = Math.max(2, Math.round(ctx.imageWidth * scale));
+  const h = Math.max(2, Math.round(ctx.imageHeight * scale));
+  const canvas = document.createElement('canvas');
+  canvas.width = w;
+  canvas.height = h;
+  const c = canvas.getContext('2d')!;
+  const img = c.createImageData(w, h);
+  // rect内のmin-maxで正規化して表示する
+  let min = Infinity;
+  let max = -Infinity;
+  for (let i = 0; i < depth.data.length; i++) {
+    if (depth.data[i] < min) min = depth.data[i];
+    if (depth.data[i] > max) max = depth.data[i];
+  }
+  const span = Math.max(1e-9, max - min);
+  for (let y = 0; y < h; y++) {
+    const v = 1 - (y + 0.5) / h;
+    for (let x = 0; x < w; x++) {
+      const u = (x + 0.5) / w;
+      const { u0, v0, u1, v1 } = depth.rect;
+      const inside = u >= u0 && u <= u1 && v >= v0 && v <= v1;
+      const g = inside ? Math.round(((sampleField(depth, u, v) - min) / span) * 255) : 0;
+      const i = (y * w + x) * 4;
+      img.data[i] = g;
+      img.data[i + 1] = g;
+      img.data[i + 2] = g;
+      img.data[i + 3] = 255;
     }
   }
   c.putImageData(img, 0, 0);
