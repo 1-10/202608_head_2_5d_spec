@@ -3,17 +3,17 @@
 // マジックナンバーはここに集約し、他モジュールはこのオブジェクトを参照する。
 
 // 実測ソース (テクスチャUVクランプ・髪シェル用) の供給源。
-// MEASURED = Google公式モデル (SelfieMulticlass / ARPortraitDepth。学習データまで商用クリーン)
-// DAVID    = Microsoft DAViD (人物特化Depth。100%合成データ学習+MIT = 商用クリーン。
-//            初回のみモデルDL 110-215MB)。ARPortraitDepthとの比較用にMEASUREDも残す
-// NEURAL   = 高品質ニューラルマット (BiRefNet。重みは商用可だが学習データはグレー。比較用)
-// NONE     = 不使用 (マスクなし=UVクランプ無効、Depthなし=髪シェル無効)
-export type MaskSource = 'MEASURED' | 'NEURAL' | 'NONE';
-export type DepthSource = 'MEASURED' | 'DAVID' | 'NONE';
+// 値は実モデル名で持つ (すべて学習データまで商用クリーン):
+// SELFIE_MULTICLASS = Google SelfieMulticlass 256px (意味分け: 髪/肌/人物)
+// ARPORTRAIT_DEPTH  = Google ARPortraitDepth (低解像度Depth。DAViDとの比較用)
+// DAVID             = Microsoft DAViD multi-task (人物特化のDepth/法線/前景。
+//                     100%合成データ学習+MIT。初回のみモデルDL ~660MB)
+// NONE              = 不使用 (マスクなし=UVクランプ無効、Depthなし=髪シェル無効)
+export type MaskSource = 'SELFIE_MULTICLASS' | 'NONE';
+export type DepthSource = 'DAVID' | 'ARPORTRAIT_DEPTH' | 'NONE';
 // 人物シルエット (UVクランプ・Depth cleanup境界) の供給源。
-// DAVID=ソフト前景セグ (512px, multi-taskの同時出力)。crop外はMEASUREDで補完。
-// MEASURED=SelfieMulticlassの person (256px, 比較用)
-export type PersonSource = 'DAVID' | 'MEASURED';
+// DAVID=ソフト前景セグ (512px)。crop外はSelfieMulticlassで補完。
+export type PersonSource = 'DAVID' | 'SELFIE_MULTICLASS';
 // 表面法線の供給源。DAVID=実測法線をObjectSpaceNormalMapとしてhead/髪に貼り、
 // 回転時の照明応答を与える (写真の陰影 + 実測法線のシェーディング)。NONE=平坦(+Z)
 export type NormalSource = 'DAVID' | 'NONE';
@@ -103,7 +103,7 @@ export const DEFAULT_PARAMS: Params = {
   maxYawDeg: 15,
   maxPitchDeg: 12,
 
-  maskSource: 'MEASURED',
+  maskSource: 'SELFIE_MULTICLASS',
   depthSource: 'DAVID',
   normalSource: 'DAVID',
   personSource: 'DAVID',

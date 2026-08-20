@@ -6,7 +6,7 @@ import type { Params } from './params';
 import type { GnmHeadBuild } from './gnmHeadMesh';
 
 export interface DebugGuiOptions {
-  onSourceChanged: () => void; // Mask/Depthソース切替 (NEURALは遅延取得)
+  onSourceChanged: () => void; // Mask/Depth/Normal/Personソース切替 (DAViDは遅延取得)
   onGnmParamsChanged: () => void; // フィット/髪シェルパラメータ変更 (再構築)
   onCameraChanged: () => void;
   onYawRangeChanged: () => void;
@@ -88,21 +88,21 @@ export function setupDebugGui(container: HTMLElement, params: Params, options: D
   const gui = new GUI({ container, title: 'Parameters' });
 
   const sourceFolder = gui.addFolder('Data Sources');
-  // MEASURED=Google公式モデル(商用クリーン) / NEURAL=BiRefNet・DepthAnythingV2(高品質・比較用) / NONE=不使用
+  // 選択肢は実モデル名 (すべて学習データまで商用クリーン)。DAViDはmulti-taskの同時出力
   sourceFolder
-    .add(params, 'maskSource', ['MEASURED', 'NEURAL', 'NONE'])
+    .add(params, 'maskSource', { SelfieMulticlass: 'SELFIE_MULTICLASS', None: 'NONE' })
     .name('Mask Source')
     .onChange(() => options.onSourceChanged());
   sourceFolder
-    .add(params, 'depthSource', ['MEASURED', 'DAVID', 'NONE'])
+    .add(params, 'depthSource', { 'DAViD': 'DAVID', 'ARPortraitDepth': 'ARPORTRAIT_DEPTH', 'None': 'NONE' })
     .name('Depth Source')
     .onChange(() => options.onSourceChanged());
   sourceFolder
-    .add(params, 'normalSource', ['DAVID', 'NONE'])
+    .add(params, 'normalSource', { 'DAViD': 'DAVID', 'None (平坦)': 'NONE' })
     .name('Normal Source')
     .onChange(() => options.onSourceChanged());
   sourceFolder
-    .add(params, 'personSource', ['DAVID', 'MEASURED'])
+    .add(params, 'personSource', { 'DAViD': 'DAVID', 'SelfieMulticlass': 'SELFIE_MULTICLASS' })
     .name('Person Source')
     .onChange(() => options.onSourceChanged());
   sourceFolder

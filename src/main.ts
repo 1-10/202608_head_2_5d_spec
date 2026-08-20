@@ -90,7 +90,7 @@ class Viewport {
 
 interface SceneState {
   ctx: GnmBuildContext;
-  sourceCanvas: HTMLCanvasElement; // NEURAL系の遅延推論で再利用する入力画像
+  sourceCanvas: HTMLCanvasElement; // DAViDの遅延推論で再利用する入力画像
   normalized: NormalizedFaceResult;
   rawLandmarks: FaceLandmark[]; // 元画像でのMediaPipe生検出値
   // bald画像 (髪を肌色化) での再検出値。輪郭の髪バイアス補正 (Bald Contour Fit) に使う
@@ -121,11 +121,6 @@ const inputManager = new InputManager(els.video);
 const faceDetector = new FaceDetector();
 const personSegmenter = new PersonSegmenter();
 const portraitDepth = new PortraitDepthEstimator();
-
-// NEURAL系 (transformers.js) はモデル・ランタイムとも大きいため、
-// ソースとして選択されて初めてdynamic importする。
-let neuralModule: typeof import('./neuralSources') | null = null;
-let neuralMatteEst: import('./neuralSources').NeuralMatteEstimator | null = null;
 
 // GNMアセット (gnm_head_lite.bin 約8.5MB) は初回構築時に一度だけロードする。
 let gnmModel: GnmModel | null = null;
@@ -214,7 +209,6 @@ async function acquireMeasuredData(
     davidDepth: null,
     davidNormalCanvas: null,
     davidPerson: null,
-    neuralSegmentation: null,
   };
 
   try {
@@ -298,50 +292,9 @@ async function ensureDavid(): Promise<void> {
     if (!els.status.classList.contains('error')) setStatus('');
   } catch (err) {
     console.error('DAViDの取得に失敗しました。', err);
-    setStatus('DAViDの取得に失敗しました。MEASUREDソースで表示しています。', true);
+    setStatus('DAViDの取得に失敗しました。ARPortraitDepth等へフォールバックして表示しています。', true);
   } finally {
     davidAcquisitionBusy = false;
-  }
-}
-
-let neuralAcquisitionBusy = false;
-
-/**
- * NEURALソース (BiRefNetマット / Depth Anything V2) を必要時に遅延取得する。
- * モデルDLが大きい(数十〜数百MB)ため、ソースとして選択されて初めてロードする。
- * 取得済みならそのまま、未取得なら推論してctx.measuredへ格納し、頭部を再構築する。
- */
-async function ensureNeuralSources(): Promise<void> {
-  if (!sceneState || neuralAcquisitionBusy) return;
-  const s = sceneState;
-  const m = s.ctx.measured;
-  if (!m) return;
-
-  const needMatte = params.maskSource === 'NEURAL' && !m.neuralSegmentation;
-  if (!needMatte) return;
-
-  neuralAcquisitionBusy = true;
-  try {
-    const mod = (neuralModule ??= await import('./neuralSources'));
-
-    if (!m.segmentation) {
-      setStatus('NEURALマスクにはMediaPipeセグメンテーションが必要です (意味分けに使用)。', true);
-    } else {
-      setStatus('BiRefNetでマットを推定しています… (初回はモデルDLで時間がかかります)');
-      neuralMatteEst ??= new mod.NeuralMatteEstimator();
-      await neuralMatteEst.init();
-      const matte = await neuralMatteEst.estimate(s.sourceCanvas);
-      m.neuralSegmentation = mod.refineSegmentationWithMatte(m.segmentation, matte);
-    }
-
-    await rebuildGnmHead();
-    if (!els.status.classList.contains('error')) setStatus('');
-  } catch (err) {
-    console.error('NEURALソースの取得に失敗しました。', err);
-    setStatus('NEURALソースの取得に失敗しました。フォールバックで表示しています。', true);
-    await rebuildGnmHead();
-  } finally {
-    neuralAcquisitionBusy = false;
   }
 }
 
@@ -465,9 +418,8 @@ async function processImage(captured: CapturedImage): Promise<void> {
 
     await rebuildGnmHead();
 
-    // DAVID/NEURALが選択済みの状態で新しい画像が来た場合は遅延取得を開始する
+    // DAVIDが選択済みの状態で新しい画像が来た場合は遅延取得を開始する
     void ensureDavid();
-    void ensureNeuralSources();
   } catch (err) {
     if (err instanceof FaceDetectionError) {
       setStatus(err.message, true);
@@ -534,10 +486,8 @@ window.addEventListener('resize', () => viewport.resize());
 // --- GUIパラメータパネル ---
 setupDebugGui(els.guiContainer, params, {
   onSourceChanged: () => {
-    // まず取得済みソースで即時再構築し、DAVID/NEURAL系が未取得なら裏で取得して再構築する
-    void rebuildGnmHead()
-      .then(() => ensureDavid())
-      .then(() => ensureNeuralSources());
+    // まず取得済みソースで即時再構築し、DAVIDが未取得なら裏で取得して再構築する
+    void rebuildGnmHead().then(() => ensureDavid());
   },
   onGnmParamsChanged: () => {
     void rebuildGnmHead();

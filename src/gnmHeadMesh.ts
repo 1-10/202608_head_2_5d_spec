@@ -28,8 +28,8 @@ import { rasterizeMaskCanvas, type SegmentationResult } from './personSegmentati
 import type { Params } from './params';
 
 /**
- * 実測/ニューラルソース一式。取得に失敗した(または未取得の)ものはnull。
- * NEURAL系がnullのままNEURALを選ぶとMEASURED系へフォールバックする。
+ * 実測ソース一式。取得に失敗した(または未取得の)ものはnull。
+ * DAVID系がnullのままDAVIDを選ぶと該当のGoogle系ソースへフォールバックする。
  */
 export interface MeasuredHeadData {
   segmentation: SegmentationResult | null; // MediaPipe SelfieMulticlass
@@ -39,7 +39,6 @@ export interface MeasuredHeadData {
   // 表面法線 (RGBエンコード済みObjectSpaceNormalMap, 画像全体UV空間)
   davidNormalCanvas: HTMLCanvasElement | null;
   davidPerson: ScalarField | null; // ソフト前景 (crop外はSelfieMulticlassで補完済み)
-  neuralSegmentation: SegmentationResult | null; // BiRefNet×MediaPipe合成 (遅延取得)
 }
 
 /** GNM頭部の構築に必要な入力一式 (画像1枚から導出される)。 */
@@ -52,14 +51,13 @@ export interface GnmBuildContext {
   measured: MeasuredHeadData | null;
 }
 
-/** maskSourceに応じたセグメンテーションを選ぶ (NEURAL未取得時はMEASUREDへフォールバック)。 */
+/** maskSourceに応じたセグメンテーションを選ぶ。 */
 export function selectSegmentation(ctx: GnmBuildContext, params: Params): SegmentationResult | null {
   const m = ctx.measured;
   if (!m) return null;
-  let seg: SegmentationResult | null = null;
-  if (params.maskSource === 'NEURAL') seg = m.neuralSegmentation ?? m.segmentation;
-  else if (params.maskSource === 'MEASURED') seg = m.segmentation;
-  if (!seg) return null;
+  const seg0 = params.maskSource === 'SELFIE_MULTICLASS' ? m.segmentation : null;
+  if (!seg0) return null;
+  let seg = seg0;
   // Mask Refine off時はGuided Filter前の生マスクへ戻す (効果比較用)
   if (!params.gnmMaskRefine && seg.hairRaw) seg = { ...seg, hair: seg.hairRaw };
   // 人物シルエットはDAViDソフト前景を優先 (境界精度が高い。意味分けはMediaPipeのまま)
@@ -67,12 +65,12 @@ export function selectSegmentation(ctx: GnmBuildContext, params: Params): Segmen
   return seg;
 }
 
-/** depthSourceに応じたDepth場を選ぶ (DAVID未取得時はMEASUREDへフォールバック)。 */
+/** depthSourceに応じたDepth場を選ぶ (DAVID未取得時はARPortraitDepthへフォールバック)。 */
 export function selectDepth(ctx: GnmBuildContext, params: Params): ScalarField | null {
   const m = ctx.measured;
   if (!m) return null;
   if (params.depthSource === 'DAVID') return m.davidDepth ?? m.depth;
-  if (params.depthSource === 'MEASURED') return m.depth;
+  if (params.depthSource === 'ARPORTRAIT_DEPTH') return m.depth;
   return null;
 }
 
