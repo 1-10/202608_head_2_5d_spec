@@ -138,20 +138,12 @@ export function setupDebugGui(container: HTMLElement, params: Params, options: D
     .name('Hair Rolloff')
     .onFinishChange(() => options.onGnmParamsChanged());
   fitFolder
-    .add(params, 'gnmBaldContourFit')
-    .name('Bald Contour Fit')
-    .onChange(() => options.onGnmParamsChanged());
-  fitFolder
     .add(params, 'gnmMaskRefine')
     .name('Mask Refine (GF)')
     .onChange(() => options.onGnmParamsChanged());
   fitFolder
     .add(params, 'gnmShowHair')
     .name('Show Hair')
-    .onChange(() => options.onGnmParamsChanged());
-  fitFolder
-    .add(params, 'gnmHairMode', { 'Cage (閉じた殻)': 'CAGE', 'Shell (前面1枚)': 'SHELL' })
-    .name('Hair Mode')
     .onChange(() => options.onGnmParamsChanged());
   fitFolder
     .add(params, 'gnmHairSkinFill')

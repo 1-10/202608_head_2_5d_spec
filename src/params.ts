@@ -51,14 +51,6 @@ export interface Params {
   gnmHairFillStrength: number; // 置換強度 (1=マスク通り, 小さいほど元の毛を残す)
   // 髪の表示。offで髪シェルを外し、テクスチャも全髪画素を肌色化したbald写真に切替
   gnmShowHair: boolean;
-  // 髪の形状表現。SHELL=前面1枚グリッド (主モード。写真のシルエットと
-  // 実測Depthの起伏に忠実で、運用yaw±15°では最も見た目が強い)、
-  // CAGE=GNM表面を法線方向へ実測髪厚オフセットした閉じた殻 (側頭部への
-  // 回り込み比較用。シルエット細部が失われるため大角度yaw専用)
-  gnmHairMode: 'CAGE' | 'SHELL';
-  // bald画像で再検出した顔輪郭 (FACE_OVAL) でfitする (輪郭の髪バイアス補正)。
-  // CompHairHeadの「顔再構成はbald画像で行う」方式の商用クリーン版
-  gnmBaldContourFit: boolean;
   // 髪マスクをGuided Filterで写真エッジへ整合させた精細版を使う (offで生の256px)
   gnmMaskRefine: boolean;
 
@@ -126,8 +118,6 @@ export const DEFAULT_PARAMS: Params = {
   gnmHairSkinFill: false,
   gnmHairFillStrength: 1.0,
   gnmShowHair: true,
-  gnmHairMode: 'SHELL',
-  gnmBaldContourFit: true,
   gnmMaskRefine: true,
 
   gnmExprIntensity: 1.0,

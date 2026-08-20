@@ -304,15 +304,9 @@ export function buildGnmHead(
   const headMesh = new THREE.Mesh(geometry, headMaterial);
 
   // --- Hair (実測髪マスク+実測Depth) ---
-  // CAGE: GNM表面を法線方向へ実測髪厚オフセットした閉じた殻。側面・背面へ
-  //       厚みが回り込み、yaw回転時に側頭部が紙にならない (CompHairHeadの
-  //       cage構造の静的版)。UV/fallback/photoWはheadと共有する
-  // SHELL: 従来の前面1枚グリッド (比較用)
-  const hair = params.gnmShowHair
-    ? params.gnmHairMode === 'CAGE'
-      ? buildHairCage(model, ctx, texture, fit, params, uvs, fallback, photoW, realNormals, normalTexture)
-      : buildHairShell(ctx, texture, fit, params, normalTexture)
-    : null;
+  // 前面1枚グリッドのシェル: 写真の髪シルエットと実測Depthの起伏に忠実。
+  // 頂点は画像平面の自由グリッドなので、頭蓋の外へ垂れる髪 (耳下・ロング) も張れる
+  const hair = params.gnmShowHair ? buildHairShell(ctx, texture, fit, params, normalTexture) : null;
 
   // 回転pivotは頭部の実重心z (真3Dのため固定比率ではなく実測で決める)
   const pivotZ = fit.centerZ;
@@ -792,187 +786,6 @@ const HAIR_MAX_THICKNESS = 0.16;
 const HAIR_MIN_THICKNESS = 0.02;
 
 /**
- * 頂点スカラー場をメッシュ位相の近傍平均で平滑化する (in-place)。
- * 三角形の辺で隣接する頂点を等重みで平均する素朴なラプラシアン平滑化。
- * 共有辺は複数回数えられるが、平滑化用途では隣接密度の重みとして許容する。
- */
-function smoothVertexField(
-  field: Float32Array,
-  triangles: Uint32Array,
-  vertexCount: number,
-  passes: number,
-): void {
-  const sum = new Float32Array(vertexCount);
-  const cnt = new Float32Array(vertexCount);
-  for (let pass = 0; pass < passes; pass++) {
-    sum.set(field);
-    cnt.fill(1);
-    for (let t = 0; t < triangles.length; t += 3) {
-      for (let e = 0; e < 3; e++) {
-        const a = triangles[t + e];
-        const b = triangles[t + ((e + 1) % 3)];
-        sum[a] += field[b];
-        cnt[a]++;
-        sum[b] += field[a];
-        cnt[b]++;
-      }
-    }
-    for (let i = 0; i < vertexCount; i++) field[i] = sum[i] / cnt[i];
-  }
-}
-
-/**
- * 髪キャップ (cage): フィット済GNM頂点を法線方向へ「実測髪厚×髪マスク」だけ
- * 押し出した閉じた殻。headと同じクランプ済UV・fallback色・photoWを共有し、
- * 前面は写真、側面・背面はクランプ済の髪色 (頂点色) で塗られる。
- * 髪マスクの縁で厚みが0へ絞られてGNM表面に密着するため、縁は自然に閉じる。
- * 頭蓋の外へ大きくはみ出す髪 (ロングヘア等) は表現できない — その場合は
- * SHELLモードの方が形状を拾える (既知のトレードオフ)。
- */
-function buildHairCage(
-  model: GnmModel,
-  ctx: GnmBuildContext,
-  texture: THREE.Texture,
-  fit: GnmFitResult,
-  params: Params,
-  headUvs: Float32Array,
-  headFallback: Float32Array,
-  headPhotoW: Float32Array,
-  normals: Float32Array,
-  normalTexture: THREE.Texture | null,
-): HairShellBuild | null {
-  const seg = selectSegmentation(ctx, params);
-  const depth = selectDepth(ctx, params);
-  if (!seg || !depth) return null;
-
-  const hairFit = fitDepthToGnmZ(depth, ctx, fit);
-  if (!hairFit) return null;
-
-  const uvBounds = fieldBoundsUv(seg.hair, 0.08);
-  if (!uvBounds) return null; // 髪が写っていない → GNM単体で成立する
-
-  // 頭皮zバッファ (厚み計算の基準)。髪bboxをモデル座標へ写して張る
-  const toX = (u: number) => (u * ctx.imageWidth - ctx.headCenterPx.x) / ctx.faceWidthPx;
-  const toY = (v: number) => (ctx.headCenterPx.y - (1 - v) * ctx.imageHeight) / ctx.faceWidthPx;
-  const scalp = buildScalpZBuffer(fit.vertices, {
-    xMin: toX(uvBounds.uMin),
-    xMax: toX(uvBounds.uMax),
-    yMin: toY(uvBounds.vMin),
-    yMax: toY(uvBounds.vMax),
-  });
-
-  // 投影UV (unclamped): オフセット後の頂点が写真の髪シルエット内に収まるかの判定用
-  const projU = (x: number) => (x * ctx.faceWidthPx + ctx.headCenterPx.x) / ctx.imageWidth;
-  const projV = (y: number) => 1 - (ctx.headCenterPx.y - y * ctx.faceWidthPx) / ctx.imageHeight;
-
-  const n = model.vertexCount;
-  const hairW = new Float32Array(n);
-  const thicknessRaw = new Float32Array(n);
-  for (let i = 0; i < n; i++) {
-    const u = headUvs[i * 2];
-    const v = headUvs[i * 2 + 1];
-    // 耳頂点は押し出さない: 実耳ジオメトリはGNM側にあり、法線が入り組んだ
-    // 凹面をマスクの滲みで不均一に押し出すと自己交差した箱状のゴミになる
-    hairW[i] = sampleField(seg.hair, u, v) * (1 - model.earWeight[i] / 255);
-    // 厚み: 実測Depth(クランプ済UV) − 頭皮z。側面・背面の頂点はクランプ済UVが
-    // シルエット縁を指すため「縁の実測厚」がそのまま回り込む
-    const zMeasured = (sampleField(depth, u, v) * hairFit.scale + hairFit.offset) * params.measuredDepthGain;
-    thicknessRaw[i] = zMeasured - scalp(fit.vertices[i * 3], fit.vertices[i * 3 + 1]);
-  }
-
-  // Depthノイズが殻の凹凸になるのを、メッシュ位相の近傍平均で均す
-  // (シェル版のグリッドblur 2パスと同じ役割)。DAViDはノイズが少ないため
-  // 弱め (1パス) にして生え際などの実起伏を残す
-  const usingDavidDepth = params.depthSource === 'DAVID' && !!ctx.measured?.davidDepth;
-  smoothVertexField(thicknessRaw, model.triangles, n, usingDavidDepth ? 1 : 2);
-
-  const positions = new Float32Array(n * 3);
-  for (let i = 0; i < n; i++) {
-    const edge = smoothstep(0.08, 0.5, hairW[i]);
-    const thickness = Math.min(HAIR_MAX_THICKNESS, Math.max(HAIR_MIN_THICKNESS, thicknessRaw[i]));
-    // liftにもedgeを掛ける — 無条件加算だと縁のすぐ内側に「lift分の棚」が
-    // 一周でき、三角形カット縁の鋸歯を強調する
-    let off = (params.gnmHairLift + thickness) * edge;
-
-    const x = fit.vertices[i * 3];
-    const y = fit.vertices[i * 3 + 1];
-    const z = fit.vertices[i * 3 + 2];
-
-    // シルエット制約: オフセット後の投影位置が髪マスクの外へ出るなら絞る。
-    // これが無いと側面頂点 (法線±x) が正面視で写真シルエットの外へ膨らみ、
-    // クランプ済UVの不透明alphaと相まって頭の周囲にフリル状の縁が出る。
-    // 背面側の頂点は投影がマスク内に留まるため厚みがそのまま残り、
-    // 回転時に側頭部の厚みとして見える。
-    // オフセット方向に4点サンプルし、マスクが閾値を割る位置を線形補間で
-    // 求めて許容長とする (2分探索だと絞り量が隣接頂点間で不連続になり段差が出る)
-    if (off > 1e-4) {
-      const SAMPLES = 4;
-      const THRESH = 0.3;
-      let tAllowed = 1;
-      let prevM = sampleField(seg.hair, projU(x), projV(y)); // t=0 (頂点自身の投影位置)
-      if (prevM < THRESH) tAllowed = 0; // 自身が淡いマスク上 → 押し出さない
-      for (let k = 1; tAllowed > 0 && k <= SAMPLES; k++) {
-        const t = k / SAMPLES;
-        const px = x + normals[i * 3] * off * t;
-        const py = y + normals[i * 3 + 1] * off * t;
-        const m = sampleField(seg.hair, projU(px), projV(py));
-        if (m < THRESH) {
-          const tPrev = (k - 1) / SAMPLES;
-          const denom = Math.max(1e-6, prevM - m);
-          tAllowed = tPrev + (t - tPrev) * Math.min(1, Math.max(0, (prevM - THRESH) / denom));
-          break;
-        }
-        prevM = m;
-      }
-      off *= tAllowed;
-    }
-
-    positions[i * 3] = x + normals[i * 3] * off;
-    positions[i * 3 + 1] = y + normals[i * 3 + 1] * off;
-    positions[i * 3 + 2] = z + normals[i * 3 + 2] * off;
-  }
-
-  // 髪が全く掛からない三角形は張らない (顔・首を素通しにする)
-  const kept: number[] = [];
-  const tris = model.triangles;
-  for (let t = 0; t < tris.length; t += 3) {
-    const m = Math.max(hairW[tris[t]], hairW[tris[t + 1]], hairW[tris[t + 2]]);
-    if (m > 0.05) kept.push(tris[t], tris[t + 1], tris[t + 2]);
-  }
-  if (kept.length === 0) return null;
-
-  const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-  geometry.setAttribute('uv', new THREE.BufferAttribute(headUvs, 2));
-  geometry.setAttribute('aFallback', new THREE.BufferAttribute(headFallback, 3));
-  geometry.setAttribute('aPhotoW', new THREE.BufferAttribute(headPhotoW, 1));
-  geometry.setIndex(new THREE.BufferAttribute(new Uint32Array(kept), 1));
-  applyFlatNormals(geometry);
-
-  // 精細化済みマスク (768px) の解像度を活かすため1024/blur1で焼く
-  const alphaTexture = new THREE.CanvasTexture(rasterizeMaskCanvas(seg.hair, 1024, 1));
-  alphaTexture.wrapS = THREE.ClampToEdgeWrapping;
-  alphaTexture.wrapT = THREE.ClampToEdgeWrapping;
-
-  const material = new THREE.MeshStandardMaterial({
-    map: texture,
-    alphaMap: alphaTexture,
-    transparent: true,
-    roughness: 0.95,
-    metalness: 0.0,
-    side: THREE.DoubleSide,
-    alphaTest: 0.3,
-  });
-  if (normalTexture) {
-    material.normalMap = normalTexture;
-    material.normalMapType = THREE.ObjectSpaceNormalMap;
-  }
-  patchPhotoMixShader(material);
-
-  return { mesh: new THREE.Mesh(geometry, material), alphaTexture };
-}
-
-/**
  * 実測髪マスク+実測Depthの前面髪シェルを作る。
  * Depthの相対値はランドマーク位置の「フィット済GNM表面z」への最小二乗で
  * モデル空間zへ写像する (実比率スケール)。
@@ -1042,7 +855,6 @@ function buildHairShell(
 
   // Depthノイズ (GNM実スケールで増幅) をグリッド空間で平滑化する。
   // DAViDはノイズが少ないため弱め (1パス) にして、生え際・毛束の実起伏を残す
-  // (cage側のsmoothVertexFieldと同じ使い分け)
   const shellSmoothPasses = params.depthSource === 'DAVID' && ctx.measured?.davidDepth ? 1 : 2;
   for (let pass = 0; pass < shellSmoothPasses; pass++) {
     const src = new Float32Array(maskPerVertex.length);

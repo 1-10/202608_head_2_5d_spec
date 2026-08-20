@@ -5,12 +5,7 @@ import * as THREE from 'three';
 import './style.css';
 import { InputManager, type CapturedImage } from './input';
 import { FaceDetectionError, FaceDetector, type FaceLandmark } from './faceDetector';
-import {
-  mergeFaceOvalLandmarks,
-  normalizeFaceLandmarks,
-  type NormalizedFaceResult,
-} from './faceTopology';
-import { buildHairFreeFaceCanvas } from './hairFill';
+import { normalizeFaceLandmarks, type NormalizedFaceResult } from './faceTopology';
 import { refineMaskWithGuide } from './maskRefine';
 import { PersonSegmenter } from './personSegmentation';
 import { PortraitDepthEstimator } from './portraitDepth';
@@ -97,8 +92,6 @@ interface SceneState {
   sourceCanvas: HTMLCanvasElement; // DAViDの遅延推論で再利用する入力画像
   normalized: NormalizedFaceResult;
   rawLandmarks: FaceLandmark[]; // 元画像でのMediaPipe生検出値
-  // bald画像 (髪を肌色化) での再検出値。輪郭の髪バイアス補正 (Bald Contour Fit) に使う
-  rawBaldLandmarks: FaceLandmark[] | null;
   gnmHead: GnmHeadBuild | null;
   texture: THREE.Texture;
 }
@@ -320,25 +313,7 @@ async function rebuildGnmHead(): Promise<void> {
     setStatus('GNM Headをフィットしています…');
     s.gnmHead?.dispose();
 
-    // fit用ランドマーク: Bald Contour Fit有効かつbald再検出済みなら、髪に
-    // 被られてバイアスしうる顔輪郭 (FACE_OVAL) だけ再検出値に差し替える。
-    // 正規化 (faceWidth/headCenter) も差し替え後の点群でやり直す
-    let raw = s.rawLandmarks;
-    if (params.gnmBaldContourFit && s.rawBaldLandmarks) {
-      const merged = mergeFaceOvalLandmarks(
-        s.rawLandmarks,
-        s.rawBaldLandmarks,
-        s.ctx.imageWidth,
-        s.ctx.imageHeight,
-      );
-      raw = merged.landmarks;
-      console.debug(
-        `bald輪郭差し替え: ${merged.stats.replaced}点 (棄却${merged.stats.rejected}点, ` +
-          `平均シフト${(merged.stats.meanShiftFrac * 100).toFixed(1)}%fw, ` +
-          `最大${(merged.stats.maxShiftFrac * 100).toFixed(1)}%fw)`,
-      );
-    }
-    const normalized = normalizeFaceLandmarks(raw, s.ctx.imageWidth, s.ctx.imageHeight);
+    const normalized = normalizeFaceLandmarks(s.rawLandmarks, s.ctx.imageWidth, s.ctx.imageHeight);
     s.normalized = normalized;
     s.ctx.landmarks = normalized.landmarks;
     s.ctx.headCenterPx = normalized.headCenterPx;
@@ -376,24 +351,6 @@ async function processImage(captured: CapturedImage): Promise<void> {
 
     const measured = await acquireMeasuredData(captured, normalized);
 
-    // bald-first fit (CompHairHead方式の商用クリーン版): 髪を肌色化した画像で
-    // ランドマークを一度だけ再検出しておく (輪郭の差し替えはrebuild時に行う)
-    let rawBaldLandmarks: FaceLandmark[] | null = null;
-    if (measured.segmentation) {
-      try {
-        const bald = buildHairFreeFaceCanvas(
-          captured.canvas,
-          measured.segmentation,
-          { landmarks: normalized.landmarks, faceWidthPx: normalized.faceWidth },
-          1,
-          'bald',
-        );
-        if (bald) rawBaldLandmarks = faceDetector.detect(bald);
-      } catch (err) {
-        console.warn('bald画像でのランドマーク再検出に失敗。元画像の輪郭を使います。', err);
-      }
-    }
-
     const texture = new THREE.CanvasTexture(captured.canvas);
     texture.colorSpace = THREE.SRGBColorSpace;
     texture.needsUpdate = true;
@@ -412,7 +369,6 @@ async function processImage(captured: CapturedImage): Promise<void> {
       sourceCanvas: captured.canvas,
       normalized,
       rawLandmarks,
-      rawBaldLandmarks,
       gnmHead: null,
       texture,
     };
