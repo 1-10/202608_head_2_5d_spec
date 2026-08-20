@@ -22,6 +22,7 @@ import {
 } from './gnmHead';
 import { GNM_EXPRESSION_PRESETS } from './gnmExpressions';
 import { MP_EYES, MP_LIPS, applyResidualWarp, fillNostrils } from './gnmRefine';
+import { buildHairFreeFaceCanvas } from './hairFill';
 import { applyFlatNormals, buildGridIndices, smoothstep } from './meshUtils';
 import { rasterizeMaskCanvas, type SegmentationResult } from './personSegmentation';
 import type { Params } from './params';
@@ -97,6 +98,28 @@ export function buildGnmHead(
   const fit = fitGnmToLandmarks(model, ctx.landmarks, params.gnmIdentityReg, params.gnmDenseFit);
   const seg = selectSegmentation(ctx, params);
 
+  // 額の髪焼き付き対策: headの投影テクスチャ・fallback色には「髪画素を肌色で
+  // 埋めた写真」を使う。髪は髪シェル (元写真) だけに描かれ、視差が付いても
+  // 「シェルの髪」と「肌に焼き付いた髪」が二重に見えない
+  let headCanvas = sourceCanvas;
+  let headTexture = texture;
+  let ownedHeadTexture: THREE.Texture | null = null;
+  if (params.gnmHairSkinFill && seg) {
+    const filled = buildHairFreeFaceCanvas(
+      sourceCanvas,
+      seg,
+      { landmarks: ctx.landmarks, faceWidthPx: ctx.faceWidthPx },
+      params.gnmHairFillStrength,
+    );
+    if (filled) {
+      headCanvas = filled;
+      const t = new THREE.CanvasTexture(filled);
+      t.colorSpace = THREE.SRGBColorSpace;
+      headTexture = t;
+      ownedHeadTexture = t;
+    }
+  }
+
   // 残差ワープ: identity係数 (統計モデル) では張り切れない目・唇の位置残差を
   // neutral頂点へ焼き込む。まばたき・開口が「写真の目・口の位置」で起きる。
   // 返り値は目領域の表情成分の振幅スケール (ワープで瞼開口幅が変わった分の補正)
@@ -122,7 +145,7 @@ export function buildGnmHead(
   const fallback = new Float32Array(n * 3);
   const photoW = new Float32Array(n);
 
-  const img = sourceCanvas.getContext('2d')!.getImageData(0, 0, sourceCanvas.width, sourceCanvas.height);
+  const img = headCanvas.getContext('2d')!.getImageData(0, 0, headCanvas.width, headCanvas.height);
   const centerU = ctx.headCenterPx.x / ctx.imageWidth;
   const centerV = 1 - ctx.headCenterPx.y / ctx.imageHeight;
   const linear = new THREE.Color();
@@ -207,7 +230,7 @@ export function buildGnmHead(
   applyFlatNormals(geometry); // ライティングは「写真の陰影のみ」の方針 (偽の影の帯を防ぐ)
 
   const headMaterial = new THREE.MeshStandardMaterial({
-    map: texture,
+    map: headTexture,
     roughness: 0.95,
     metalness: 0.0,
   });
@@ -304,6 +327,7 @@ export function buildGnmHead(
     dispose() {
       geometry.dispose();
       headMaterial.dispose();
+      ownedHeadTexture?.dispose();
       landmarkOverlay.dispose();
       if (hair) {
         hair.mesh.geometry.dispose();

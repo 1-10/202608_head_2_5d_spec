@@ -32,6 +32,9 @@ export interface Params {
   gnmWarpStrength: number;
   gnmHairLift: number; // 髪シェルをGNM表面手前へ持ち上げる量 (モデル空間)
   gnmHairRolloff: number; // 髪シェル縁を後方へ巻き込む量 (モデル空間)
+  // 額の髪画素を肌色で埋めた写真をheadテクスチャに使う (髪シェルとの二重描画対策)
+  gnmHairSkinFill: boolean;
+  gnmHairFillStrength: number; // 置換強度 (1=マスク通り, 小さいほど元の毛を残す)
 
   // --- GNM 表情 ---
   gnmExprIntensity: number; // 感情表情の強さ (プリセット係数への乗数)
@@ -83,6 +86,8 @@ export const DEFAULT_PARAMS: Params = {
   gnmWarpStrength: 1.0,
   gnmHairLift: 0.02,
   gnmHairRolloff: 0.08,
+  gnmHairSkinFill: true,
+  gnmHairFillStrength: 1.0,
 
   gnmExprIntensity: 1.0,
   gnmEmotion: 'AUTO',
