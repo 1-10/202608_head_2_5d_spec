@@ -763,6 +763,103 @@ interface HairShellBuild {
 const HAIR_MAX_THICKNESS = 0.16;
 const HAIR_MIN_THICKNESS = 0.02;
 
+/** 法線キャンバス (RGBエンコード) からモデル空間法線を読むサンプラを作る。 */
+function makeNormalSampler(canvas: HTMLCanvasElement): (u: number, v: number) => [number, number, number] {
+  const w = canvas.width;
+  const h = canvas.height;
+  const data = canvas.getContext('2d')!.getImageData(0, 0, w, h).data;
+  return (u, v) => {
+    const px = Math.min(w - 1, Math.max(0, Math.round(u * w - 0.5)));
+    const py = Math.min(h - 1, Math.max(0, Math.round((1 - v) * h - 0.5)));
+    const o = (py * w + px) * 4;
+    return [data[o] / 127.5 - 1, data[o + 1] / 127.5 - 1, data[o + 2] / 127.5 - 1];
+  };
+}
+
+/**
+ * 実測法線でシェル表面の起伏 (毛束の凹凸) を作る。
+ * 高さ場の法線は n ∝ (-∂z/∂x, -∂z/∂y, 1) なので ∂z/∂x = -nx/nz で勾配が決まる。
+ * その勾配に合う高さ場をJacobi反復で解く。Depth由来のzを初期値+データ項に使い
+ * 反復を有界で打ち切るため、低周波はDepthのまま・高周波だけ法線由来になる。
+ *
+ * Depthは絶対位置は取れるが毛束スケールの凹凸は潰れており、逆に法線は
+ * 高周波に強く絶対位置を持たない — 役割を分けて融合する。
+ */
+function applyNormalRelief(
+  positions: Float32Array,
+  uvs: Float32Array,
+  maskPerVertex: Float32Array,
+  cols: number,
+  rows: number,
+  sampleNormal: (u: number, v: number) => [number, number, number],
+  dx: number,
+  dy: number,
+  strength: number,
+): void {
+  const total = cols * rows;
+  const gx = new Float32Array(total);
+  const gy = new Float32Array(total);
+  const trust = new Float32Array(total);
+  for (let i = 0; i < total; i++) {
+    const [nx, ny, nz] = sampleNormal(uvs[i * 2], uvs[i * 2 + 1]);
+    // グレージング (nz小) は勾配が発散するので信頼しない。髪の外も使わない
+    const t = smoothstep(0.35, 0.6, nz) * smoothstep(0.25, 0.55, maskPerVertex[i]);
+    trust[i] = t;
+    if (t <= 0) continue;
+    const nzSafe = Math.max(0.35, nz);
+    gx[i] = -nx / nzSafe;
+    gy[i] = -ny / nzSafe;
+  }
+
+  const anchor = new Float32Array(total);
+  for (let i = 0; i < total; i++) anchor[i] = positions[i * 3 + 2];
+  const z = new Float32Array(anchor);
+  const next = new Float32Array(total);
+  const LAMBDA = 0.08; // データ項 (Depth由来zへの引き戻し) の重み
+  const MAX_STEP = 0.05; // 1セルあたりの許容起伏 (モデル空間)。法線ノイズの暴走止め
+  const ITERATIONS = 120;
+  const clampStep = (v: number) => Math.min(MAX_STEP, Math.max(-MAX_STEP, v));
+
+  for (let iter = 0; iter < ITERATIONS; iter++) {
+    for (let row = 0; row < rows; row++) {
+      for (let col = 0; col < cols; col++) {
+        const i = row * cols + col;
+        let sum = LAMBDA * anchor[i];
+        let wsum = LAMBDA;
+        // 隣接4方向。row+1はyが小さくなる向き (グリッドは上から下へ張る)
+        if (col > 0) {
+          const j = i - 1;
+          const e = Math.min(trust[i], trust[j]) * strength;
+          sum += z[j] + clampStep(0.5 * (gx[i] + gx[j]) * dx * e);
+          wsum += 1;
+        }
+        if (col < cols - 1) {
+          const j = i + 1;
+          const e = Math.min(trust[i], trust[j]) * strength;
+          sum += z[j] - clampStep(0.5 * (gx[i] + gx[j]) * dx * e);
+          wsum += 1;
+        }
+        if (row > 0) {
+          const j = i - cols;
+          const e = Math.min(trust[i], trust[j]) * strength;
+          sum += z[j] - clampStep(0.5 * (gy[i] + gy[j]) * dy * e);
+          wsum += 1;
+        }
+        if (row < rows - 1) {
+          const j = i + cols;
+          const e = Math.min(trust[i], trust[j]) * strength;
+          sum += z[j] + clampStep(0.5 * (gy[i] + gy[j]) * dy * e);
+          wsum += 1;
+        }
+        next[i] = sum / wsum;
+      }
+    }
+    z.set(next);
+  }
+
+  for (let i = 0; i < total; i++) positions[i * 3 + 2] = z[i];
+}
+
 /** グリッド上のスカラー場を3x3近傍平均で平滑化する (in-place)。 */
 function smoothGridField(field: Float32Array, cols: number, rows: number, passes: number): void {
   if (passes <= 0) return;
@@ -905,6 +1002,22 @@ function buildHairShell(
     const thickness = Math.min(HAIR_MAX_THICKNESS, Math.max(HAIR_MIN_THICKNESS, thicknessRaw[i]));
     positions[i * 3 + 2] =
       scalpZs[i] + params.gnmHairLift + thickness * edge - params.gnmHairRolloff * (1 - edge);
+  }
+
+  // 毛束スケールの起伏を実測法線から作る (Depthは厚みの低周波しか持たない)
+  const normalCanvas = params.normalSource === 'DAVID' ? ctx.measured?.davidNormalCanvas : null;
+  if (normalCanvas && params.gnmHairRelief > 0) {
+    applyNormalRelief(
+      positions,
+      uvs,
+      maskPerVertex,
+      cols,
+      rows,
+      makeNormalSampler(normalCanvas),
+      (xMax - xMin) / (cols - 1),
+      (yMax - yMin) / (rows - 1),
+      params.gnmHairRelief,
+    );
   }
 
   // 三角形は「1つでも髪に触れていれば」張る。全コーナーがマスク内という条件だと

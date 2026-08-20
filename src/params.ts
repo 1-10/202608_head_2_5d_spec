@@ -45,6 +45,9 @@ export interface Params {
   gnmHairLift: number; // 髪シェルをGNM表面手前へ持ち上げる量 (モデル空間)
   gnmHairRolloff: number; // 髪シェル縁を後方へ巻き込む量 (モデル空間)
   gnmShowHair: boolean; // 髪シェルメッシュの表示切替 (offで頭部のみ)
+  // 実測法線から髪シェルの起伏 (毛束の凹凸) を作る強さ (0=Depthのみの滑らかな面)。
+  // Depthは絶対位置、法線は高周波と役割を分けて融合する
+  gnmHairRelief: number;
   // 髪マスクをGuided Filterで写真エッジへ整合させた精細版を使う (offで生の256px)
   gnmMaskRefine: boolean;
 
@@ -110,6 +113,7 @@ export const DEFAULT_PARAMS: Params = {
   gnmHairLift: 0.02,
   gnmHairRolloff: 0.08,
   gnmShowHair: true,
+  gnmHairRelief: 1.0,
   gnmMaskRefine: true,
 
   gnmExprIntensity: 1.0,

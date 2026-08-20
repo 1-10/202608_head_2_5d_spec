@@ -139,6 +139,10 @@ export function setupDebugGui(container: HTMLElement, params: Params, options: D
     .name('Hair Rolloff')
     .onFinishChange(() => options.onGnmParamsChanged());
   fitFolder
+    .add(params, 'gnmHairRelief', 0, 2, 0.05)
+    .name('Hair Relief (法線)')
+    .onFinishChange(() => options.onGnmParamsChanged());
+  fitFolder
     .add(params, 'gnmMaskRefine')
     .name('Mask Refine (GF)')
     .onChange(() => options.onGnmParamsChanged());
