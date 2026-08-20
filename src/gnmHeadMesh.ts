@@ -22,7 +22,6 @@ import {
 } from './gnmHead';
 import { GNM_EXPRESSION_PRESETS } from './gnmExpressions';
 import { MP_EYES, MP_LIPS, applyResidualWarp, fillNostrils } from './gnmRefine';
-import { buildBaldHeadCanvas } from './hairFill';
 import { applyFlatNormals, buildGridIndices, smoothstep } from './meshUtils';
 import { rasterizeMaskCanvas, type SegmentationResult } from './personSegmentation';
 import type { Params } from './params';
@@ -80,7 +79,7 @@ export interface GnmHeadBuild {
   hairMesh: THREE.Mesh | null;
   /** ランドマーク重畳デバッグ表示 (既定で非表示。Show Landmarksで切替)。 */
   landmarkOverlay: THREE.Object3D;
-  /** headに実際に投影している画像 (Show Hair off時はbald置換後)。デバッグ表示用 */
+  /** headに投影している画像 (元写真)。デバッグ表示用 */
   headCanvas: HTMLCanvasElement;
   /** 髪シェルが描く髪だけの画像 (写真×髪マスクalpha)。セグメンテーション無しはnull */
   hairLayerCanvas: HTMLCanvasElement | null;
@@ -116,24 +115,8 @@ export function buildGnmHead(
   const fit = fitGnmToLandmarks(model, ctx.landmarks, params.gnmIdentityReg, params.gnmDenseFit);
   const seg = selectSegmentation(ctx, params);
 
-  // Show Hair off時は髪シェルを作らないため、写真の髪が頭皮に残らないよう
-  // 全髪画素を肌色置換したbald写真へテクスチャを切り替える
-  let headCanvas = sourceCanvas;
-  let headTexture = texture;
-  let ownedHeadTexture: THREE.Texture | null = null;
-  if (!params.gnmShowHair && seg) {
-    const filled = buildBaldHeadCanvas(sourceCanvas, seg, {
-      landmarks: ctx.landmarks,
-      faceWidthPx: ctx.faceWidthPx,
-    });
-    if (filled) {
-      headCanvas = filled;
-      const t = new THREE.CanvasTexture(filled);
-      t.colorSpace = THREE.SRGBColorSpace;
-      headTexture = t;
-      ownedHeadTexture = t;
-    }
-  }
+  const headCanvas = sourceCanvas;
+  const headTexture = texture;
 
   // 残差ワープ: identity係数 (統計モデル) では張り切れない目・唇の位置残差を
   // neutral頂点へ焼き込む。まばたき・開口が「写真の目・口の位置」で起きる。
@@ -301,7 +284,8 @@ export function buildGnmHead(
   // --- Hair (実測髪マスク+実測Depth) ---
   // 前面1枚グリッドのシェル: 写真の髪シルエットと実測Depthの起伏に忠実。
   // 頂点は画像平面の自由グリッドなので、頭蓋の外へ垂れる髪 (耳下・ロング) も張れる
-  const hair = params.gnmShowHair ? buildHairShell(ctx, texture, fit, params, normalTexture) : null;
+  const hair = buildHairShell(ctx, texture, fit, params, normalTexture);
+  if (hair) hair.mesh.visible = params.gnmShowHair;
 
   // 回転pivotは頭部の実重心z (真3Dのため固定比率ではなく実測で決める)
   const pivotZ = fit.centerZ;
@@ -394,7 +378,6 @@ export function buildGnmHead(
     dispose() {
       geometry.dispose();
       headMaterial.dispose();
-      ownedHeadTexture?.dispose();
       normalTexture?.dispose();
       landmarkOverlay.dispose();
       if (hair) {

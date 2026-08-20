@@ -22,6 +22,7 @@ export function applyDebugVisualization(gnmHead: GnmHeadBuild | null, params: Pa
   if (gnmHead.hairMesh) {
     (gnmHead.hairMesh.material as THREE.MeshStandardMaterial).wireframe = params.showWireframe;
   }
+  if (gnmHead.hairMesh) gnmHead.hairMesh.visible = params.gnmShowHair;
   gnmHead.landmarkOverlay.visible = params.showLandmarks;
   updateLayerPreview(gnmHead, params.showLayerImages, params.layerImageScale);
 }
@@ -144,7 +145,7 @@ export function setupDebugGui(container: HTMLElement, params: Params, options: D
   fitFolder
     .add(params, 'gnmShowHair')
     .name('Show Hair')
-    .onChange(() => options.onGnmParamsChanged());
+    .onChange(() => applyDebugVisualization(options.getGnmHead(), params));
   fitFolder.open();
 
   // プリセットは公式ExpressionSampler由来 (gnmExpressions.ts)

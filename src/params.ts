@@ -44,8 +44,7 @@ export interface Params {
   gnmWarpStrength: number;
   gnmHairLift: number; // 髪シェルをGNM表面手前へ持ち上げる量 (モデル空間)
   gnmHairRolloff: number; // 髪シェル縁を後方へ巻き込む量 (モデル空間)
-  // 髪の表示。offで髪シェルを外し、テクスチャも全髪画素を肌色化したbald写真に切替
-  gnmShowHair: boolean;
+  gnmShowHair: boolean; // 髪シェルメッシュの表示切替 (offで頭部のみ)
   // 髪マスクをGuided Filterで写真エッジへ整合させた精細版を使う (offで生の256px)
   gnmMaskRefine: boolean;
 
