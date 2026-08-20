@@ -352,7 +352,7 @@ export function buildGnmHead(
     if (/^(left|right)_eye/.test(model.expressionNames[i] ?? '')) isEyeExpr[i] = 1;
   }
 
-  // 舌の姿勢: 公式の舌成分を顎の開き量に比例させて駆動する (gnmMouthInterior参照)
+  // 舌の姿勢: 開口時に舌を下げる (gnmMouthInterior参照)
   const tongueDrive = buildTongueDrive(model, GNM_EXPRESSION_PRESETS.surprise);
   const coeffs = new Float32Array(model.expressionCount);
 

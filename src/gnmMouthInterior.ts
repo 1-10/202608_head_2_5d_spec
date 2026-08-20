@@ -47,6 +47,9 @@ const TEETH_DESATURATE = 0.7; // 肌の色味を同輝度のニュートラル�
 const AO_APERTURE = 0.12; // 開口の実効半径 (モデル空間。頭部の幅≈1.9)
 const AO_FLOOR = 0.04; // 咽頭側の下限 (完全な黒は避ける)
 
+// 舌成分の係数上限。公式デモGUI (gnm_head_demo.ipynb) のスライダー範囲と同じ
+const TONGUE_COEFF_LIMIT = 3;
+
 export interface MouthInteriorBuild {
   mesh: THREE.Mesh;
   /** 表情適用後の頭部頂点配列 (相似変換済み) から位置を取り込み、法線を作り直す。 */
@@ -168,22 +171,21 @@ export interface TongueDrive {
 }
 
 /**
- * 舌の姿勢を「GNM公式の舌成分」で駆動する。
+ * 開口時に舌を下げる。GNMのneutralは口を閉じた姿勢なので舌は口蓋に張り付いており、
+ * そのまま口を開けると舌が開口部を埋めて歯も口腔も見えない。
  *
- * GNMのneutralは口を閉じた姿勢なので、舌は口蓋に張り付いている。実際の口では
- * 開口時に舌が口蓋から離れて下顎の床へ落ちるが、GNMがそれを表現する機構は
- * tongue成分 (tongue_mean + tongue_000..) だけで、顎ジョイントは存在しない。
- * そして公式ExpressionSampler (CVAE) が出す舌成分の係数は全プリセットで実質0
- * (実測: |c|<=0.06 / 変位<=0.2mm) — 学習データに舌のアニメーションが無い。
- * 公式デモGUI (gnm_head_demo.ipynb) も舌成分を ±3 の手動スライダーとして
- * 露出しているだけで、顎との連動は持たない。
+ * GNM Headに顎ジョイントは無く (joint_names = neck/head/left_eye/right_eye)、
+ * 舌を動かす機構は tongue成分 (tongue_mean + tongue_000..) だけ。公式ExpressionSampler
+ * には舌のクラス TONGUE_CENTER (=19) があり舌成分を強く駆動するが、方向は
+ * 「舌を前へ出す」(実測: 舌の平均 +7.2mm 前方 / |係数|最大4.05)。逆向きに使えば
+ * 引っ込む向きになるので試したが、必要な振幅では係数が公式スライダー範囲±3を大きく
+ * 超え、舌先が反転して尖る (学習分布の外への外挿) ため採用しなかった。
+ * それ以外のクラスは舌をほぼ動かさない (実測: 舌の変位<=0.5mm)。
  *
- * よって「顎が開いたら舌を下げる」連動はこちら側の設計になる。係数は公式の機構
- * (tongue成分) のまま、量だけ顎の開き量に比例させる:
- * - 「下向き」の方向 = 舌頂点の平均yを最も下げる係数ベクトル (成分ごとの
- *   平均y変位から実測で決める。意味ラベルを推測しない)
- * - 顎の開き量 = 舌以外の成分が舌頂点を下げている量。公式surpriseプリセットの
- *   値を1.0の基準にする (振幅の基準も実測から取る)
+ * よって方向はモデルの基底から実測で決める: 舌頂点の平均yを最も下げる単位係数
+ * ベクトル (成分ごとの平均y変位そのもの)。意味ラベルは推測しない。
+ * 量だけがこちら側の連動設計で、公式プリセット (surprise) の顎の開き量を1.0の
+ * 基準に取って比例させ、係数は公式デモGUIと同じ±3の範囲へクランプする。
  */
 export function buildTongueDrive(
   model: GnmModel,
@@ -233,7 +235,12 @@ export function buildTongueDrive(
       const open = Math.min(2, Math.max(0, jawDrop(coeffs) / reference));
       if (open === 0) return;
       const a = amount * open;
-      for (let k = 0; k < tongueComps.length; k++) coeffs[tongueComps[k]] += a * dir[k];
+      for (let k = 0; k < tongueComps.length; k++) {
+        const c = tongueComps[k];
+        // 公式デモGUIのスライダー範囲と同じ±3へクランプ。これを超えると学習分布の外へ
+        // 外挿して舌の形が壊れる (TONGUE_CENTER逆向きで実際に舌先が尖った)
+        coeffs[c] = Math.min(TONGUE_COEFF_LIMIT, Math.max(-TONGUE_COEFF_LIMIT, coeffs[c] + a * dir[k]));
+      }
     },
   };
 }
