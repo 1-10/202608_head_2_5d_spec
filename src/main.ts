@@ -64,6 +64,10 @@ class Viewport {
     }
   }
 
+  setBackground(color: string): void {
+    this.scene.background = new THREE.Color(color);
+  }
+
   updateCamera(fovDeg: number, distance: number): void {
     this.camera.fov = fovDeg;
     this.camera.position.set(0, 0, distance);
@@ -116,6 +120,7 @@ const els = {
 };
 
 const viewport = new Viewport(els.paneHead);
+viewport.setBackground(params.backgroundColor);
 
 const inputManager = new InputManager(els.video);
 const faceDetector = new FaceDetector();
@@ -493,6 +498,7 @@ setupDebugGui(els.guiContainer, params, {
     void rebuildGnmHead();
   },
   onCameraChanged: () => updateCameras(),
+  onBackgroundChanged: () => viewport.setBackground(params.backgroundColor),
   onYawRangeChanged: () => updateYaw(yawDeg),
   onPitchRangeChanged: () => updatePitch(pitchDeg),
   getGnmHead: () => sceneState?.gnmHead ?? null,

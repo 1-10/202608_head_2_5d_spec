@@ -94,6 +94,9 @@ export interface Params {
   cameraFovDeg: number;
   cameraDistanceRatio: number; // faceWidth比
 
+  // --- シーン ---
+  backgroundColor: string; // 3Dビューポートの背景色 (hex)
+
   // --- 髪シェルGrid解像度 ---
   hairGridCols: number;
   hairGridRows: number;
@@ -145,6 +148,8 @@ export const DEFAULT_PARAMS: Params = {
 
   cameraFovDeg: 30,
   cameraDistanceRatio: 3.4,
+
+  backgroundColor: '#14161a', // style.cssの--bgと同じ初期値 (透過時と見た目が変わらないように)
 
   hairGridCols: 64,
   hairGridRows: 80,

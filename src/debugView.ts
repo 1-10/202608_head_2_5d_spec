@@ -9,6 +9,7 @@ export interface DebugGuiOptions {
   onSourceChanged: () => void; // Mask/Depth/Normal/Personソース切替 (DAViDは遅延取得)
   onGnmParamsChanged: () => void; // フィット/髪シェルパラメータ変更 (再構築)
   onCameraChanged: () => void;
+  onBackgroundChanged: () => void; // 背景色変更 (scene.backgroundへ反映)
   onYawRangeChanged: () => void;
   onPitchRangeChanged: () => void;
   getGnmHead: () => GnmHeadBuild | null;
@@ -204,6 +205,10 @@ export function setupDebugGui(container: HTMLElement, params: Params, options: D
     .add(params, 'cameraDistanceRatio', 1.5, 8, 0.1)
     .name('Camera Distance')
     .onChange(() => options.onCameraChanged());
+  cameraFolder
+    .addColor(params, 'backgroundColor')
+    .name('Background')
+    .onChange(() => options.onBackgroundChanged());
 
   const debugFolder = gui.addFolder('Debug View');
   debugFolder
