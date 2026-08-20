@@ -65,6 +65,10 @@ export function setupDebugGui(container: HTMLElement, params: Params, options: D
     .name('Hair Rolloff')
     .onFinishChange(() => options.onGnmParamsChanged());
   fitFolder
+    .add(params, 'gnmShowHair')
+    .name('Show Hair')
+    .onChange(() => options.onGnmParamsChanged());
+  fitFolder
     .add(params, 'gnmHairSkinFill')
     .name('Hair Skin Fill')
     .onChange(() => options.onGnmParamsChanged());

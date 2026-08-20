@@ -316,7 +316,7 @@ async function rebuildGnmHead(): Promise<void> {
     updateYaw(yawDeg);
     updatePitch(pitchDeg);
     applyDebugVisualization(build, params);
-    if (!build.hairMesh) {
+    if (!build.hairMesh && params.gnmShowHair) {
       setStatus('GNM: 髪シェルを構築できなかったため頭部のみ表示しています。');
     } else {
       setStatus('');

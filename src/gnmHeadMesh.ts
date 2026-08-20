@@ -100,16 +100,18 @@ export function buildGnmHead(
 
   // 額の髪焼き付き対策: headの投影テクスチャ・fallback色には「髪画素を肌色で
   // 埋めた写真」を使う。髪は髪シェル (元写真) だけに描かれ、視差が付いても
-  // 「シェルの髪」と「肌に焼き付いた髪」が二重に見えない
+  // 「シェルの髪」と「肌に焼き付いた髪」が二重に見えない。
+  // Show Hair off時は髪シェルを作らないため、全髪画素を置換したbald写真に切替
   let headCanvas = sourceCanvas;
   let headTexture = texture;
   let ownedHeadTexture: THREE.Texture | null = null;
-  if (params.gnmHairSkinFill && seg) {
+  if ((params.gnmHairSkinFill || !params.gnmShowHair) && seg) {
     const filled = buildHairFreeFaceCanvas(
       sourceCanvas,
       seg,
       { landmarks: ctx.landmarks, faceWidthPx: ctx.faceWidthPx },
-      params.gnmHairFillStrength,
+      params.gnmShowHair ? params.gnmHairFillStrength : 1,
+      params.gnmShowHair ? 'overlay' : 'bald',
     );
     if (filled) {
       headCanvas = filled;
@@ -239,7 +241,7 @@ export function buildGnmHead(
   const headMesh = new THREE.Mesh(geometry, headMaterial);
 
   // --- Hair shell (実測髪マスク+実測Depth) ---
-  const hair = buildHairShell(ctx, texture, fit, params);
+  const hair = params.gnmShowHair ? buildHairShell(ctx, texture, fit, params) : null;
 
   // 回転pivotは頭部の実重心z (真3Dのため固定比率ではなく実測で決める)
   const pivotZ = fit.centerZ;

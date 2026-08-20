@@ -35,6 +35,8 @@ export interface Params {
   // 額の髪画素を肌色で埋めた写真をheadテクスチャに使う (髪シェルとの二重描画対策)
   gnmHairSkinFill: boolean;
   gnmHairFillStrength: number; // 置換強度 (1=マスク通り, 小さいほど元の毛を残す)
+  // 髪の表示。offで髪シェルを外し、テクスチャも全髪画素を肌色化したbald写真に切替
+  gnmShowHair: boolean;
 
   // --- GNM 表情 ---
   gnmExprIntensity: number; // 感情表情の強さ (プリセット係数への乗数)
@@ -88,6 +90,7 @@ export const DEFAULT_PARAMS: Params = {
   gnmHairRolloff: 0.08,
   gnmHairSkinFill: true,
   gnmHairFillStrength: 1.0,
+  gnmShowHair: true,
 
   gnmExprIntensity: 1.0,
   gnmEmotion: 'AUTO',
