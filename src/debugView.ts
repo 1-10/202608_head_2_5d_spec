@@ -131,6 +131,10 @@ export function setupDebugGui(container: HTMLElement, params: Params, options: D
     .name('Show Hair')
     .onChange(() => options.onGnmParamsChanged());
   fitFolder
+    .add(params, 'gnmHairMode', { 'Cage (閉じた殻)': 'CAGE', 'Shell (前面1枚)': 'SHELL' })
+    .name('Hair Mode')
+    .onChange(() => options.onGnmParamsChanged());
+  fitFolder
     .add(params, 'gnmHairSkinFill')
     .name('Hair Skin Fill')
     .onChange(() => options.onGnmParamsChanged());

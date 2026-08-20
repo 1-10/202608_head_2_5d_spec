@@ -246,8 +246,16 @@ export function buildGnmHead(
 
   const headMesh = new THREE.Mesh(geometry, headMaterial);
 
-  // --- Hair shell (実測髪マスク+実測Depth) ---
-  const hair = params.gnmShowHair ? buildHairShell(ctx, texture, fit, params) : null;
+  // --- Hair (実測髪マスク+実測Depth) ---
+  // CAGE: GNM表面を法線方向へ実測髪厚オフセットした閉じた殻。側面・背面へ
+  //       厚みが回り込み、yaw回転時に側頭部が紙にならない (CompHairHeadの
+  //       cage構造の静的版)。UV/fallback/photoWはheadと共有する
+  // SHELL: 従来の前面1枚グリッド (比較用)
+  const hair = params.gnmShowHair
+    ? params.gnmHairMode === 'CAGE'
+      ? buildHairCage(model, ctx, texture, fit, params, uvs, fallback, photoW, realNormals)
+      : buildHairShell(ctx, texture, fit, params)
+    : null;
 
   // 回転pivotは頭部の実重心z (真3Dのため固定比率ではなく実測で決める)
   const pivotZ = fit.centerZ;
@@ -623,6 +631,128 @@ interface HairShellBuild {
   alphaTexture: THREE.CanvasTexture;
 }
 
+// 髪の厚み範囲 (モデル空間, faceWidth≈1)。厚すぎるとピッチ回転時に
+// シェル/キャップと頭皮の隙間が下から見える
+const HAIR_MAX_THICKNESS = 0.16;
+const HAIR_MIN_THICKNESS = 0.02;
+
+/**
+ * 髪キャップ (cage): フィット済GNM頂点を法線方向へ「実測髪厚×髪マスク」だけ
+ * 押し出した閉じた殻。headと同じクランプ済UV・fallback色・photoWを共有し、
+ * 前面は写真、側面・背面はクランプ済の髪色 (頂点色) で塗られる。
+ * 髪マスクの縁で厚みが0へ絞られてGNM表面に密着するため、縁は自然に閉じる。
+ * 頭蓋の外へ大きくはみ出す髪 (ロングヘア等) は表現できない — その場合は
+ * SHELLモードの方が形状を拾える (既知のトレードオフ)。
+ */
+function buildHairCage(
+  model: GnmModel,
+  ctx: GnmBuildContext,
+  texture: THREE.Texture,
+  fit: GnmFitResult,
+  params: Params,
+  headUvs: Float32Array,
+  headFallback: Float32Array,
+  headPhotoW: Float32Array,
+  normals: Float32Array,
+): HairShellBuild | null {
+  const seg = selectSegmentation(ctx, params);
+  const depth = selectDepth(ctx, params);
+  if (!seg || !depth) return null;
+
+  const hairFit = fitDepthToGnmZ(depth, ctx, fit);
+  if (!hairFit) return null;
+
+  const uvBounds = fieldBoundsUv(seg.hair, 0.08);
+  if (!uvBounds) return null; // 髪が写っていない → GNM単体で成立する
+
+  // 頭皮zバッファ (厚み計算の基準)。髪bboxをモデル座標へ写して張る
+  const toX = (u: number) => (u * ctx.imageWidth - ctx.headCenterPx.x) / ctx.faceWidthPx;
+  const toY = (v: number) => (ctx.headCenterPx.y - (1 - v) * ctx.imageHeight) / ctx.faceWidthPx;
+  const scalp = buildScalpZBuffer(fit.vertices, {
+    xMin: toX(uvBounds.uMin),
+    xMax: toX(uvBounds.uMax),
+    yMin: toY(uvBounds.vMin),
+    yMax: toY(uvBounds.vMax),
+  });
+
+  // 投影UV (unclamped): オフセット後の頂点が写真の髪シルエット内に収まるかの判定用
+  const projU = (x: number) => (x * ctx.faceWidthPx + ctx.headCenterPx.x) / ctx.imageWidth;
+  const projV = (y: number) => 1 - (ctx.headCenterPx.y - y * ctx.faceWidthPx) / ctx.imageHeight;
+
+  const n = model.vertexCount;
+  const positions = new Float32Array(n * 3);
+  const hairW = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const u = headUvs[i * 2];
+    const v = headUvs[i * 2 + 1];
+    const hw = sampleField(seg.hair, u, v);
+    hairW[i] = hw;
+    const edge = smoothstep(0.08, 0.5, hw);
+
+    const x = fit.vertices[i * 3];
+    const y = fit.vertices[i * 3 + 1];
+    const z = fit.vertices[i * 3 + 2];
+    // 厚み: 実測Depth(クランプ済UV) − 頭皮z。側面・背面の頂点はクランプ済UVが
+    // シルエット縁を指すため「縁の実測厚」がそのまま回り込む
+    const zMeasured = (sampleField(depth, u, v) * hairFit.scale + hairFit.offset) * params.measuredDepthGain;
+    const thickness = Math.min(HAIR_MAX_THICKNESS, Math.max(HAIR_MIN_THICKNESS, zMeasured - scalp(x, y)));
+    let off = params.gnmHairLift + thickness * edge;
+
+    // シルエット制約: オフセット後の投影位置が髪マスクの外へ出るなら絞る。
+    // これが無いと側面頂点 (法線±x) が正面視で写真シルエットの外へ膨らみ、
+    // クランプ済UVの不透明alphaと相まって頭の周囲にフリル状の縁が出る。
+    // 背面側の頂点は投影がマスク内に留まるため厚みがそのまま残り、
+    // 回転時に側頭部の厚みとして見える
+    for (let iter = 0; iter < 5 && off > 1e-4; iter++) {
+      const px = x + normals[i * 3] * off;
+      const py = y + normals[i * 3 + 1] * off;
+      // 閾値は高め (0.3): 薄いfeather帯まで許すと、もみあげ等の淡いマスクへ
+      // 向かって膨らんだ頂点が正面視で棘状に見える
+      if (sampleField(seg.hair, projU(px), projV(py)) >= 0.3) break;
+      off *= 0.5;
+      if (iter === 4) off = 0;
+    }
+
+    positions[i * 3] = x + normals[i * 3] * off;
+    positions[i * 3 + 1] = y + normals[i * 3 + 1] * off;
+    positions[i * 3 + 2] = z + normals[i * 3 + 2] * off;
+  }
+
+  // 髪が全く掛からない三角形は張らない (顔・首を素通しにする)
+  const kept: number[] = [];
+  const tris = model.triangles;
+  for (let t = 0; t < tris.length; t += 3) {
+    const m = Math.max(hairW[tris[t]], hairW[tris[t + 1]], hairW[tris[t + 2]]);
+    if (m > 0.05) kept.push(tris[t], tris[t + 1], tris[t + 2]);
+  }
+  if (kept.length === 0) return null;
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geometry.setAttribute('uv', new THREE.BufferAttribute(headUvs, 2));
+  geometry.setAttribute('aFallback', new THREE.BufferAttribute(headFallback, 3));
+  geometry.setAttribute('aPhotoW', new THREE.BufferAttribute(headPhotoW, 1));
+  geometry.setIndex(new THREE.BufferAttribute(new Uint32Array(kept), 1));
+  applyFlatNormals(geometry);
+
+  const alphaTexture = new THREE.CanvasTexture(rasterizeMaskCanvas(seg.hair, 512));
+  alphaTexture.wrapS = THREE.ClampToEdgeWrapping;
+  alphaTexture.wrapT = THREE.ClampToEdgeWrapping;
+
+  const material = new THREE.MeshStandardMaterial({
+    map: texture,
+    alphaMap: alphaTexture,
+    transparent: true,
+    roughness: 0.95,
+    metalness: 0.0,
+    side: THREE.DoubleSide,
+    alphaTest: 0.3,
+  });
+  patchPhotoMixShader(material);
+
+  return { mesh: new THREE.Mesh(geometry, material), alphaTexture };
+}
+
 /**
  * 実測髪マスク+実測Depthの前面髪シェルを作る。
  * Depthの相対値はランドマーク位置の「フィット済GNM表面z」への最小二乗で
@@ -663,9 +793,6 @@ function buildHairShell(
   // 髪シェルは「頭皮z + 実測髪厚」でアンカーする — Depthフィットの外挿を
   // そのままzに使うと頭頂で過大になり、シェルが頭蓋から浮くため。
   const scalp = buildScalpZBuffer(fit.vertices, { xMin, xMax, yMin, yMax });
-  // 厚みを厚くしすぎるとピッチ回転時にシェルと頭皮の隙間が下から見える
-  const maxThickness = 0.16; // モデル空間 (faceWidth≈1) での髪厚上限
-  const minThickness = 0.02;
 
   for (let row = 0; row < rows; row++) {
     const y = yMax + (yMin - yMax) * (row / (rows - 1));
@@ -680,7 +807,7 @@ function buildHairShell(
       const d = sampleField(depth, u, v);
       const zMeasured = (d * hairFit.scale + hairFit.offset) * params.measuredDepthGain;
       const scalpZ = scalp(x, y);
-      const thickness = Math.min(maxThickness, Math.max(minThickness, zMeasured - scalpZ));
+      const thickness = Math.min(HAIR_MAX_THICKNESS, Math.max(HAIR_MIN_THICKNESS, zMeasured - scalpZ));
       // feather帯では厚みを頭皮へ絞る (縁の浮き対策。rolloffは絞り増強として作用)
       const edge = smoothstep(0.08, 0.5, hairMask);
       const z = scalpZ + params.gnmHairLift + thickness * edge - params.gnmHairRolloff * (1 - edge);
