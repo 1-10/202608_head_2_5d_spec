@@ -22,10 +22,11 @@ from pathlib import Path
 
 BASE_URL = "https://facesyntheticspubwedata.z6.web.core.windows.net/iccv-2025/models"
 
-# タスク名 → 配布ファイル名
+# タスク名 → (配布ファイル名, バリアント)。
+# multitask (ViT-L) は1回の推論でdepth/normal/foregroundを同時に返す。
+# アプリはmultitaskのみを使う (タスク別ViT-Bは過去に検証用で使用)
 TASKS = {
-    "depth": "depth-model-vitb16_384.onnx",
-    "normal": "normal-model-vitb16_384.onnx",
+    "multitask": ("multi-task-model-vitl16_384.onnx", "vitl16"),
 }
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -55,10 +56,10 @@ def fix_cast_nodes(model) -> int:
     return fixed
 
 
-def prepare(task: str, filename: str) -> None:
-    fp32 = OUT_DIR / f"david-{task}-vitb16-fp32.onnx"
-    fp16 = OUT_DIR / f"david-{task}-vitb16-fp16.onnx"
-    int8 = OUT_DIR / f"david-{task}-vitb16-int8.onnx"
+def prepare(task: str, filename: str, variant: str) -> None:
+    fp32 = OUT_DIR / f"david-{task}-{variant}-fp32.onnx"
+    fp16 = OUT_DIR / f"david-{task}-{variant}-fp16.onnx"
+    int8 = OUT_DIR / f"david-{task}-{variant}-int8.onnx"
 
     if not fp32.exists():
         url = f"{BASE_URL}/{filename}"
@@ -86,8 +87,8 @@ def prepare(task: str, filename: str) -> None:
 
 def main() -> None:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    for task, filename in TASKS.items():
-        prepare(task, filename)
+    for task, (filename, variant) in TASKS.items():
+        prepare(task, filename, variant)
 
 
 if __name__ == "__main__":

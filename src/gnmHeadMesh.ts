@@ -34,9 +34,11 @@ import type { Params } from './params';
 export interface MeasuredHeadData {
   segmentation: SegmentationResult | null; // MediaPipe SelfieMulticlass
   depth: ScalarField | null; // ARPortraitDepth 相対Depth (0-1)
-  davidDepth: ScalarField | null; // DAViD 人物相対Depth (遅延取得。商用クリーン)
-  // DAViD 表面法線 (RGBエンコード済みObjectSpaceNormalMap, 画像全体UV空間。遅延取得)
+  // --- DAViD multi-task (1回の推論で同時取得。遅延ロード。商用クリーン) ---
+  davidDepth: ScalarField | null; // 人物相対Depth
+  // 表面法線 (RGBエンコード済みObjectSpaceNormalMap, 画像全体UV空間)
   davidNormalCanvas: HTMLCanvasElement | null;
+  davidPerson: ScalarField | null; // ソフト前景 (crop外はSelfieMulticlassで補完済み)
   neuralSegmentation: SegmentationResult | null; // BiRefNet×MediaPipe合成 (遅延取得)
 }
 
@@ -57,8 +59,11 @@ export function selectSegmentation(ctx: GnmBuildContext, params: Params): Segmen
   let seg: SegmentationResult | null = null;
   if (params.maskSource === 'NEURAL') seg = m.neuralSegmentation ?? m.segmentation;
   else if (params.maskSource === 'MEASURED') seg = m.segmentation;
+  if (!seg) return null;
   // Mask Refine off時はGuided Filter前の生マスクへ戻す (効果比較用)
-  if (seg && !params.gnmMaskRefine && seg.hairRaw) return { ...seg, hair: seg.hairRaw };
+  if (!params.gnmMaskRefine && seg.hairRaw) seg = { ...seg, hair: seg.hairRaw };
+  // 人物シルエットはDAViDソフト前景を優先 (境界精度が高い。意味分けはMediaPipeのまま)
+  if (params.personSource === 'DAVID' && m.davidPerson) seg = { ...seg, person: m.davidPerson };
   return seg;
 }
 
@@ -878,8 +883,10 @@ function buildHairCage(
   }
 
   // Depthノイズが殻の凹凸になるのを、メッシュ位相の近傍平均で均す
-  // (シェル版のグリッドblur 2パスと同じ役割)
-  smoothVertexField(thicknessRaw, model.triangles, n, 2);
+  // (シェル版のグリッドblur 2パスと同じ役割)。DAViDはノイズが少ないため
+  // 弱め (1パス) にして生え際などの実起伏を残す
+  const usingDavidDepth = params.depthSource === 'DAVID' && !!ctx.measured?.davidDepth;
+  smoothVertexField(thicknessRaw, model.triangles, n, usingDavidDepth ? 1 : 2);
 
   const positions = new Float32Array(n * 3);
   for (let i = 0; i < n; i++) {
