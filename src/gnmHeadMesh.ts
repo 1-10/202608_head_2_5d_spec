@@ -284,7 +284,7 @@ export function buildGnmHead(
   // --- Hair (実測髪マスク+実測Depth) ---
   // 前面1枚グリッドのシェル: 写真の髪シルエットと実測Depthの起伏に忠実。
   // 頂点は画像平面の自由グリッドなので、頭蓋の外へ垂れる髪 (耳下・ロング) も張れる
-  const hair = buildHairShell(ctx, texture, fit, params, normalTexture);
+  const hair = buildHairShell(ctx, texture, fit, model.triangles, params, normalTexture);
   if (hair) hair.mesh.visible = params.gnmShowHair;
 
   // 回転pivotは頭部の実重心z (真3Dのため固定比率ではなく実測で決める)
@@ -763,15 +763,47 @@ interface HairShellBuild {
 const HAIR_MAX_THICKNESS = 0.16;
 const HAIR_MIN_THICKNESS = 0.02;
 
+/** グリッド上のスカラー場を3x3近傍平均で平滑化する (in-place)。 */
+function smoothGridField(field: Float32Array, cols: number, rows: number, passes: number): void {
+  if (passes <= 0) return;
+  const src = new Float32Array(field.length);
+  for (let pass = 0; pass < passes; pass++) {
+    src.set(field);
+    for (let row = 0; row < rows; row++) {
+      for (let col = 0; col < cols; col++) {
+        let sum = 0;
+        let count = 0;
+        for (let dr = -1; dr <= 1; dr++) {
+          const rr = row + dr;
+          if (rr < 0 || rr >= rows) continue;
+          for (let dc = -1; dc <= 1; dc++) {
+            const cc = col + dc;
+            if (cc < 0 || cc >= cols) continue;
+            sum += src[rr * cols + cc];
+            count++;
+          }
+        }
+        field[row * cols + col] = sum / count;
+      }
+    }
+  }
+}
+
 /**
  * 実測髪マスク+実測Depthの前面髪シェルを作る。
  * Depthの相対値はランドマーク位置の「フィット済GNM表面z」への最小二乗で
  * モデル空間zへ写像する (実比率スケール)。
+ *
+ * 役割分担: 髪マスクは「色 (RGB) と輪郭 (alphaMap)」専用で、形状には
+ * 低周波成分だけを使う。マスクの高周波 (房の切れ目・GFの滲み) をzへ通すと
+ * 房境界ごとにメッシュが折れ、グリッド解像度のジグザグになる。
+ * 形状は実測Depth (絶対位置) が担う。
  */
 function buildHairShell(
   ctx: GnmBuildContext,
   texture: THREE.Texture,
   fit: GnmFitResult,
+  triangles: Uint32Array,
   params: Params,
   normalTexture: THREE.Texture | null = null,
 ): HairShellBuild | null {
@@ -803,7 +835,7 @@ function buildHairShell(
   // フィット済GNM表面のzバッファ (XYビンごとの最前面z)。
   // 髪シェルは「頭皮z + 実測髪厚」でアンカーする — Depthフィットの外挿を
   // そのままzに使うと頭頂で過大になり、シェルが頭蓋から浮くため。
-  const scalp = buildScalpZBuffer(fit.vertices, { xMin, xMax, yMin, yMax });
+  const scalp = buildScalpZBuffer(fit.vertices, triangles, { xMin, xMax, yMin, yMax });
 
   // 髪マスク重み付きの深度サンプル。前髪などまばらな髪帯では、毛の隙間から
   // 見える肌 (奥) の深度が混ざって格子zがジグザグになる (高解像度のDAViDは
@@ -829,6 +861,8 @@ function buildHairShell(
     return wsum > 1e-3 ? sum / wsum : sampleField(depth, u, v);
   };
 
+  const thicknessRaw = new Float32Array(cols * rows); // クランプ前の実測髪厚
+  const scalpZs = new Float32Array(cols * rows);
   for (let row = 0; row < rows; row++) {
     const y = yMax + (yMin - yMax) * (row / (rows - 1));
     for (let col = 0; col < cols; col++) {
@@ -841,57 +875,47 @@ function buildHairShell(
       maskPerVertex[idx] = hairMask;
       const d = sampleHairDepth(u, v, hairMask);
       const zMeasured = (d * hairFit.scale + hairFit.offset) * params.measuredDepthGain;
-      const scalpZ = scalp(x, y);
-      const thickness = Math.min(HAIR_MAX_THICKNESS, Math.max(HAIR_MIN_THICKNESS, zMeasured - scalpZ));
-      // feather帯では厚みを頭皮へ絞る (縁の浮き対策。rolloffは絞り増強として作用)
-      const edge = smoothstep(0.08, 0.5, hairMask);
-      const z = scalpZ + params.gnmHairLift + thickness * edge - params.gnmHairRolloff * (1 - edge);
+      scalpZs[idx] = scalp(x, y);
+      thicknessRaw[idx] = zMeasured - scalpZs[idx];
 
       positions[idx * 3] = x;
       positions[idx * 3 + 1] = y;
-      positions[idx * 3 + 2] = z;
       uvs[idx * 2] = u;
       uvs[idx * 2 + 1] = v;
     }
   }
 
-  // Depthノイズ (GNM実スケールで増幅) をグリッド空間で平滑化する。
+  // 厚み場のノイズ (GNM実スケールで増幅される) をグリッド空間で平滑化する。
   // 3x3 blurの物理半径はセルサイズに比例して縮むため、パス数はグリッド密度の
-  // 2乗でスケールして「見た目の平滑量」を解像度から独立させる (これを怠ると
-  // 高密度グリッドで1セル段差が瓦状のアーティファクトになる)。
+  // 2乗でスケールして「見た目の平滑量」を解像度から独立させる。
   // DAViDはノイズが少ないため基準を弱め (旧64列グリッドで1パス相当) にして
   // 生え際・毛束の実起伏を残す
   const basePasses = params.depthSource === 'DAVID' && ctx.measured?.davidDepth ? 1 : 2;
-  const shellSmoothPasses = Math.max(1, Math.round(basePasses * (cols / 64) ** 2));
-  for (let pass = 0; pass < shellSmoothPasses; pass++) {
-    const src = new Float32Array(maskPerVertex.length);
-    for (let i = 0; i < maskPerVertex.length; i++) src[i] = positions[i * 3 + 2];
-    for (let row = 0; row < rows; row++) {
-      for (let col = 0; col < cols; col++) {
-        let sum = 0;
-        let count = 0;
-        for (let dr = -1; dr <= 1; dr++) {
-          const rr = row + dr;
-          if (rr < 0 || rr >= rows) continue;
-          for (let dc = -1; dc <= 1; dc++) {
-            const cc = col + dc;
-            if (cc < 0 || cc >= cols) continue;
-            sum += src[rr * cols + cc];
-            count++;
-          }
-        }
-        positions[(row * cols + col) * 3 + 2] = sum / count;
-      }
-    }
+  const densityScale = Math.max(1, Math.round((cols / 64) ** 2));
+  smoothGridField(thicknessRaw, cols, rows, basePasses * densityScale);
+
+  // 縁の巻き込みに使うマスクは強く平滑化して低周波成分だけにする。
+  // 生のマスクを使うと房の切れ目ごとにzが (厚み+rolloff) 幅で上下し、
+  // それがメッシュのジグザグの主因になる (輪郭の精度はalphaMapが担う)
+  const edgeField = new Float32Array(maskPerVertex);
+  smoothGridField(edgeField, cols, rows, 3 * densityScale);
+
+  for (let i = 0; i < cols * rows; i++) {
+    const edge = smoothstep(0.08, 0.5, edgeField[i]);
+    const thickness = Math.min(HAIR_MAX_THICKNESS, Math.max(HAIR_MIN_THICKNESS, thicknessRaw[i]));
+    positions[i * 3 + 2] =
+      scalpZs[i] + params.gnmHairLift + thickness * edge - params.gnmHairRolloff * (1 - edge);
   }
 
-  // マスク外へはみ出すコーナーを含む三角形は張らない。境界セルの三角形が
-  // グレージング視で横倒しになり「鋸歯状のスパイク」として見えるため、
-  // 全コーナーがマスク内のセルだけ残す (縁のフェードはalphaMap+alphaTestに任せる)
+  // 三角形は「1つでも髪に触れていれば」張る。全コーナーがマスク内という条件だと
+  // 境界がグリッド解像度の階段になり、マスクが薄い房の内部にも穴が空く
+  // (実測: 96x120で28%の三角形がこれで落ちていた)。
+  // 実際の輪郭はalphaMap (1024px) のper-pixelカットが担うので、
+  // ジオメトリはマスクより1セル外まで張っておくのが正しい
   const gridIndices = buildGridIndices(cols, rows);
   const kept: number[] = [];
   for (let t = 0; t < gridIndices.length; t += 3) {
-    const m = Math.min(
+    const m = Math.max(
       maskPerVertex[gridIndices[t]],
       maskPerVertex[gridIndices[t + 1]],
       maskPerVertex[gridIndices[t + 2]],
@@ -933,12 +957,17 @@ const SCALP_BINS_X = 96;
 const SCALP_BINS_Y = 112;
 
 /**
- * フィット済GNM頂点をXYビンへ分配し、各ビンの最前面z (最大z) を持つ
- * 「頭皮zバッファ」を作る。空ビンはBFSで最寄りの値を伝播して埋めるため、
+ * フィット済GNMの表面を平行投影でラスタライズし、各ビンの最前面z (最大z) を持つ
+ * 「頭皮zバッファ」を作る。空ビン (シルエット外) はBFSで最寄りの値を伝播するため、
  * 髪がGNMシルエットの外へはみ出す画素でも連続したzが返る。
+ *
+ * 頂点splatではなく三角形ラスタライズで埋める: GNM頂点はビン格子より疎で、
+ * splatだと内部にも空ビンが散り、BFS伝播の階段がそのまま髪シェルの段差
+ * (クシャクシャ) として現れる。
  */
 function buildScalpZBuffer(
   verts: Float32Array,
+  triangles: Uint32Array,
   bounds: { xMin: number; xMax: number; yMin: number; yMax: number },
 ): (x: number, y: number) => number {
   const { xMin, xMax, yMin, yMax } = bounds;
@@ -948,12 +977,37 @@ function buildScalpZBuffer(
 
   const spanX = Math.max(1e-6, xMax - xMin);
   const spanY = Math.max(1e-6, yMax - yMin);
-  for (let i = 0; i < verts.length; i += 3) {
-    const bx = Math.floor(((verts[i] - xMin) / spanX) * w);
-    const by = Math.floor(((verts[i + 1] - yMin) / spanY) * h);
-    if (bx < 0 || bx >= w || by < 0 || by >= h) continue;
-    const idx = by * w + bx;
-    if (verts[i + 2] > data[idx]) data[idx] = verts[i + 2];
+  const toBx = (x: number) => ((x - xMin) / spanX) * w - 0.5;
+  const toBy = (y: number) => ((y - yMin) / spanY) * h - 0.5;
+  for (let t = 0; t < triangles.length; t += 3) {
+    const a = triangles[t] * 3;
+    const b = triangles[t + 1] * 3;
+    const c = triangles[t + 2] * 3;
+    const ax = toBx(verts[a]);
+    const ay = toBy(verts[a + 1]);
+    const bx = toBx(verts[b]);
+    const by = toBy(verts[b + 1]);
+    const cx = toBx(verts[c]);
+    const cy = toBy(verts[c + 1]);
+    const area = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+    if (Math.abs(area) < 1e-9) continue;
+    const x0 = Math.max(0, Math.floor(Math.min(ax, bx, cx)));
+    const x1 = Math.min(w - 1, Math.ceil(Math.max(ax, bx, cx)));
+    const y0 = Math.max(0, Math.floor(Math.min(ay, by, cy)));
+    const y1 = Math.min(h - 1, Math.ceil(Math.max(ay, by, cy)));
+    for (let py = y0; py <= y1; py++) {
+      for (let px = x0; px <= x1; px++) {
+        // 重心座標 (符号付き面積比)。三角形の向きに関係なく内外判定できるよう
+        // areaで正規化してから0-1範囲を見る
+        const wa = ((bx - px) * (cy - py) - (by - py) * (cx - px)) / area;
+        const wb = ((cx - px) * (ay - py) - (cy - py) * (ax - px)) / area;
+        const wc = 1 - wa - wb;
+        if (wa < -1e-4 || wb < -1e-4 || wc < -1e-4) continue;
+        const z = wa * verts[a + 2] + wb * verts[b + 2] + wc * verts[c + 2];
+        const idx = py * w + px;
+        if (z > data[idx]) data[idx] = z;
+      }
+    }
   }
 
   // 空ビンをBFSで埋める (最寄りの既知zを伝播)
@@ -995,10 +1049,44 @@ function buildScalpZBuffer(
     }
   }
 
+  // ビンは「疎なGNM頂点のmax」なのでビン単位のノイズを持つ。3x3 blurで均す
+  // (thicknessクランプ時にzがこのバッファへ直接従うため、ここのノイズは
+  // そのままメッシュのクシャクシャになる)
+  for (let pass = 0; pass < 2; pass++) {
+    const src = data.slice();
+    for (let by = 0; by < h; by++) {
+      for (let bx = 0; bx < w; bx++) {
+        let sum = 0;
+        let cnt = 0;
+        for (let dy = -1; dy <= 1; dy++) {
+          const yy = by + dy;
+          if (yy < 0 || yy >= h) continue;
+          for (let dx = -1; dx <= 1; dx++) {
+            const xx = bx + dx;
+            if (xx < 0 || xx >= w) continue;
+            sum += src[yy * w + xx];
+            cnt++;
+          }
+        }
+        data[by * w + bx] = sum / cnt;
+      }
+    }
+  }
+
+  // バイリニア補間で参照する — 最近傍参照だとビン境界の階段が
+  // グリッド解像度と干渉し、クランプ帯のメッシュが列ごとに跳ねる
   return (x: number, y: number) => {
-    const bx = Math.min(w - 1, Math.max(0, Math.floor(((x - xMin) / spanX) * w)));
-    const by = Math.min(h - 1, Math.max(0, Math.floor(((y - yMin) / spanY) * h)));
-    return data[by * w + bx];
+    const fx = Math.min(w - 1.001, Math.max(0, ((x - xMin) / spanX) * w - 0.5));
+    const fy = Math.min(h - 1.001, Math.max(0, ((y - yMin) / spanY) * h - 0.5));
+    const bx = Math.floor(fx);
+    const by = Math.floor(fy);
+    const ax = fx - bx;
+    const ay = fy - by;
+    const i00 = data[by * w + bx];
+    const i10 = data[by * w + bx + 1];
+    const i01 = data[(by + 1) * w + bx];
+    const i11 = data[(by + 1) * w + bx + 1];
+    return (i00 * (1 - ax) + i10 * ax) * (1 - ay) + (i01 * (1 - ax) + i11 * ax) * ay;
   };
 }
 
