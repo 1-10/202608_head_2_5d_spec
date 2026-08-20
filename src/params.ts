@@ -67,6 +67,7 @@ export interface Params {
   showLandmarks: boolean;
   // レイヤー分離画像 (headテクスチャ / 髪だけの画像) を画面隅に表示
   showLayerImages: boolean;
+  layerImageScale: number; // レイヤー画像の表示倍率 (1=基準高さ160px)
 
   // --- カメラ ---
   cameraFovDeg: number;
@@ -113,6 +114,7 @@ export const DEFAULT_PARAMS: Params = {
   showWireframe: false,
   showLandmarks: false,
   showLayerImages: false,
+  layerImageScale: 1.0,
 
   cameraFovDeg: 30,
   cameraDistanceRatio: 3.4,
