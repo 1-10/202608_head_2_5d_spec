@@ -265,10 +265,11 @@ async function ensureDavid(): Promise<void> {
   const s = sceneState;
   const m = s.ctx.measured;
   if (!m) return;
+  // 前景 (person) は常時DAViDを使うため、いずれか未取得なら取得する
   const need =
     (params.depthSource === 'DAVID' && !m.davidDepth) ||
     (params.normalSource === 'DAVID' && !m.davidNormalCanvas) ||
-    (params.personSource === 'DAVID' && !m.davidPerson);
+    !m.davidPerson;
   if (!need) return;
 
   davidAcquisitionBusy = true;

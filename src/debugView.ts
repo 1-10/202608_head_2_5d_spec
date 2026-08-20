@@ -102,10 +102,6 @@ export function setupDebugGui(container: HTMLElement, params: Params, options: D
     .name('Normal Source')
     .onChange(() => options.onSourceChanged());
   sourceFolder
-    .add(params, 'personSource', { 'DAViD': 'DAVID', 'SelfieMulticlass': 'SELFIE_MULTICLASS' })
-    .name('Person Source')
-    .onChange(() => options.onSourceChanged());
-  sourceFolder
     .add(params, 'gnmNormalStrength', 0, 1, 0.05)
     .name('Normal Strength')
     .onFinishChange(() => options.onGnmParamsChanged());

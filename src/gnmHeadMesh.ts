@@ -60,8 +60,9 @@ export function selectSegmentation(ctx: GnmBuildContext, params: Params): Segmen
   let seg = seg0;
   // Mask Refine off時はGuided Filter前の生マスクへ戻す (効果比較用)
   if (!params.gnmMaskRefine && seg.hairRaw) seg = { ...seg, hair: seg.hairRaw };
-  // 人物シルエットはDAViDソフト前景を優先 (境界精度が高い。意味分けはMediaPipeのまま)
-  if (params.personSource === 'DAVID' && m.davidPerson) seg = { ...seg, person: m.davidPerson };
+  // 人物シルエットはDAViDソフト前景があれば常にそれを使う (境界精度が高い。
+  // 意味分けはMediaPipeのまま。未取得・失敗時はSelfieMulticlassのperson)
+  if (m.davidPerson) seg = { ...seg, person: m.davidPerson };
   return seg;
 }
 
