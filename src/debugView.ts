@@ -156,12 +156,8 @@ export function setupDebugGui(container: HTMLElement, params: Params, options: D
     .name('Show Mouth (歯・舌)')
     .onChange(() => applyDebugVisualization(options.getGnmHead(), params));
   fitFolder
-    .add(params, 'gnmMouthBrightness', 0.2, 3, 0.05)
-    .name('Mouth Brightness')
-    .onFinishChange(() => options.onGnmParamsChanged());
-  fitFolder
-    .add(params, 'gnmTongueDown', 0, 3, 0.1)
-    .name('Tongue Down')
+    .add(params, 'gnmTonguePose', 0, 1, 0.05)
+    .name('Tongue Pose (公式)')
     .onFinishChange(() => options.onGnmParamsChanged());
   fitFolder.open();
 

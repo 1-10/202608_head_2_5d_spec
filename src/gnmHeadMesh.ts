@@ -21,7 +21,7 @@ import {
   type SimilarityTransform,
 } from './gnmHead';
 import { GNM_EXPRESSION_PRESETS } from './gnmExpressions';
-import { buildMouthInterior, buildTongueDrive } from './gnmMouthInterior';
+import { applyOfficialTonguePose, buildMouthInterior } from './gnmMouthInterior';
 import { MP_EYES, MP_LIPS, applyResidualWarp, buildEyeballContainment, fillNostrils } from './gnmRefine';
 import { applyFlatNormals, buildGridIndices, smoothstep } from './meshUtils';
 import { rasterizeMaskCanvas, type SegmentationResult } from './personSegmentation';
@@ -298,13 +298,9 @@ export function buildGnmHead(
 
   // --- 口腔内 (口腔壁・歯・歯茎・舌) ---
   // 頭部と同じ頂点配列を共有するが、写真投影を持たず実法線+ライティングで描くため別メッシュ
-  const mouthInterior = buildMouthInterior(
-    model,
-    fit.vertices,
-    lipPhotoColor,
-    uniformSkinColor,
-    params.gnmMouthBrightness,
-  );
+  // 色の基準は公式の色式と同じ「肌色」。減光していない平均色を測り直して渡す
+  const mouthSkinColor = seg ? maskedAverageColor(sourceCanvas, seg.faceSkin, 1) : null;
+  const mouthInterior = buildMouthInterior(model, fit.vertices, mouthSkinColor, lipPhotoColor);
   if (mouthInterior) mouthInterior.mesh.visible = params.gnmShowMouthInterior;
 
   // 回転pivotは頭部の実重心z (真3Dのため固定比率ではなく実測で決める)
@@ -352,8 +348,6 @@ export function buildGnmHead(
     if (/^(left|right)_eye/.test(model.expressionNames[i] ?? '')) isEyeExpr[i] = 1;
   }
 
-  // 舌の姿勢: 開口時に舌を下げる (gnmMouthInterior参照)
-  const tongueDrive = buildTongueDrive(model, GNM_EXPRESSION_PRESETS.surprise);
   const coeffs = new Float32Array(model.expressionCount);
 
   const applyExpressionNow = (): void => {
@@ -364,7 +358,7 @@ export function buildGnmHead(
         ? exprCurrent[i] * (1 - blinkNow) + blinkVec[i] * blinkNow
         : exprCurrent[i] + blinkVec[i] * blinkNow;
     }
-    tongueDrive?.apply(coeffs, params.gnmTongueDown);
+    applyOfficialTonguePose(model, coeffs, params.gnmTonguePose);
 
     const out = new Float32Array(neutralUntransformed);
     for (let i = 0; i < model.expressionCount; i++) {
