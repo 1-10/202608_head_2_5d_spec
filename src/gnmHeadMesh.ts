@@ -1040,8 +1040,11 @@ function buildHairShell(
     }
   }
 
-  // Depthノイズ (GNM実スケールで増幅) をグリッド空間で平滑化する
-  for (let pass = 0; pass < 2; pass++) {
+  // Depthノイズ (GNM実スケールで増幅) をグリッド空間で平滑化する。
+  // DAViDはノイズが少ないため弱め (1パス) にして、生え際・毛束の実起伏を残す
+  // (cage側のsmoothVertexFieldと同じ使い分け)
+  const shellSmoothPasses = params.depthSource === 'DAVID' && ctx.measured?.davidDepth ? 1 : 2;
+  for (let pass = 0; pass < shellSmoothPasses; pass++) {
     const src = new Float32Array(maskPerVertex.length);
     for (let i = 0; i < maskPerVertex.length; i++) src[i] = positions[i * 3 + 2];
     for (let row = 0; row < rows; row++) {

@@ -44,14 +44,17 @@ export interface Params {
   gnmWarpStrength: number;
   gnmHairLift: number; // 髪シェルをGNM表面手前へ持ち上げる量 (モデル空間)
   gnmHairRolloff: number; // 髪シェル縁を後方へ巻き込む量 (モデル空間)
-  // 額の髪画素を肌色で埋めた写真をheadテクスチャに使う (髪シェルとの二重描画対策)
+  // 額の髪画素を肌色で埋めた写真をheadテクスチャに使う (髪シェルとの二重描画対策)。
+  // SHELL主モードではシェルが写真の髪位置に密着するため二重描画が実害にならず、
+  // 置換の失敗 (生え際の滲み) の方が目立つので既定off (A/B用にトグルは残す)
   gnmHairSkinFill: boolean;
   gnmHairFillStrength: number; // 置換強度 (1=マスク通り, 小さいほど元の毛を残す)
   // 髪の表示。offで髪シェルを外し、テクスチャも全髪画素を肌色化したbald写真に切替
   gnmShowHair: boolean;
-  // 髪の形状表現。CAGE=GNM表面を法線方向へ実測髪厚オフセットした閉じた殻
-  // (側頭部に厚みが回り込む)、SHELL=従来の前面1枚グリッド (比較用。
-  // 頭蓋の外へ大きくはみ出すロングヘア等はこちらの方が形状を拾える)
+  // 髪の形状表現。SHELL=前面1枚グリッド (主モード。写真のシルエットと
+  // 実測Depthの起伏に忠実で、運用yaw±15°では最も見た目が強い)、
+  // CAGE=GNM表面を法線方向へ実測髪厚オフセットした閉じた殻 (側頭部への
+  // 回り込み比較用。シルエット細部が失われるため大角度yaw専用)
   gnmHairMode: 'CAGE' | 'SHELL';
   // bald画像で再検出した顔輪郭 (FACE_OVAL) でfitする (輪郭の髪バイアス補正)。
   // CompHairHeadの「顔再構成はbald画像で行う」方式の商用クリーン版
@@ -98,6 +101,8 @@ export interface Params {
   backgroundColor: string; // 3Dビューポートの背景色 (hex)
 
   // --- 髪シェルGrid解像度 ---
+  // DAViD depth (512px crop) の情報量を拾える密度が基準。
+  // ARPortraitDepth (192x256) しか無い環境では下げても見た目は変わらない
   hairGridCols: number;
   hairGridRows: number;
 }
@@ -118,10 +123,10 @@ export const DEFAULT_PARAMS: Params = {
   gnmWarpStrength: 1.0,
   gnmHairLift: 0.02,
   gnmHairRolloff: 0.08,
-  gnmHairSkinFill: true,
+  gnmHairSkinFill: false,
   gnmHairFillStrength: 1.0,
   gnmShowHair: true,
-  gnmHairMode: 'CAGE',
+  gnmHairMode: 'SHELL',
   gnmBaldContourFit: true,
   gnmMaskRefine: true,
 
@@ -151,8 +156,8 @@ export const DEFAULT_PARAMS: Params = {
 
   backgroundColor: '#14161a', // style.cssの--bgと同じ初期値 (透過時と見た目が変わらないように)
 
-  hairGridCols: 64,
-  hairGridRows: 80,
+  hairGridCols: 96,
+  hairGridRows: 120,
 };
 
 export function createParams(): Params {
