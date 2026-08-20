@@ -54,9 +54,9 @@ export interface Params {
   // 口腔内の明るさ倍率。基準色は写真の下唇色なので、写真の露出のまま暗すぎ/明るすぎる
   // ときの手動補正 (1=写真の唇色そのままの比率)
   gnmMouthBrightness: number;
-  // 開口時に舌を下げる量 (GNM公式の舌成分への係数振幅。公式デモGUIと同じ±3の単位)。
-  // 顎の開き量に比例させて効かせる。0だとGNMのneutral姿勢のまま = 舌が口蓋に
-  // 張り付いて開口部を埋め、歯も口腔も見えない
+  // 開口時に舌を下げる量。1.0 = 公式デモGIFの舌スライダー姿勢そのまま
+  // (tongue_mean=0.7 / tongue_000=-1.7。舌が奥へ11mm・下へ3.9mm)。顎の開き量に比例。
+  // 0だとGNMのneutral姿勢のまま = 舌が口蓋に張り付いて開口部を埋め、歯も口腔も見えない
   gnmTongueDown: number;
 
   // --- GNM 表情 ---
@@ -125,7 +125,7 @@ export const DEFAULT_PARAMS: Params = {
   gnmMaskRefine: true,
   gnmShowMouthInterior: true,
   gnmMouthBrightness: 1.0,
-  gnmTongueDown: 1.4,
+  gnmTongueDown: 1.0,
 
   gnmExprIntensity: 1.0,
   gnmEmotion: 'AUTO',

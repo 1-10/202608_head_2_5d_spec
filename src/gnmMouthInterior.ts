@@ -50,6 +50,19 @@ const AO_FLOOR = 0.04; // 咽頭側の下限 (完全な黒は避ける)
 // 舌成分の係数上限。公式デモGUI (gnm_head_demo.ipynb) のスライダー範囲と同じ
 const TONGUE_COEFF_LIMIT = 3;
 
+/**
+ * 開口した口の中で舌が収まる姿勢。公式デモGIF (assets/readme/gnm_head_demo.gif)
+ * で実際に操作されているスライダー値をそのまま読み取ったもの
+ * (Expressionタブ tongue列 e350..e353 = tongue_mean, tongue_000..002)。
+ * 適用すると舌が奥へ11.0mm・下へ3.9mm動く (実測)。振幅1.0 = 公式デモと同じ姿勢。
+ */
+const OFFICIAL_TONGUE_POSE: Record<string, number> = {
+  tongue_mean: 0.7,
+  tongue_000: -1.7,
+  tongue_001: 0,
+  tongue_002: 0,
+};
+
 export interface MouthInteriorBuild {
   mesh: THREE.Mesh;
   /** 表情適用後の頭部頂点配列 (相似変換済み) から位置を取り込み、法線を作り直す。 */
@@ -171,21 +184,19 @@ export interface TongueDrive {
 }
 
 /**
- * 開口時に舌を下げる。GNMのneutralは口を閉じた姿勢なので舌は口蓋に張り付いており、
- * そのまま口を開けると舌が開口部を埋めて歯も口腔も見えない。
+ * 開口に応じて舌を「公式デモと同じ姿勢」へ寄せる。
  *
- * GNM Headに顎ジョイントは無く (joint_names = neck/head/left_eye/right_eye)、
- * 舌を動かす機構は tongue成分 (tongue_mean + tongue_000..) だけ。公式ExpressionSampler
- * には舌のクラス TONGUE_CENTER (=19) があり舌成分を強く駆動するが、方向は
- * 「舌を前へ出す」(実測: 舌の平均 +7.2mm 前方 / |係数|最大4.05)。逆向きに使えば
- * 引っ込む向きになるので試したが、必要な振幅では係数が公式スライダー範囲±3を大きく
- * 超え、舌先が反転して尖る (学習分布の外への外挿) ため採用しなかった。
- * それ以外のクラスは舌をほぼ動かさない (実測: 舌の変位<=0.5mm)。
+ * GNMのneutralは口を閉じた姿勢なので舌は口蓋に張り付いており、そのまま口を開けると
+ * 舌が開口部を埋めて歯も口腔も見えない。GNM Headに顎ジョイントは無く
+ * (joint_names = neck/head/left_eye/right_eye)、舌を動かす機構は tongue成分だけ。
  *
- * よって方向はモデルの基底から実測で決める: 舌頂点の平均yを最も下げる単位係数
- * ベクトル (成分ごとの平均y変位そのもの)。意味ラベルは推測しない。
- * 量だけがこちら側の連動設計で、公式プリセット (surprise) の顎の開き量を1.0の
- * 基準に取って比例させ、係数は公式デモGUIと同じ±3の範囲へクランプする。
+ * 方向は推測せず OFFICIAL_TONGUE_POSE (公式デモGIFのスライダー値) をそのまま使う。
+ * 公式デモ自身がその値で動かしているので、係数が学習分布の外へ出る心配がない
+ * (公式ExpressionSampler の舌クラス TONGUE_CENTER を符号反転する案も試したが、
+ * 必要な振幅で係数が±3を大きく超え舌先が反転して尖った)。
+ *
+ * 連動だけがこちら側の設計: 公式デモは手動スライダーなので顎との連動を持たない。
+ * ここでは公式プリセット (surprise) の顎の開き量を1.0の基準に取って比例させる。
  */
 export function buildTongueDrive(
   model: GnmModel,
@@ -200,7 +211,7 @@ export function buildTongueDrive(
   }
   if (tongue.length === 0 || tongueComps.length === 0) return null;
 
-  // 成分ごとの「舌頂点の平均y変位」(係数1あたり、モデル空間)
+  // 成分ごとの「舌頂点の平均y変位」(係数1あたり、モデル空間)。顎の開き量の実測に使う
   const dyPerComp = new Float32Array(model.expressionCount);
   for (let c = 0; c < model.expressionCount; c++) {
     const base = c * n * 3;
@@ -209,11 +220,9 @@ export function buildTongueDrive(
     dyPerComp[c] = (sum / tongue.length) * (model.expressionScales[c] / 32767);
   }
 
-  // 舌成分だけで最も下げる方向 (L2ノルム1)。振幅1で平均y変位 = -dirNorm
-  const dir = tongueComps.map((c) => -dyPerComp[c]);
-  const dirNorm = Math.hypot(...dir);
-  if (dirNorm < 1e-9) return null;
-  for (let k = 0; k < dir.length; k++) dir[k] /= dirNorm;
+  // 公式デモの姿勢を成分名で引く (アセットが持つ舌成分の並びに依存しない)
+  const dir = tongueComps.map((c) => OFFICIAL_TONGUE_POSE[model.expressionNames[c] ?? ''] ?? 0);
+  if (!dir.some((v) => v !== 0)) return null;
 
   const isTongue = new Uint8Array(model.expressionCount);
   for (const c of tongueComps) isTongue[c] = 1;
