@@ -21,7 +21,7 @@ import {
   type SimilarityTransform,
 } from './gnmHead';
 import { GNM_EXPRESSION_PRESETS } from './gnmExpressions';
-import { MP_EYES, MP_LIPS, applyResidualWarp, fillNostrils } from './gnmRefine';
+import { MP_EYES, MP_LIPS, applyResidualWarp, buildEyeballContainment, fillNostrils } from './gnmRefine';
 import { applyFlatNormals, buildGridIndices, smoothstep } from './meshUtils';
 import { rasterizeMaskCanvas, type SegmentationResult } from './personSegmentation';
 import type { Params } from './params';
@@ -309,6 +309,8 @@ export function buildGnmHead(
   // 注意: applyIdentityから作り直すと残差ワープなどの後処理が毎フレーム消えるため、
   // 最終頂点 (fit.vertices) を逆相似変換して作る
   const neutralUntransformed = invertSimilarity(fit.vertices, fit.sim);
+  // 瞼が眼球へ潜り込むのを毎フレーム禁じる拘束 (neutralの形は変えない)
+  const eyeballContainment = buildEyeballContainment(model, neutralUntransformed);
   const exprCurrent = new Float32Array(model.expressionCount);
   const exprTarget = new Float32Array(model.expressionCount);
   const posAttr = geometry.getAttribute('position') as THREE.BufferAttribute;
@@ -342,6 +344,7 @@ export function buildGnmHead(
       const base = i * model.vertexCount * 3;
       for (let j = 0; j < model.vertexCount * 3; j++) out[j] += model.expressionBasisQ[base + j] * cs;
     }
+    eyeballContainment?.apply(out);
     applySimilarityInPlace(out, fit.sim);
     (posAttr.array as Float32Array).set(out);
     posAttr.needsUpdate = true;
