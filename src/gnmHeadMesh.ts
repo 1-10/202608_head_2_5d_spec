@@ -22,7 +22,7 @@ import {
 } from './gnmHead';
 import { GNM_EXPRESSION_PRESETS } from './gnmExpressions';
 import { MP_EYES, MP_LIPS, applyResidualWarp, fillNostrils } from './gnmRefine';
-import { buildHairFreeFaceCanvas } from './hairFill';
+import { buildBaldHeadCanvas } from './hairFill';
 import { applyFlatNormals, buildGridIndices, smoothstep } from './meshUtils';
 import { rasterizeMaskCanvas, type SegmentationResult } from './personSegmentation';
 import type { Params } from './params';
@@ -80,7 +80,7 @@ export interface GnmHeadBuild {
   hairMesh: THREE.Mesh | null;
   /** ランドマーク重畳デバッグ表示 (既定で非表示。Show Landmarksで切替)。 */
   landmarkOverlay: THREE.Object3D;
-  /** headに実際に投影している画像 (Hair Skin Fill / bald適用後)。デバッグ表示用 */
+  /** headに実際に投影している画像 (Show Hair off時はbald置換後)。デバッグ表示用 */
   headCanvas: HTMLCanvasElement;
   /** 髪シェルが描く髪だけの画像 (写真×髪マスクalpha)。セグメンテーション無しはnull */
   hairLayerCanvas: HTMLCanvasElement | null;
@@ -116,21 +116,16 @@ export function buildGnmHead(
   const fit = fitGnmToLandmarks(model, ctx.landmarks, params.gnmIdentityReg, params.gnmDenseFit);
   const seg = selectSegmentation(ctx, params);
 
-  // 額の髪焼き付き対策: headの投影テクスチャ・fallback色には「髪画素を肌色で
-  // 埋めた写真」を使う。髪は髪シェル (元写真) だけに描かれ、視差が付いても
-  // 「シェルの髪」と「肌に焼き付いた髪」が二重に見えない。
-  // Show Hair off時は髪シェルを作らないため、全髪画素を置換したbald写真に切替
+  // Show Hair off時は髪シェルを作らないため、写真の髪が頭皮に残らないよう
+  // 全髪画素を肌色置換したbald写真へテクスチャを切り替える
   let headCanvas = sourceCanvas;
   let headTexture = texture;
   let ownedHeadTexture: THREE.Texture | null = null;
-  if ((params.gnmHairSkinFill || !params.gnmShowHair) && seg) {
-    const filled = buildHairFreeFaceCanvas(
-      sourceCanvas,
-      seg,
-      { landmarks: ctx.landmarks, faceWidthPx: ctx.faceWidthPx },
-      params.gnmShowHair ? params.gnmHairFillStrength : 1,
-      params.gnmShowHair ? 'overlay' : 'bald',
-    );
+  if (!params.gnmShowHair && seg) {
+    const filled = buildBaldHeadCanvas(sourceCanvas, seg, {
+      landmarks: ctx.landmarks,
+      faceWidthPx: ctx.faceWidthPx,
+    });
     if (filled) {
       headCanvas = filled;
       const t = new THREE.CanvasTexture(filled);
@@ -854,8 +849,13 @@ function buildHairShell(
   }
 
   // Depthノイズ (GNM実スケールで増幅) をグリッド空間で平滑化する。
-  // DAViDはノイズが少ないため弱め (1パス) にして、生え際・毛束の実起伏を残す
-  const shellSmoothPasses = params.depthSource === 'DAVID' && ctx.measured?.davidDepth ? 1 : 2;
+  // 3x3 blurの物理半径はセルサイズに比例して縮むため、パス数はグリッド密度の
+  // 2乗でスケールして「見た目の平滑量」を解像度から独立させる (これを怠ると
+  // 高密度グリッドで1セル段差が瓦状のアーティファクトになる)。
+  // DAViDはノイズが少ないため基準を弱め (旧64列グリッドで1パス相当) にして
+  // 生え際・毛束の実起伏を残す
+  const basePasses = params.depthSource === 'DAVID' && ctx.measured?.davidDepth ? 1 : 2;
+  const shellSmoothPasses = Math.max(1, Math.round(basePasses * (cols / 64) ** 2));
   for (let pass = 0; pass < shellSmoothPasses; pass++) {
     const src = new Float32Array(maskPerVertex.length);
     for (let i = 0; i < maskPerVertex.length; i++) src[i] = positions[i * 3 + 2];

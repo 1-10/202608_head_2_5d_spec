@@ -1,18 +1,10 @@
-// 額の髪画素を肌色で置換した「髪なし顔テクスチャ」の生成。
+// 髪画素を肌色で置換した「bald (髪なし) 頭部テクスチャ」の生成。
 //
-// 動機: GNM headは写真を平行投影するため、額にかかった髪 (まばらな前髪・
-// 生え際の細い毛) が肌の頂点色/UVへ焼き付く。髪は髪シェルが手前に描くので、
-// 視差 (yaw/pitch回転) が付くと「シェルの髪」と「肌に焼き付いた髪」が
-// 二重に見える。CompHairHead等の compositional 手法が採る「bald画像で顔を作り
-// 髪を別レイヤーで重ねる」発想の簡易版として、髪画素を周辺肌色の pull-push
-// 補間で埋める。
-//
-// 置換するのは「肌の上に重なった髪」だけに限定する:
-// - faceSkin共在ゲート … hairとfaceSkinの信頼度が同一画素で同時に立つのは
-//   「肌が透ける、まばらな毛」だけ。生え際より上の密な髪帯はfaceSkin=0で
-//   置換されない (GNM頭皮はUVクランプで髪色を拾い、髪シェルalpha縁の
-//   ギザギザを裏から隠す既存設計をそのまま維持できる)
-// - 眉より上限定 … 髭・もみあげ (hairクラスに入りうる) の誤消去を防ぐ
+// 用途: Show Hair off時の「髪を外した頭」表示。髪シェルを外すだけだと
+// 写真の髪が頭皮テクスチャに残るため、髪画素を周辺肌色の pull-push 補間で
+// 埋めた画像に差し替える。CompHairHead等の compositional 手法が採る
+// 「bald画像で顔を作る」発想の簡易版。
+// 髭・もみあげ (hairクラスに入りうる) は鼻下端ゲートで保護する。
 //
 // 依存はSelfieMulticlassのマスクのみ (ニューラルinpainting不使用 = 商用クリーン)。
 
@@ -31,26 +23,13 @@ export interface HairFillInput {
 }
 
 /**
- * 置換モード。
- * - overlay: 肌の上に重なったまばらな毛だけ置換 (髪シェルと併用する通常モード)
- * - bald: 髪をすべて置換 (髪シェル非表示の「髪を外した頭」用)。
- *   髭・もみあげの保護は眉ゲートではなく鼻下端ゲートで行う (それより上の
- *   側頭部の髪は側面もすべて肌化する)
+ * bald (髪なし) 頭部テクスチャを作る。置換対象が実質無い場合はnull (元写真をそのまま使う)。
  */
-export type HairFillMode = 'overlay' | 'bald';
-
-/**
- * 髪なし顔テクスチャを作る。置換対象が実質無い場合はnull (元写真をそのまま使う)。
- * strength: 置換強度 (1=マスク通り置換, 小さいほど元の毛を残す)。
- */
-export function buildHairFreeFaceCanvas(
+export function buildBaldHeadCanvas(
   sourceCanvas: HTMLCanvasElement,
   seg: SegmentationResult,
   input: HairFillInput,
-  strength: number,
-  mode: HairFillMode = 'overlay',
 ): HTMLCanvasElement | null {
-  if (strength <= 0) return null;
   const fullW = sourceCanvas.width;
   const fullH = sourceCanvas.height;
   const scale = Math.min(1, WORK_MAX_DIM / Math.max(fullW, fullH));
@@ -66,19 +45,11 @@ export function buildHairFreeFaceCanvas(
 
   const faceWidthW = input.faceWidthPx * (w / fullW);
 
-  // 髭・もみあげ保護ゲートの基準row (作業解像度)。
-  // overlay: 眉の上端 (iBUG 17-26)。bald: 鼻の下端 (iBUG 33) —
-  // 髪を全部外すため側頭部 (眉〜鼻の高さ) も置換対象に含める
+  // 髭・もみあげ保護ゲートの基準row (作業解像度): 鼻の下端 (iBUG 33)。
+  // それより上の髪 (側頭部含む) はすべて置換対象
   let gateRow = Infinity;
-  if (mode === 'bald') {
-    const lm = input.landmarks[MEDIAPIPE_IBUG68[33]];
-    if (lm) gateRow = lm.py * (h / fullH);
-  } else {
-    for (let k = 17; k <= 26; k++) {
-      const lm = input.landmarks[MEDIAPIPE_IBUG68[k]];
-      if (lm) gateRow = Math.min(gateRow, lm.py * (h / fullH));
-    }
-  }
+  const noseLm = input.landmarks[MEDIAPIPE_IBUG68[33]];
+  if (noseLm) gateRow = noseLm.py * (h / fullH);
   if (!Number.isFinite(gateRow)) return null;
   const gateBand = Math.max(1, 0.06 * faceWidthW); // ゲートのフェード幅
 
@@ -95,10 +66,7 @@ export function buildHairFreeFaceCanvas(
       const face = sampleField(seg.faceSkin, u, v);
       srcWeight[i] = face * (1 - hairSoft);
       if (vertGate <= 0) continue;
-      // overlay: faceSkin共在ゲート (肌が透けて見える画素の髪だけ置換)。
-      // bald: 髪はすべて置換
-      const coGate = mode === 'bald' ? 1 : smoothstep(0.15, 0.5, face);
-      const rw = Math.min(1, hairSoft * coGate * vertGate * strength);
+      const rw = Math.min(1, hairSoft * vertGate);
       replaceW[i] = rw;
       total += rw;
     }

@@ -44,11 +44,6 @@ export interface Params {
   gnmWarpStrength: number;
   gnmHairLift: number; // 髪シェルをGNM表面手前へ持ち上げる量 (モデル空間)
   gnmHairRolloff: number; // 髪シェル縁を後方へ巻き込む量 (モデル空間)
-  // 額の髪画素を肌色で埋めた写真をheadテクスチャに使う (髪シェルとの二重描画対策)。
-  // SHELL主モードではシェルが写真の髪位置に密着するため二重描画が実害にならず、
-  // 置換の失敗 (生え際の滲み) の方が目立つので既定off (A/B用にトグルは残す)
-  gnmHairSkinFill: boolean;
-  gnmHairFillStrength: number; // 置換強度 (1=マスク通り, 小さいほど元の毛を残す)
   // 髪の表示。offで髪シェルを外し、テクスチャも全髪画素を肌色化したbald写真に切替
   gnmShowHair: boolean;
   // 髪マスクをGuided Filterで写真エッジへ整合させた精細版を使う (offで生の256px)
@@ -115,8 +110,6 @@ export const DEFAULT_PARAMS: Params = {
   gnmWarpStrength: 1.0,
   gnmHairLift: 0.02,
   gnmHairRolloff: 0.08,
-  gnmHairSkinFill: false,
-  gnmHairFillStrength: 1.0,
   gnmShowHair: true,
   gnmMaskRefine: true,
 

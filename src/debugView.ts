@@ -145,14 +145,6 @@ export function setupDebugGui(container: HTMLElement, params: Params, options: D
     .add(params, 'gnmShowHair')
     .name('Show Hair')
     .onChange(() => options.onGnmParamsChanged());
-  fitFolder
-    .add(params, 'gnmHairSkinFill')
-    .name('Hair Skin Fill')
-    .onChange(() => options.onGnmParamsChanged());
-  fitFolder
-    .add(params, 'gnmHairFillStrength', 0, 2, 0.05)
-    .name('Hair Fill Strength')
-    .onFinishChange(() => options.onGnmParamsChanged());
   fitFolder.open();
 
   // プリセットは公式ExpressionSampler由来 (gnmExpressions.ts)
