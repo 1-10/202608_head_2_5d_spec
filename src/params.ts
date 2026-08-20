@@ -37,6 +37,9 @@ export interface Params {
   gnmHairFillStrength: number; // 置換強度 (1=マスク通り, 小さいほど元の毛を残す)
   // 髪の表示。offで髪シェルを外し、テクスチャも全髪画素を肌色化したbald写真に切替
   gnmShowHair: boolean;
+  // bald画像で再検出した顔輪郭 (FACE_OVAL) でfitする (輪郭の髪バイアス補正)。
+  // CompHairHeadの「顔再構成はbald画像で行う」方式の商用クリーン版
+  gnmBaldContourFit: boolean;
 
   // --- GNM 表情 ---
   gnmExprIntensity: number; // 感情表情の強さ (プリセット係数への乗数)
@@ -94,6 +97,7 @@ export const DEFAULT_PARAMS: Params = {
   gnmHairSkinFill: true,
   gnmHairFillStrength: 1.0,
   gnmShowHair: true,
+  gnmBaldContourFit: true,
 
   gnmExprIntensity: 1.0,
   gnmEmotion: 'AUTO',

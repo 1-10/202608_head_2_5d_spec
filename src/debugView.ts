@@ -123,6 +123,10 @@ export function setupDebugGui(container: HTMLElement, params: Params, options: D
     .name('Hair Rolloff')
     .onFinishChange(() => options.onGnmParamsChanged());
   fitFolder
+    .add(params, 'gnmBaldContourFit')
+    .name('Bald Contour Fit')
+    .onChange(() => options.onGnmParamsChanged());
+  fitFolder
     .add(params, 'gnmShowHair')
     .name('Show Hair')
     .onChange(() => options.onGnmParamsChanged());
