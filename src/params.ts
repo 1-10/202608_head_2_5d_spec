@@ -11,6 +11,9 @@
 // NONE              = 不使用 (マスクなし=UVクランプ無効、Depthなし=髪シェル無効)
 export type MaskSource = 'SELFIE_MULTICLASS' | 'NONE';
 export type DepthSource = 'DAVID' | 'ARPORTRAIT_DEPTH' | 'NONE';
+// 人物シルエット (UVクランプ・Depth cleanup境界) の供給源。
+// DAVID=ソフト前景セグ (512px)。crop外はSelfieMulticlassで補完。
+export type PersonSource = 'DAVID' | 'SELFIE_MULTICLASS';
 // 表面法線の供給源。DAVID=実測法線をObjectSpaceNormalMapとしてhead/髪に貼り、
 // 回転時の照明応答を与える (写真の陰影 + 実測法線のシェーディング)。NONE=平坦(+Z)
 export type NormalSource = 'DAVID' | 'NONE';
@@ -28,6 +31,7 @@ export interface Params {
   maskSource: MaskSource;
   depthSource: DepthSource;
   normalSource: NormalSource;
+  personSource: PersonSource;
   gnmNormalStrength: number; // 実測法線の強さ (0=平坦, 1=実測のまま)
   measuredDepthGain: number; // 計測Depthの振幅倍率 (髪シェルの厚み推定に乗算)
 
@@ -102,6 +106,7 @@ export const DEFAULT_PARAMS: Params = {
   maskSource: 'SELFIE_MULTICLASS',
   depthSource: 'DAVID',
   normalSource: 'DAVID',
+  personSource: 'DAVID',
   gnmNormalStrength: 1.0,
   measuredDepthGain: 1.0,
 
