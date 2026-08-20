@@ -23,6 +23,7 @@ export function applyDebugVisualization(gnmHead: GnmHeadBuild | null, params: Pa
     (gnmHead.hairMesh.material as THREE.MeshStandardMaterial).wireframe = params.showWireframe;
   }
   if (gnmHead.hairMesh) gnmHead.hairMesh.visible = params.gnmShowHair;
+  if (gnmHead.mouthInteriorMesh) gnmHead.mouthInteriorMesh.visible = params.gnmShowMouthInterior;
   gnmHead.landmarkOverlay.visible = params.showLandmarks;
   updateLayerPreview(gnmHead, params.showLayerImages, params.layerImageScale);
 }
@@ -150,6 +151,18 @@ export function setupDebugGui(container: HTMLElement, params: Params, options: D
     .add(params, 'gnmShowHair')
     .name('Show Hair')
     .onChange(() => applyDebugVisualization(options.getGnmHead(), params));
+  fitFolder
+    .add(params, 'gnmShowMouthInterior')
+    .name('Show Mouth (歯・舌)')
+    .onChange(() => applyDebugVisualization(options.getGnmHead(), params));
+  fitFolder
+    .add(params, 'gnmMouthBrightness', 0.2, 3, 0.05)
+    .name('Mouth Brightness')
+    .onFinishChange(() => options.onGnmParamsChanged());
+  fitFolder
+    .add(params, 'gnmTongueDown', 0, 3, 0.1)
+    .name('Tongue Down')
+    .onFinishChange(() => options.onGnmParamsChanged());
   fitFolder.open();
 
   // プリセットは公式ExpressionSampler由来 (gnmExpressions.ts)

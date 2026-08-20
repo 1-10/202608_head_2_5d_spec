@@ -21,6 +21,9 @@
     まばたき・開口が写真の目・口の位置で起こる
   - 鼻孔の内壁を平滑化で封止 (穴のジオメトリは不要 — 写真の鼻孔の暗さで表現)
   - 正面写真の平行投影テクスチャ + シルエット外/背面は写真色の頂点色へフェード
+- 口腔内 (口腔壁・歯・歯茎・舌): GNM Head同梱のジオメトリをそのまま別メッシュで描く。
+  写真に色情報が無いため、色は写真の唇色/肌色を基準にGNM公式の可視化と同じ比率で決め、
+  開口からの奥行きで遮蔽(AO)を焼く。舌は公式の舌成分を顎の開き量に比例させて下げる (`Tongue Down`)
 - 実測髪シェル: 実測髪マスク+実測Depthの前面シェルをGNMの手前に重ねる。
   シルエット・髪マスク・Depthの供給源はGUIで切替できる:
   - `MEASURED`(既定): MediaPipe Image Segmenter (SelfieMulticlass)による実測シルエット/髪マスク +
@@ -35,7 +38,7 @@
 - ビューをドラッグするとYaw(±可変)/Pitch角に回転
 - GUI: フィット/髪シェルパラメータ、表情、Camera/Rotation、Wireframe表示
 
-既知の制約: テクスチャは正面写真の焼き付きのため大表情では歪む。開口時の口腔は未対応 (黒い開口)。
+既知の制約: テクスチャは正面写真の焼き付きのため大表情では歪む。
 
 ## セットアップ
 
@@ -49,14 +52,14 @@ Webカメラ機能を使う場合はHTTPS、またはlocalhost経由でのアク
 
 ### GNMアセットの再生成
 
-生成済みの `public/gnm/gnm_head_lite.bin` (約8.5MB) はリポジトリに同梱している。
+生成済みの `public/gnm/gnm_head_lite.bin` (約11.7MB) はリポジトリに同梱している。
 成分数などを変えて再生成する場合のみ以下を実行する (Python + numpy が必要):
 
 ```bash
 git clone --depth 1 https://github.com/google/GNM.git /tmp/GNM
 curl -LO https://raw.githubusercontent.com/google-ai-edge/mediapipe/master/mediapipe/modules/face_geometry/data/canonical_face_model.obj
 python tools/export_gnm_assets.py /tmp/GNM/gnm/shape/data/versions/v3_0/gnm_head.npz canonical_face_model.obj
-# → public/gnm/gnm_head_lite.bin (約8.5MB) が生成される
+# → public/gnm/gnm_head_lite.bin (約11.7MB) が生成される
 # .obj (MediaPipe canonical face model) を省略すると468点密対応が省かれ、フィットが68点フォールバックになる
 ```
 
@@ -70,7 +73,7 @@ npm run preview  # ビルド結果のプレビュー
 ## 技術スタック
 
 - Three.js (WebGL)
-- Google GNM Head (真3Dパラメトリック頭部。identity 64成分 + 表情40成分の線形basis)
+- Google GNM Head (真3Dパラメトリック頭部。identity 64成分 + 表情44成分の線形basis)
 - MediaPipe Face Landmarker / Image Segmenter (SelfieMulticlass) (`@mediapipe/tasks-vision`)
 - TensorFlow.js ARPortraitDepth (`@tensorflow-models/depth-estimation`)
 - transformers.js (`@huggingface/transformers`): Depth Anything V2 Small / BiRefNet (NEURALソース選択時のみ遅延ロード)
@@ -105,7 +108,8 @@ src/
   neuralSources.ts # Depth Anything V2 / BiRefNet (NEURALソース。遅延ロード)
   gnmHead.ts       # GNM Headのアセット読込と写真へのフィッティング
   gnmHeadMesh.ts   # GNMメッシュ構築 (真3D頭部+実測髪シェル) と表情機構
-  gnmRefine.ts     # 残差ワープ・鼻孔封止などフィット後の品質改善
+  gnmRefine.ts     # 残差ワープ・鼻孔封止・眼球非貫通拘束などフィット後の品質改善
+  gnmMouthInterior.ts # 口腔内 (口腔壁・歯・歯茎・舌) メッシュと舌の姿勢駆動
   gnmExpressions.ts # 公式ExpressionSampler由来の表情プリセット (生成物)
   meshUtils.ts     # メッシュ共通処理 (法線+Z固定・格子index・smoothstep)
   blink.ts         # Blink(目パチ)の周期エンベロープ

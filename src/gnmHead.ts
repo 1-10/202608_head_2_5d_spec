@@ -14,7 +14,11 @@ export interface GnmModel {
   triangleCount: number;
   basisCount: number;
   positions: Float32Array; // (N,3) メートル, +Y上/+Z前
-  triangles: Uint32Array; // (T,3)
+  triangles: Uint32Array; // (T,3) 頭部表面 (口腔内を含まない)
+  // 口腔内 (口腔壁/歯/歯茎/舌) の三角形。頂点indexはtrianglesと同じ配列を指す。
+  // 写真投影を持たず実法線+ライティングで描くため別メッシュにする。0要素 = 旧アセット
+  interiorTriangles: Uint32Array; // (Ti,3)
+  mouthPartId: Uint8Array; // (N,) 0=なし 1=口腔壁 2=歯 3=歯茎 4=舌
   basisQ: Int16Array; // (K,N,3) int16量子化
   basisScales: Float32Array; // (K,) 量子化スケール (値 = q * scale / 32767)
   landmarkIndices: Uint32Array; // (68,3)
@@ -110,6 +114,8 @@ export async function loadGnmModel(url = 'gnm/gnm_head_lite.bin'): Promise<GnmMo
     basisCount: header.identityBasisCount,
     positions: f32('positions'),
     triangles: u32('triangles'),
+    interiorTriangles: header.sections['interiorTriangles'] ? u32('interiorTriangles') : new Uint32Array(0),
+    mouthPartId: u8('mouthPartId'),
     basisQ: new Int16Array(buf.slice(basisSec.start, basisSec.start + basisSec.byteLength)),
     basisScales: new Float32Array(header.identityBasisScales),
     landmarkIndices: u32('landmarkIndices'),

@@ -137,12 +137,28 @@ const GNM_EMOTION_VARIANTS: Record<string, string[]> = {
   anger: ['snarl', 'snarlVar1', 'snarlVar2'],
   surprise: ['surprise', 'surpriseVar1', 'surpriseVar2'],
 };
+/**
+ * 表情成分ごとの領域ラベルを成分名から導出する (アセットの並びに依存しない)。
+ * 'tongue' は舌 (公式デモGUIと同じ tongue_mean + tongue_000..002)。
+ */
+type ExprRegion = 'eyes' | 'lower' | 'tongue' | 'other';
+let exprRegionsCache: ExprRegion[] | null = null;
+function expressionRegions(model: GnmModel | null): ExprRegion[] {
+  if (exprRegionsCache) return exprRegionsCache;
+  const names = model?.expressionNames ?? [];
+  exprRegionsCache = names.map((n) =>
+    /^(left|right)_eye/.test(n) ? 'eyes' : n.startsWith('lower_face') ? 'lower' : n.startsWith('tongue') ? 'tongue' : 'other',
+  );
+  return exprRegionsCache;
+}
+
 let gnmExprNextChangeAt = 0; // 次回遷移時刻
 let gnmAutoTarget: number[] | null = null; // 現在の目標プリセット (null=ニュートラル区間)
 let gnmLastEmotion = ''; // 直前の感情 (同じ感情の連続を避ける)
 
 // Emotion=MANUAL用のパーツ別スライダー定義。公式プリセットを領域で分離して合成する。
-// 領域はアセットの表情成分レイアウト (前半=目20成分, 後半=下顔面20成分) に対応
+// 領域の判定は成分名 (model.expressionNames) から導出する — 成分数や並びを
+// 変えても嘘にならないようにするため (位置決め打ちは舌成分の追加で壊れた)
 const GNM_MANUAL_CONTROLS: { param: keyof Params; preset: string; region: 'eyes' | 'lower' }[] = [
   { param: 'gnmMouthOpen', preset: 'surprise', region: 'lower' },
   { param: 'gnmSmile', preset: 'smileWide', region: 'lower' },
@@ -324,7 +340,7 @@ async function rebuildGnmHead(): Promise<void> {
     s.gnmHead = build;
     // デバッグ用: コンソールから表情係数や対応残差を直接調べられるようにする
     (window as unknown as Record<string, unknown>).__gnmHead = build;
-    (window as unknown as Record<string, unknown>).__gnmDebug = { model: gnmModel, ctx: s.ctx, build };
+    (window as unknown as Record<string, unknown>).__gnmDebug = { model: gnmModel, ctx: s.ctx, build, params };
     viewport.setGroup(build.group);
     updateYaw(yawDeg);
     updatePitch(pitchDeg);
@@ -490,6 +506,7 @@ function animate(): void {
       preset = gnmAutoTarget;
     } else if (params.gnmEmotion === 'MANUAL') {
       // パーツ別スライダーの合成 (公式プリセットの目/下顔面領域を強度倍して加算)
+      const region = expressionRegions(gnmModel);
       let vec: number[] | null = null;
       for (const c of GNM_MANUAL_CONTROLS) {
         const amount = params[c.param] as number;
@@ -497,10 +514,8 @@ function animate(): void {
         const p = GNM_EXPRESSION_PRESETS[c.preset];
         if (!p) continue;
         vec ??= new Array<number>(p.length).fill(0);
-        const half = p.length / 2;
         for (let i = 0; i < p.length; i++) {
-          const inRegion = c.region === 'lower' ? i >= half : i < half;
-          if (inRegion) vec[i] += p[i] * amount;
+          if (region[i] === c.region) vec[i] += p[i] * amount;
         }
       }
       preset = vec;

@@ -50,6 +50,15 @@ export interface Params {
   gnmHairRelief: number;
   // 髪マスクをGuided Filterで写真エッジへ整合させた精細版を使う (offで生の256px)
   gnmMaskRefine: boolean;
+  gnmShowMouthInterior: boolean; // 口腔内 (口腔壁・歯・歯茎・舌) の表示切替
+  // 口腔内の明るさ倍率。基準色は写真の下唇色なので、写真の露出のまま暗すぎ/明るすぎる
+  // ときの手動補正 (1=写真の唇色そのままの比率)
+  gnmMouthBrightness: number;
+  // 開口時に舌を下げる量 (GNM公式の舌成分 tongue_mean+tongue_000.. への係数振幅。
+  // 公式デモGUIのスライダー範囲±3と同じ単位)。顎の開き量に比例させて効かせる。
+  // 0だとGNMのneutral姿勢のまま = 舌が口蓋に張り付いて開口部を埋め、
+  // 歯も口腔も見えなくなる (公式プリセットは舌成分をほぼ0で出す)
+  gnmTongueDown: number;
 
   // --- GNM 表情 ---
   gnmExprIntensity: number; // 感情表情の強さ (プリセット係数への乗数)
@@ -115,6 +124,9 @@ export const DEFAULT_PARAMS: Params = {
   gnmShowHair: true,
   gnmHairRelief: 1.0,
   gnmMaskRefine: true,
+  gnmShowMouthInterior: true,
+  gnmMouthBrightness: 1.0,
+  gnmTongueDown: 1.4,
 
   gnmExprIntensity: 1.0,
   gnmEmotion: 'AUTO',

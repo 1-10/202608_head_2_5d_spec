@@ -21,6 +21,7 @@ import {
   type SimilarityTransform,
 } from './gnmHead';
 import { GNM_EXPRESSION_PRESETS } from './gnmExpressions';
+import { buildMouthInterior, buildTongueDrive } from './gnmMouthInterior';
 import { MP_EYES, MP_LIPS, applyResidualWarp, buildEyeballContainment, fillNostrils } from './gnmRefine';
 import { applyFlatNormals, buildGridIndices, smoothstep } from './meshUtils';
 import { rasterizeMaskCanvas, type SegmentationResult } from './personSegmentation';
@@ -77,6 +78,8 @@ export interface GnmHeadBuild {
   group: THREE.Group;
   headMesh: THREE.Mesh;
   hairMesh: THREE.Mesh | null;
+  /** 口腔内 (口腔壁・歯・歯茎・舌)。旧アセットはnull */
+  mouthInteriorMesh: THREE.Mesh | null;
   /** ランドマーク重畳デバッグ表示 (既定で非表示。Show Landmarksで切替)。 */
   landmarkOverlay: THREE.Object3D;
   /** headに投影している画像 (元写真)。デバッグ表示用 */
@@ -163,6 +166,12 @@ export function buildGnmHead(
       lipB += img.data[o + 2];
     }
   }
+  const lipPhotoColor = new THREE.Color().setRGB(
+    lipR / 9 / 255,
+    lipG / 9 / 255,
+    lipB / 9 / 255,
+    THREE.SRGBColorSpace,
+  );
   const interiorColor = new THREE.Color().setRGB(
     (lipR / 9 / 255) * 0.4,
     (lipG / 9 / 255) * 0.4,
@@ -287,14 +296,27 @@ export function buildGnmHead(
   const hair = buildHairShell(ctx, texture, fit, model.triangles, params, normalTexture);
   if (hair) hair.mesh.visible = params.gnmShowHair;
 
+  // --- 口腔内 (口腔壁・歯・歯茎・舌) ---
+  // 頭部と同じ頂点配列を共有するが、写真投影を持たず実法線+ライティングで描くため別メッシュ
+  const mouthInterior = buildMouthInterior(
+    model,
+    fit.vertices,
+    lipPhotoColor,
+    uniformSkinColor,
+    params.gnmMouthBrightness,
+  );
+  if (mouthInterior) mouthInterior.mesh.visible = params.gnmShowMouthInterior;
+
   // 回転pivotは頭部の実重心z (真3Dのため固定比率ではなく実測で決める)
   const pivotZ = fit.centerZ;
   headMesh.position.z = -pivotZ;
   if (hair) hair.mesh.position.z = -pivotZ;
+  if (mouthInterior) mouthInterior.mesh.position.z = -pivotZ;
 
   const group = new THREE.Group();
   group.position.z = pivotZ;
   group.add(headMesh);
+  if (mouthInterior) group.add(mouthInterior.mesh);
   if (hair) group.add(hair.mesh);
 
   // ランドマーク重畳デバッグ表示 (ワープ後のneutral頂点に対する残差を可視化)
@@ -330,14 +352,23 @@ export function buildGnmHead(
     if (/^(left|right)_eye/.test(model.expressionNames[i] ?? '')) isEyeExpr[i] = 1;
   }
 
+  // 舌の姿勢: 公式の舌成分を顎の開き量に比例させて駆動する (gnmMouthInterior参照)
+  const tongueDrive = buildTongueDrive(model, GNM_EXPRESSION_PRESETS.surprise);
+  const coeffs = new Float32Array(model.expressionCount);
+
   const applyExpressionNow = (): void => {
-    const out = new Float32Array(neutralUntransformed);
     for (let i = 0; i < model.expressionCount; i++) {
       // 目領域はblinkNowでクロスフェード (閉眼時はまばたきが支配)。
       // それ以外 (下顔面) は感情表情のまま
-      const c = isEyeExpr[i]
+      coeffs[i] = isEyeExpr[i]
         ? exprCurrent[i] * (1 - blinkNow) + blinkVec[i] * blinkNow
         : exprCurrent[i] + blinkVec[i] * blinkNow;
+    }
+    tongueDrive?.apply(coeffs, params.gnmTongueDown);
+
+    const out = new Float32Array(neutralUntransformed);
+    for (let i = 0; i < model.expressionCount; i++) {
+      const c = coeffs[i];
       if (c === 0) continue;
       // exprScales: 残差ワープで瞼開口幅が変わった分の目領域振幅補正
       const cs = (c * exprScales[i] * model.expressionScales[i]) / 32767;
@@ -348,12 +379,14 @@ export function buildGnmHead(
     applySimilarityInPlace(out, fit.sim);
     (posAttr.array as Float32Array).set(out);
     posAttr.needsUpdate = true;
+    mouthInterior?.update(out);
   };
 
   return {
     group,
     headMesh,
     hairMesh: hair?.mesh ?? null,
+    mouthInteriorMesh: mouthInterior?.mesh ?? null,
     landmarkOverlay: landmarkOverlay.object,
     headCanvas,
     hairLayerCanvas: seg ? buildHairLayerCanvas(sourceCanvas, seg) : null,
@@ -394,6 +427,7 @@ export function buildGnmHead(
       headMaterial.dispose();
       normalTexture?.dispose();
       landmarkOverlay.dispose();
+      mouthInterior?.dispose();
       if (hair) {
         hair.mesh.geometry.dispose();
         hair.alphaTexture.dispose();
