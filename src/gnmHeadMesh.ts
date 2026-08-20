@@ -805,6 +805,30 @@ function buildHairShell(
   // そのままzに使うと頭頂で過大になり、シェルが頭蓋から浮くため。
   const scalp = buildScalpZBuffer(fit.vertices, { xMin, xMax, yMin, yMax });
 
+  // 髪マスク重み付きの深度サンプル。前髪などまばらな髪帯では、毛の隙間から
+  // 見える肌 (奥) の深度が混ざって格子zがジグザグになる (高解像度のDAViDは
+  // この毛/肌の段差を実際に解像する。低解像度のARPortraitDepthでは潰れて
+  // 起きない)。シェルは「髪の表面」を張るものなので、近傍3x3を髪らしさで
+  // 重み付けし、隙間画素の肌深度を捨てて毛側の深度だけを拾う
+  const cellU = ((xMax - xMin) / (cols - 1)) * (ctx.faceWidthPx / ctx.imageWidth);
+  const cellV = ((yMax - yMin) / (rows - 1)) * (ctx.faceWidthPx / ctx.imageHeight);
+  const sampleHairDepth = (u: number, v: number, centerMask: number): number => {
+    if (centerMask < 0.05) return sampleField(depth, u, v); // 髪の外は素通し
+    let sum = 0;
+    let wsum = 0;
+    for (let dy = -1; dy <= 1; dy++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        const su = u + dx * cellU * 0.75;
+        const sv = v + dy * cellV * 0.75;
+        const w = smoothstep(0.2, 0.7, sampleField(seg.hair, su, sv));
+        if (w <= 0) continue;
+        sum += sampleField(depth, su, sv) * w;
+        wsum += w;
+      }
+    }
+    return wsum > 1e-3 ? sum / wsum : sampleField(depth, u, v);
+  };
+
   for (let row = 0; row < rows; row++) {
     const y = yMax + (yMin - yMax) * (row / (rows - 1));
     for (let col = 0; col < cols; col++) {
@@ -815,7 +839,7 @@ function buildHairShell(
 
       const hairMask = sampleField(seg.hair, u, v);
       maskPerVertex[idx] = hairMask;
-      const d = sampleField(depth, u, v);
+      const d = sampleHairDepth(u, v, hairMask);
       const zMeasured = (d * hairFit.scale + hairFit.offset) * params.measuredDepthGain;
       const scalpZ = scalp(x, y);
       const thickness = Math.min(HAIR_MAX_THICKNESS, Math.max(HAIR_MIN_THICKNESS, zMeasured - scalpZ));
