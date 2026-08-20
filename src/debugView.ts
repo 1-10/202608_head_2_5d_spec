@@ -127,6 +127,10 @@ export function setupDebugGui(container: HTMLElement, params: Params, options: D
     .name('Bald Contour Fit')
     .onChange(() => options.onGnmParamsChanged());
   fitFolder
+    .add(params, 'gnmMaskRefine')
+    .name('Mask Refine (GF)')
+    .onChange(() => options.onGnmParamsChanged());
+  fitFolder
     .add(params, 'gnmShowHair')
     .name('Show Hair')
     .onChange(() => options.onGnmParamsChanged());

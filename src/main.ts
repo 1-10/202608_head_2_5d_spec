@@ -11,6 +11,7 @@ import {
   type NormalizedFaceResult,
 } from './faceTopology';
 import { buildHairFreeFaceCanvas } from './hairFill';
+import { refineMaskWithGuide } from './maskRefine';
 import { PersonSegmenter } from './personSegmentation';
 import { PortraitDepthEstimator } from './portraitDepth';
 import { createBlinkState, updateBlink, type BlinkState } from './blink';
@@ -221,6 +222,20 @@ async function acquireMeasuredData(
     measured.segmentation = personSegmenter.segment(captured.canvas, normalized.landmarks);
   } catch (err) {
     console.warn('セグメンテーションに失敗。UVクランプ・髪シェルなしで表示します。', err);
+  }
+
+  // 髪マスクをGuided Filterで写真エッジへ整合 (256px→768px)。
+  // 失敗しても生マスクで続行できるよう分離してtryする
+  if (measured.segmentation) {
+    try {
+      const t0 = performance.now();
+      const refined = refineMaskWithGuide(captured.canvas, measured.segmentation.hair);
+      measured.segmentation.hairRaw = measured.segmentation.hair;
+      measured.segmentation.hair = refined;
+      console.debug(`髪マスク精細化 (Guided Filter): ${(performance.now() - t0).toFixed(0)}ms`);
+    } catch (err) {
+      console.warn('髪マスクの精細化に失敗。生マスクで続行します。', err);
+    }
   }
 
   if (measured.segmentation) {

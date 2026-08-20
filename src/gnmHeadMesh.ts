@@ -52,9 +52,12 @@ export interface GnmBuildContext {
 export function selectSegmentation(ctx: GnmBuildContext, params: Params): SegmentationResult | null {
   const m = ctx.measured;
   if (!m) return null;
-  if (params.maskSource === 'NEURAL') return m.neuralSegmentation ?? m.segmentation;
-  if (params.maskSource === 'MEASURED') return m.segmentation;
-  return null;
+  let seg: SegmentationResult | null = null;
+  if (params.maskSource === 'NEURAL') seg = m.neuralSegmentation ?? m.segmentation;
+  else if (params.maskSource === 'MEASURED') seg = m.segmentation;
+  // Mask Refine off時はGuided Filter前の生マスクへ戻す (効果比較用)
+  if (seg && !params.gnmMaskRefine && seg.hairRaw) return { ...seg, hair: seg.hairRaw };
+  return seg;
 }
 
 /** depthSourceに応じたDepth場を選ぶ (NEURAL未取得時はMEASUREDへフォールバック)。 */
@@ -858,7 +861,8 @@ function buildHairCage(
   geometry.setIndex(new THREE.BufferAttribute(new Uint32Array(kept), 1));
   applyFlatNormals(geometry);
 
-  const alphaTexture = new THREE.CanvasTexture(rasterizeMaskCanvas(seg.hair, 512));
+  // 精細化済みマスク (768px) の解像度を活かすため1024/blur1で焼く
+  const alphaTexture = new THREE.CanvasTexture(rasterizeMaskCanvas(seg.hair, 1024, 1));
   alphaTexture.wrapS = THREE.ClampToEdgeWrapping;
   alphaTexture.wrapT = THREE.ClampToEdgeWrapping;
 
@@ -986,7 +990,8 @@ function buildHairShell(
   geometry.setIndex(new THREE.BufferAttribute(new Uint32Array(kept), 1));
   applyFlatNormals(geometry);
 
-  const alphaTexture = new THREE.CanvasTexture(rasterizeMaskCanvas(seg.hair, 512));
+  // 精細化済みマスク (768px) の解像度を活かすため1024/blur1で焼く
+  const alphaTexture = new THREE.CanvasTexture(rasterizeMaskCanvas(seg.hair, 1024, 1));
   alphaTexture.wrapS = THREE.ClampToEdgeWrapping;
   alphaTexture.wrapT = THREE.ClampToEdgeWrapping;
 

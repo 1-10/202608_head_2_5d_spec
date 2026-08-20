@@ -24,6 +24,8 @@ const CLASS_ACCESSORIES = 5; // 帽子・メガネ等。頭部シルエットに
 export interface SegmentationResult {
   person: ScalarField; // 1 - background
   hair: ScalarField;
+  /** Guided Filter精細化前の生の髪マスク (精細化を適用した場合のみ。比較用)。 */
+  hairRaw?: ScalarField;
   faceSkin: ScalarField;
   /** 頭部シルエット: hair + faceSkin + accessories + (顎より上のbodySkin=耳など) */
   head: ScalarField;
