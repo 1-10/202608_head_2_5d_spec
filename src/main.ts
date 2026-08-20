@@ -36,7 +36,6 @@ class Viewport {
   constructor(container: HTMLElement) {
     this.container = container;
     this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true });
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     container.appendChild(this.renderer.domElement);
 
     this.camera = new THREE.PerspectiveCamera(30, 1, 0.05, 50);
@@ -47,6 +46,8 @@ class Viewport {
     this.scene.add(ambient, key);
 
     this.resize();
+    // window resizeイベントだけだとコンテナ単独のレイアウト変化を取りこぼす
+    new ResizeObserver(() => this.resize()).observe(container);
   }
 
   setGroup(group: THREE.Object3D): void {
@@ -70,6 +71,10 @@ class Viewport {
   }
 
   resize(): void {
+    // pixelRatioは毎回読み直す — ページズーム変更でdevicePixelRatioが変わるため。
+    // 構築時の値で固定すると、ズーム状態でロードした場合に低解像度のまま
+    // 引き伸ばされて全体がぼやける
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     const w = this.container.clientWidth || 1;
     const h = this.container.clientHeight || 1;
     this.renderer.setSize(w, h, false);
