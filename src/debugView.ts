@@ -169,12 +169,13 @@ export function setupDebugGui(container: HTMLElement, params: Params, options: D
   exprFolder.add(params, 'gnmSquint', 0, 1.5, 0.05).name('Squint');
 
   const cameraFolder = gui.addFolder('Camera / Rotation');
+  // 180まで上げると±180=一周でき、側面・背面の検分に使える
   cameraFolder
-    .add(params, 'maxYawDeg', 5, 45, 1)
+    .add(params, 'maxYawDeg', 5, 180, 1)
     .name('Max Yaw')
     .onChange(() => options.onYawRangeChanged());
   cameraFolder
-    .add(params, 'maxPitchDeg', 0, 45, 1)
+    .add(params, 'maxPitchDeg', 0, 180, 1)
     .name('Max Pitch')
     .onChange(() => options.onPitchRangeChanged());
   cameraFolder
