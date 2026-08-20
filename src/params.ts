@@ -5,11 +5,11 @@
 // 実測ソース (テクスチャUVクランプ・髪シェル用) の供給源。
 // MEASURED = Google公式モデル (SelfieMulticlass / ARPortraitDepth。学習データまで商用クリーン)
 // DAVID    = Microsoft DAViD (人物特化Depth。100%合成データ学習+MIT = 商用クリーン。
-//            初回のみモデルDL 110-215MB)
-// NEURAL   = 高品質ニューラル (BiRefNet / Depth Anything V2。重みは商用可だが学習データはグレー。比較用)
+//            初回のみモデルDL 110-215MB)。ARPortraitDepthとの比較用にMEASUREDも残す
+// NEURAL   = 高品質ニューラルマット (BiRefNet。重みは商用可だが学習データはグレー。比較用)
 // NONE     = 不使用 (マスクなし=UVクランプ無効、Depthなし=髪シェル無効)
 export type MaskSource = 'MEASURED' | 'NEURAL' | 'NONE';
-export type DepthSource = 'MEASURED' | 'DAVID' | 'NEURAL' | 'NONE';
+export type DepthSource = 'MEASURED' | 'DAVID' | 'NONE';
 // 表面法線の供給源。DAVID=実測法線をObjectSpaceNormalMapとしてhead/髪に貼り、
 // 回転時の照明応答を与える (写真の陰影 + 実測法線のシェーディング)。NONE=平坦(+Z)
 export type NormalSource = 'DAVID' | 'NONE';

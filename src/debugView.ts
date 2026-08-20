@@ -94,7 +94,7 @@ export function setupDebugGui(container: HTMLElement, params: Params, options: D
     .name('Mask Source')
     .onChange(() => options.onSourceChanged());
   sourceFolder
-    .add(params, 'depthSource', ['MEASURED', 'DAVID', 'NEURAL', 'NONE'])
+    .add(params, 'depthSource', ['MEASURED', 'DAVID', 'NONE'])
     .name('Depth Source')
     .onChange(() => options.onSourceChanged());
   sourceFolder

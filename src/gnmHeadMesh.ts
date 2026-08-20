@@ -38,7 +38,6 @@ export interface MeasuredHeadData {
   // DAViD 表面法線 (RGBエンコード済みObjectSpaceNormalMap, 画像全体UV空間。遅延取得)
   davidNormalCanvas: HTMLCanvasElement | null;
   neuralSegmentation: SegmentationResult | null; // BiRefNet×MediaPipe合成 (遅延取得)
-  neuralDepth: ScalarField | null; // Depth Anything V2 (遅延取得)
 }
 
 /** GNM頭部の構築に必要な入力一式 (画像1枚から導出される)。 */
@@ -63,12 +62,11 @@ export function selectSegmentation(ctx: GnmBuildContext, params: Params): Segmen
   return seg;
 }
 
-/** depthSourceに応じたDepth場を選ぶ (DAVID/NEURAL未取得時はMEASUREDへフォールバック)。 */
+/** depthSourceに応じたDepth場を選ぶ (DAVID未取得時はMEASUREDへフォールバック)。 */
 export function selectDepth(ctx: GnmBuildContext, params: Params): ScalarField | null {
   const m = ctx.measured;
   if (!m) return null;
   if (params.depthSource === 'DAVID') return m.davidDepth ?? m.depth;
-  if (params.depthSource === 'NEURAL') return m.neuralDepth ?? m.depth;
   if (params.depthSource === 'MEASURED') return m.depth;
   return null;
 }

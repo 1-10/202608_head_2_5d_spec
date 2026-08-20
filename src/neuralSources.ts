@@ -1,5 +1,4 @@
 // transformers.jsによる高品質ニューラル供給源 (品質比較用ティア):
-// - Depth Anything V2 Small: 単眼深度推定 (重みApache-2.0)
 // - MODNet: ポートレートアルファマット (重みApache-2.0)
 //
 // マットの第一候補だったBiRefNet_lite (MIT・毛先品質最上位) は2026-08時点で
@@ -7,48 +6,18 @@
 // 抵触し、WASMは1024²のアクティベーションでヒープ不足 (std::bad_alloc) になる。
 // ランタイム側の制限解消かdynamic shape版の配布が出たら差し替える。
 //
-// 【ライセンス注意】重みは商用可ライセンスだが、学習データが非商用/非開示のものを
-// 含む (Depth Anything V2: VKITTI2/SA-1B等、MODNet: 私有データ非開示)。
-// Google構成 (MEASURED) との品質比較・評価用として位置づける。
+// 【ライセンス注意】重みは商用可ライセンスだが、学習データが非商用/非開示
+// (MODNet: 私有データ非開示)。Google構成 (MEASURED) との品質比較・評価用。
 // 推論はすべてブラウザ内 (WebGPU / WASM) で完結し、画像を外部へ送信しない。
+//
+// Depth側のNEURAL (Depth Anything V2) は廃止済み — Depth比較は
+// ARPortraitDepth (MEASURED) と DAViD (商用クリーン) の2本で行う。
 
-import {
-  RawImage,
-  pipeline,
-  type DepthEstimationPipeline,
-  type ImageSegmentationPipeline,
-} from '@huggingface/transformers';
+import { RawImage, pipeline, type ImageSegmentationPipeline } from '@huggingface/transformers';
 import { sampleField, type ScalarField } from './fields';
-import { cleanupDepthField, computeHeadCrop } from './portraitDepth';
 import type { SegmentationResult } from './personSegmentation';
 
-const DEPTH_MODEL_ID = 'onnx-community/depth-anything-v2-small';
 const MATTE_MODEL_ID = 'Xenova/modnet';
-const DEPTH_CROP_ASPECT = 1.0; // DA2は任意アスペクト可。頭部を正方形cropで渡す
-
-function cropHeadCanvas(
-  source: HTMLCanvasElement,
-  crop: { x: number; y: number; w: number; h: number },
-): HTMLCanvasElement {
-  const canvas = document.createElement('canvas');
-  canvas.width = crop.w;
-  canvas.height = crop.h;
-  canvas.getContext('2d')!.drawImage(source, crop.x, crop.y, crop.w, crop.h, 0, 0, crop.w, crop.h);
-  return canvas;
-}
-
-function cropRectToUv(
-  crop: { x: number; y: number; w: number; h: number },
-  imageWidth: number,
-  imageHeight: number,
-): ScalarField['rect'] {
-  return {
-    u0: crop.x / imageWidth,
-    u1: (crop.x + crop.w) / imageWidth,
-    v0: 1 - (crop.y + crop.h) / imageHeight,
-    v1: 1 - crop.y / imageHeight,
-  };
-}
 
 /** RawImage (grayscale想定) をScalarField (0-1) へ変換する。 */
 function rawImageToField(image: RawImage, rect: ScalarField['rect']): ScalarField {
@@ -58,42 +27,6 @@ function rawImageToField(image: RawImage, rect: ScalarField['rect']): ScalarFiel
     out[i] = data[i * channels] / 255;
   }
   return { width, height, data: out, rect };
-}
-
-export class NeuralDepthEstimator {
-  private pipe: DepthEstimationPipeline | null = null;
-
-  async init(): Promise<void> {
-    if (this.pipe) return;
-    try {
-      this.pipe = (await pipeline('depth-estimation', DEPTH_MODEL_ID, {
-        device: 'webgpu',
-        dtype: 'fp16',
-      })) as DepthEstimationPipeline;
-    } catch {
-      // WebGPU不可の環境はWASMへフォールバック (低速だが動作する)
-      this.pipe = (await pipeline('depth-estimation', DEPTH_MODEL_ID)) as DepthEstimationPipeline;
-    }
-  }
-
-  /** 頭部cropに対する相対Depth (0-1, 大=手前) をScalarFieldで返す。cleanup済み。 */
-  async estimate(
-    source: HTMLCanvasElement,
-    personMask: ScalarField,
-    headCenterPx: { x: number; y: number },
-    faceWidthPx: number,
-  ): Promise<ScalarField> {
-    if (!this.pipe) throw new Error('NeuralDepthEstimatorが初期化されていません。');
-
-    const crop = computeHeadCrop(source.width, source.height, headCenterPx, faceWidthPx, DEPTH_CROP_ASPECT);
-    const cropCanvas = cropHeadCanvas(source, crop);
-    const image = await RawImage.fromCanvas(cropCanvas);
-    const result = (await this.pipe(image)) as { depth: RawImage };
-
-    const field = rawImageToField(result.depth, cropRectToUv(crop, source.width, source.height));
-    cleanupDepthField(field, personMask);
-    return field;
-  }
 }
 
 export class NeuralMatteEstimator {

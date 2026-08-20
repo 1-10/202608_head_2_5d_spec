@@ -125,7 +125,6 @@ const portraitDepth = new PortraitDepthEstimator();
 // NEURAL系 (transformers.js) はモデル・ランタイムとも大きいため、
 // ソースとして選択されて初めてdynamic importする。
 let neuralModule: typeof import('./neuralSources') | null = null;
-let neuralDepthEst: import('./neuralSources').NeuralDepthEstimator | null = null;
 let neuralMatteEst: import('./neuralSources').NeuralMatteEstimator | null = null;
 
 // GNMアセット (gnm_head_lite.bin 約8.5MB) は初回構築時に一度だけロードする。
@@ -215,7 +214,6 @@ async function acquireMeasuredData(
     davidDepth: null,
     davidNormalCanvas: null,
     neuralSegmentation: null,
-    neuralDepth: null,
   };
 
   try {
@@ -349,40 +347,20 @@ async function ensureNeuralSources(): Promise<void> {
   if (!m) return;
 
   const needMatte = params.maskSource === 'NEURAL' && !m.neuralSegmentation;
-  const needDepth = params.depthSource === 'NEURAL' && !m.neuralDepth;
-  if (!needMatte && !needDepth) return;
+  if (!needMatte) return;
 
   neuralAcquisitionBusy = true;
   try {
     const mod = (neuralModule ??= await import('./neuralSources'));
 
-    if (needMatte) {
-      if (!m.segmentation) {
-        setStatus('NEURALマスクにはMediaPipeセグメンテーションが必要です (意味分けに使用)。', true);
-      } else {
-        setStatus('BiRefNetでマットを推定しています… (初回はモデルDLで時間がかかります)');
-        neuralMatteEst ??= new mod.NeuralMatteEstimator();
-        await neuralMatteEst.init();
-        const matte = await neuralMatteEst.estimate(s.sourceCanvas);
-        m.neuralSegmentation = mod.refineSegmentationWithMatte(m.segmentation, matte);
-      }
-    }
-
-    if (needDepth) {
-      const personMask = m.neuralSegmentation?.person ?? m.segmentation?.person ?? null;
-      if (!personMask) {
-        setStatus('NEURAL Depthには人物マスクが必要です (セグメンテーション取得失敗)。', true);
-      } else {
-        setStatus('Depth Anything V2でDepthを推定しています… (初回はモデルDLで時間がかかります)');
-        neuralDepthEst ??= new mod.NeuralDepthEstimator();
-        await neuralDepthEst.init();
-        m.neuralDepth = await neuralDepthEst.estimate(
-          s.sourceCanvas,
-          personMask,
-          s.normalized.headCenterPx,
-          s.normalized.faceWidth,
-        );
-      }
+    if (!m.segmentation) {
+      setStatus('NEURALマスクにはMediaPipeセグメンテーションが必要です (意味分けに使用)。', true);
+    } else {
+      setStatus('BiRefNetでマットを推定しています… (初回はモデルDLで時間がかかります)');
+      neuralMatteEst ??= new mod.NeuralMatteEstimator();
+      await neuralMatteEst.init();
+      const matte = await neuralMatteEst.estimate(s.sourceCanvas);
+      m.neuralSegmentation = mod.refineSegmentationWithMatte(m.segmentation, matte);
     }
 
     await rebuildGnmHead();
