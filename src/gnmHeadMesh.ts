@@ -314,17 +314,28 @@ export function buildGnmHead(
   const posAttr = geometry.getAttribute('position') as THREE.BufferAttribute;
 
   // まばたきベクトル: 公式ExpressionSamplerのWINK_LEFT+WINK_RIGHT合成 (目領域のみ)。
-  // blinkAmountを乗算して感情表情へ加算する独立チャネル
   const blinkVec =
     GNM_EXPRESSION_PRESETS.blink?.length === model.expressionCount
       ? GNM_EXPRESSION_PRESETS.blink
       : new Array<number>(model.expressionCount).fill(0);
   let blinkNow = 0;
 
+  // 目領域の成分 (left_eye* / right_eye*)。まばたきはこれらを加算ではなく
+  // 置き換える — 加算だと開瞼系の感情 (Surprise等) と打ち消し合い、
+  // まばたき中も瞼が閉じ切らず眼球が瞼を貫通して見える
+  const isEyeExpr = new Uint8Array(model.expressionCount);
+  for (let i = 0; i < model.expressionCount; i++) {
+    if (/^(left|right)_eye/.test(model.expressionNames[i] ?? '')) isEyeExpr[i] = 1;
+  }
+
   const applyExpressionNow = (): void => {
     const out = new Float32Array(neutralUntransformed);
     for (let i = 0; i < model.expressionCount; i++) {
-      const c = exprCurrent[i] + blinkVec[i] * blinkNow;
+      // 目領域はblinkNowでクロスフェード (閉眼時はまばたきが支配)。
+      // それ以外 (下顔面) は感情表情のまま
+      const c = isEyeExpr[i]
+        ? exprCurrent[i] * (1 - blinkNow) + blinkVec[i] * blinkNow
+        : exprCurrent[i] + blinkVec[i] * blinkNow;
       if (c === 0) continue;
       // exprScales: 残差ワープで瞼開口幅が変わった分の目領域振幅補正
       const cs = (c * exprScales[i] * model.expressionScales[i]) / 32767;
