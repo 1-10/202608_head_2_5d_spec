@@ -180,6 +180,12 @@ export function buildGnmHead(
     THREE.SRGBColorSpace,
   );
 
+  // 背面・遠距離クランプ領域の均一色 (口内色と同じ発想)。写真に色情報が
+  // 無い領域をクランプ済UVの引き伸ばしスメアで塗ると背面が縞・ピンク染みに
+  // なるため、写真から測った髪/肌の平均色 (暗め=陰) で塗り潰す
+  const uniformHairColor = seg ? maskedAverageColor(sourceCanvas, seg.hair, 0.85) : null;
+  const uniformSkinColor = seg ? maskedAverageColor(sourceCanvas, seg.faceSkin, 0.85) : null;
+
   for (let i = 0; i < n; i++) {
     const x = fit.vertices[i * 3];
     const y = fit.vertices[i * 3 + 1];
@@ -192,6 +198,8 @@ export function buildGnmHead(
     // シルエット外のUVは頭部中心方向へ歩かせてマスク内へクランプ (edge-extend)。
     // 歩幅は細かく取る — 頭頂では髪の帯が薄く、粗い歩幅だと帯を飛び越えて
     // 額の肌色を拾ってしまう (頭頂が禿げて見えるバグの原因)
+    const uProjected = u;
+    const vProjected = v;
     let maskAtUv = 1;
     if (seg) {
       maskAtUv = sampleField(seg.person, u, v);
@@ -226,6 +234,28 @@ export function buildGnmHead(
       }
     }
     linear.setRGB(r / 9 / 255, g / 9 / 255, b / 9 / 255, THREE.SRGBColorSpace);
+
+    // 写真に色情報が無い度合い: 真の背面 (nz<0) と、クランプで長距離歩いたUV。
+    // その分だけ3x3平均 (スメア) を捨て、髪/肌の均一色へ寄せる。
+    // 閾値は背面側に寄せる — 側面 (nz≈0) はyaw回転で普通に見える領域で、
+    // 写真の頬色の方が均一色より自然なため
+    if (uniformHairColor && uniformSkinColor && seg) {
+      const walked = Math.hypot(u - uProjected, v - vProjected);
+      const invalidW = Math.max(1 - smoothstep(-0.25, -0.02, nz), smoothstep(0.08, 0.25, walked));
+      if (invalidW > 0) {
+        const hs = smoothstep(0.2, 0.6, sampleField(seg.hair, u, v));
+        const ur = uniformSkinColor.r + (uniformHairColor.r - uniformSkinColor.r) * hs;
+        const ug = uniformSkinColor.g + (uniformHairColor.g - uniformSkinColor.g) * hs;
+        const ub = uniformSkinColor.b + (uniformHairColor.b - uniformSkinColor.b) * hs;
+        linear.setRGB(
+          linear.r + (ur - linear.r) * invalidW,
+          linear.g + (ug - linear.g) * invalidW,
+          linear.b + (ub - linear.b) * invalidW,
+          THREE.LinearSRGBColorSpace,
+        );
+      }
+    }
+
     fallback[i * 3] = linear.r + (interiorColor.r - linear.r) * iw;
     fallback[i * 3 + 1] = linear.g + (interiorColor.g - linear.g) * iw;
     fallback[i * 3 + 2] = linear.b + (interiorColor.b - linear.b) * iw;
@@ -355,6 +385,43 @@ export function buildGnmHead(
       }
     },
   };
+}
+
+/**
+ * 写真をマスク解像度へ縮小し、マスク重み付き平均色を返す (linear空間)。
+ * darkenはsRGB空間での減光率 (背面=陰の暗さ。口内色の0.4と同じ発想)。
+ * マスクがほぼ空なら null。
+ */
+function maskedAverageColor(
+  sourceCanvas: HTMLCanvasElement,
+  field: ScalarField,
+  darken: number,
+): THREE.Color | null {
+  const c = document.createElement('canvas');
+  c.width = field.width;
+  c.height = field.height;
+  const cc = c.getContext('2d')!;
+  cc.drawImage(sourceCanvas, 0, 0, field.width, field.height);
+  const data = cc.getImageData(0, 0, field.width, field.height).data;
+  let r = 0;
+  let g = 0;
+  let b = 0;
+  let wSum = 0;
+  for (let i = 0; i < field.data.length; i++) {
+    const w = field.data[i];
+    if (w <= 0.2) continue;
+    r += data[i * 4] * w;
+    g += data[i * 4 + 1] * w;
+    b += data[i * 4 + 2] * w;
+    wSum += w;
+  }
+  if (wSum < 1) return null;
+  return new THREE.Color().setRGB(
+    (r / wSum / 255) * darken,
+    (g / wSum / 255) * darken,
+    (b / wSum / 255) * darken,
+    THREE.SRGBColorSpace,
+  );
 }
 
 /** 頭部まわりのクロップ矩形を画像割合 (0-1) で求める (プレビュー表示用)。 */
