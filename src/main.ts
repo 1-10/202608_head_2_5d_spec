@@ -213,6 +213,7 @@ async function acquireMeasuredData(
     segmentation: null,
     depth: null,
     davidDepth: null,
+    davidNormalCanvas: null,
     neuralSegmentation: null,
     neuralDepth: null,
   };
@@ -259,7 +260,9 @@ async function acquireMeasuredData(
 }
 
 let davidAcquisitionBusy = false;
-let davidEstimator: import('./davidDepth').DavidDepthEstimator | null = null;
+let davidEstimator: import('./david').DavidDepthEstimator | null = null;
+let davidNormalBusy = false;
+let davidNormalEstimator: import('./david').DavidNormalEstimator | null = null;
 
 /**
  * DAViD Depth (商用クリーンな人物特化Depth) を必要時に遅延取得する。
@@ -279,7 +282,7 @@ async function ensureDavidDepth(): Promise<void> {
   davidAcquisitionBusy = true;
   try {
     setStatus('DAViDでDepthを推定しています… (初回はモデルDLで時間がかかります)');
-    const mod = await import('./davidDepth');
+    const mod = await import('./david');
     davidEstimator ??= new mod.DavidDepthEstimator();
     await davidEstimator.init();
     const t0 = performance.now();
@@ -297,6 +300,38 @@ async function ensureDavidDepth(): Promise<void> {
     setStatus('DAViD Depthの取得に失敗しました。ARPortraitDepthで表示しています。', true);
   } finally {
     davidAcquisitionBusy = false;
+  }
+}
+
+/**
+ * DAViD表面法線 (照明応答用ObjectSpaceNormalMap) を必要時に遅延取得する。
+ */
+async function ensureDavidNormal(): Promise<void> {
+  if (!sceneState || davidNormalBusy) return;
+  const s = sceneState;
+  const m = s.ctx.measured;
+  if (!m || params.normalSource !== 'DAVID' || m.davidNormalCanvas) return;
+
+  davidNormalBusy = true;
+  try {
+    setStatus('DAViDで表面法線を推定しています… (初回はモデルDLで時間がかかります)');
+    const mod = await import('./david');
+    davidNormalEstimator ??= new mod.DavidNormalEstimator();
+    await davidNormalEstimator.init();
+    const t0 = performance.now();
+    m.davidNormalCanvas = await davidNormalEstimator.estimate(
+      s.sourceCanvas,
+      s.normalized.headCenterPx,
+      s.normalized.faceWidth,
+    );
+    console.debug(`DAViD 法線推定: ${(performance.now() - t0).toFixed(0)}ms`);
+    await rebuildGnmHead();
+    if (!els.status.classList.contains('error')) setStatus('');
+  } catch (err) {
+    console.error('DAViD法線の取得に失敗しました。', err);
+    setStatus('DAViD法線の取得に失敗しました。平坦法線で表示しています。', true);
+  } finally {
+    davidNormalBusy = false;
   }
 }
 
@@ -483,6 +518,7 @@ async function processImage(captured: CapturedImage): Promise<void> {
 
     // DAVID/NEURALが選択済みの状態で新しい画像が来た場合は遅延取得を開始する
     void ensureDavidDepth();
+    void ensureDavidNormal();
     void ensureNeuralSources();
   } catch (err) {
     if (err instanceof FaceDetectionError) {
@@ -553,6 +589,7 @@ setupDebugGui(els.guiContainer, params, {
     // まず取得済みソースで即時再構築し、DAVID/NEURAL系が未取得なら裏で取得して再構築する
     void rebuildGnmHead()
       .then(() => ensureDavidDepth())
+      .then(() => ensureDavidNormal())
       .then(() => ensureNeuralSources());
   },
   onGnmParamsChanged: () => {

@@ -10,6 +10,9 @@
 // NONE     = 不使用 (マスクなし=UVクランプ無効、Depthなし=髪シェル無効)
 export type MaskSource = 'MEASURED' | 'NEURAL' | 'NONE';
 export type DepthSource = 'MEASURED' | 'DAVID' | 'NEURAL' | 'NONE';
+// 表面法線の供給源。DAVID=実測法線をObjectSpaceNormalMapとしてhead/髪に貼り、
+// 回転時の照明応答を与える (写真の陰影 + 実測法線のシェーディング)。NONE=平坦(+Z)
+export type NormalSource = 'DAVID' | 'NONE';
 
 // GNMの表情感情 (AUTO=自動巡回, MANUAL=パーツ別スライダー)。
 // キーは main.ts の感情→プリセット表と対応する
@@ -23,6 +26,8 @@ export interface Params {
   // --- 実測ソース (UVクランプ・髪シェル) ---
   maskSource: MaskSource;
   depthSource: DepthSource;
+  normalSource: NormalSource;
+  gnmNormalStrength: number; // 実測法線の強さ (0=平坦, 1=実測のまま)
   measuredDepthGain: number; // 計測Depthの振幅倍率 (髪シェルの厚み推定に乗算)
 
   // --- GNM Head フィット ---
@@ -95,6 +100,8 @@ export const DEFAULT_PARAMS: Params = {
 
   maskSource: 'MEASURED',
   depthSource: 'MEASURED',
+  normalSource: 'DAVID',
+  gnmNormalStrength: 1.0,
   measuredDepthGain: 1.0,
 
   gnmIdentityReg: 1.0,

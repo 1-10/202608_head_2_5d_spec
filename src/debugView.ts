@@ -54,6 +54,7 @@ function updateLayerPreview(gnmHead: GnmHeadBuild, visible: boolean, scale: numb
   ];
   if (gnmHead.hairLayerCanvas) items.push({ label: '髪レイヤー (shell)', source: gnmHead.hairLayerCanvas });
   if (gnmHead.depthCanvas) items.push({ label: '深度 (depth)', source: gnmHead.depthCanvas });
+  if (gnmHead.normalCanvas) items.push({ label: '法線 (normal)', source: gnmHead.normalCanvas });
 
   // 頭部まわりだけをクロップして表示する (全身写真だと頭部が小さすぎるため)
   const crop = gnmHead.layerPreviewCrop;
@@ -96,6 +97,14 @@ export function setupDebugGui(container: HTMLElement, params: Params, options: D
     .add(params, 'depthSource', ['MEASURED', 'DAVID', 'NEURAL', 'NONE'])
     .name('Depth Source')
     .onChange(() => options.onSourceChanged());
+  sourceFolder
+    .add(params, 'normalSource', ['DAVID', 'NONE'])
+    .name('Normal Source')
+    .onChange(() => options.onSourceChanged());
+  sourceFolder
+    .add(params, 'gnmNormalStrength', 0, 1, 0.05)
+    .name('Normal Strength')
+    .onFinishChange(() => options.onGnmParamsChanged());
   sourceFolder
     .add(params, 'measuredDepthGain', 0, 3, 0.05)
     .name('Depth Gain')

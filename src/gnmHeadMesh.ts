@@ -35,6 +35,8 @@ export interface MeasuredHeadData {
   segmentation: SegmentationResult | null; // MediaPipe SelfieMulticlass
   depth: ScalarField | null; // ARPortraitDepth 相対Depth (0-1)
   davidDepth: ScalarField | null; // DAViD 人物相対Depth (遅延取得。商用クリーン)
+  // DAViD 表面法線 (RGBエンコード済みObjectSpaceNormalMap, 画像全体UV空間。遅延取得)
+  davidNormalCanvas: HTMLCanvasElement | null;
   neuralSegmentation: SegmentationResult | null; // BiRefNet×MediaPipe合成 (遅延取得)
   neuralDepth: ScalarField | null; // Depth Anything V2 (遅延取得)
 }
@@ -83,6 +85,8 @@ export interface GnmHeadBuild {
   hairLayerCanvas: HTMLCanvasElement | null;
   /** 使用中のDepth場のグレースケール可視化 (白=手前)。Depth無しはnull */
   depthCanvas: HTMLCanvasElement | null;
+  /** 使用中の法線マップ (RGBエンコード)。法線無しはnull */
+  normalCanvas: HTMLCanvasElement | null;
   /** レイヤー画像プレビューの頭部クロップ (画像に対する割合 0-1, yは上から)。 */
   layerPreviewCrop: { x: number; y: number; w: number; h: number };
   fit: GnmFitResult;
@@ -274,11 +278,26 @@ export function buildGnmHead(
   geometry.setAttribute('aPhotoW', new THREE.BufferAttribute(photoW, 1));
   applyFlatNormals(geometry); // ライティングは「写真の陰影のみ」の方針 (偽の影の帯を防ぐ)
 
+  // 実測法線 (DAViD): ObjectSpaceNormalMapとしてhead/髪に貼り、回転時の
+  // 照明応答を与える。頂点法線は+Z固定のまま — 法線マップが全面的に置き換える
+  let normalTexture: THREE.Texture | null = null;
+  const useNormal = params.normalSource === 'DAVID' && ctx.measured?.davidNormalCanvas;
+  if (useNormal) {
+    normalTexture = new THREE.CanvasTexture(
+      blendNormalCanvasToFlat(ctx.measured!.davidNormalCanvas!, params.gnmNormalStrength),
+    );
+    normalTexture.colorSpace = THREE.NoColorSpace;
+  }
+
   const headMaterial = new THREE.MeshStandardMaterial({
     map: headTexture,
     roughness: 0.95,
     metalness: 0.0,
   });
+  if (normalTexture) {
+    headMaterial.normalMap = normalTexture;
+    headMaterial.normalMapType = THREE.ObjectSpaceNormalMap;
+  }
   patchPhotoMixShader(headMaterial);
 
   const headMesh = new THREE.Mesh(geometry, headMaterial);
@@ -290,8 +309,8 @@ export function buildGnmHead(
   // SHELL: 従来の前面1枚グリッド (比較用)
   const hair = params.gnmShowHair
     ? params.gnmHairMode === 'CAGE'
-      ? buildHairCage(model, ctx, texture, fit, params, uvs, fallback, photoW, realNormals)
-      : buildHairShell(ctx, texture, fit, params)
+      ? buildHairCage(model, ctx, texture, fit, params, uvs, fallback, photoW, realNormals, normalTexture)
+      : buildHairShell(ctx, texture, fit, params, normalTexture)
     : null;
 
   // 回転pivotは頭部の実重心z (真3Dのため固定比率ではなく実測で決める)
@@ -351,6 +370,7 @@ export function buildGnmHead(
     headCanvas,
     hairLayerCanvas: seg ? buildHairLayerCanvas(sourceCanvas, seg) : null,
     depthCanvas: buildDepthPreviewCanvas(ctx, params),
+    normalCanvas: useNormal ? (ctx.measured?.davidNormalCanvas ?? null) : null,
     layerPreviewCrop: computeHeadCropFraction(ctx),
     fit,
     setNeutralExpression() {
@@ -385,6 +405,7 @@ export function buildGnmHead(
       geometry.dispose();
       headMaterial.dispose();
       ownedHeadTexture?.dispose();
+      normalTexture?.dispose();
       landmarkOverlay.dispose();
       if (hair) {
         hair.mesh.geometry.dispose();
@@ -471,6 +492,24 @@ function buildHairLayerCanvas(
   }
   c.putImageData(img, 0, 0);
   return canvas;
+}
+
+/**
+ * 法線canvasを平坦 (+Z) へ向けてstrengthで弱めたコピーを返す (1ならそのまま)。
+ * RGB混合でベクトル長は縮むが、three.js側で正規化されるため問題ない。
+ */
+function blendNormalCanvasToFlat(src: HTMLCanvasElement, strength: number): HTMLCanvasElement {
+  const s = Math.min(1, Math.max(0, strength));
+  if (s >= 1) return src;
+  const out = document.createElement('canvas');
+  out.width = src.width;
+  out.height = src.height;
+  const c = out.getContext('2d')!;
+  c.drawImage(src, 0, 0);
+  c.globalAlpha = 1 - s;
+  c.fillStyle = 'rgb(128,128,255)';
+  c.fillRect(0, 0, out.width, out.height);
+  return out;
 }
 
 const DEPTH_PREVIEW_MAX_DIM = 512;
@@ -799,6 +838,7 @@ function buildHairCage(
   headFallback: Float32Array,
   headPhotoW: Float32Array,
   normals: Float32Array,
+  normalTexture: THREE.Texture | null,
 ): HairShellBuild | null {
   const seg = selectSegmentation(ctx, params);
   const depth = selectDepth(ctx, params);
@@ -920,6 +960,10 @@ function buildHairCage(
     side: THREE.DoubleSide,
     alphaTest: 0.3,
   });
+  if (normalTexture) {
+    material.normalMap = normalTexture;
+    material.normalMapType = THREE.ObjectSpaceNormalMap;
+  }
   patchPhotoMixShader(material);
 
   return { mesh: new THREE.Mesh(geometry, material), alphaTexture };
@@ -935,6 +979,7 @@ function buildHairShell(
   texture: THREE.Texture,
   fit: GnmFitResult,
   params: Params,
+  normalTexture: THREE.Texture | null = null,
 ): HairShellBuild | null {
   const seg = selectSegmentation(ctx, params);
   const depth = selectDepth(ctx, params);
@@ -1051,6 +1096,10 @@ function buildHairShell(
     // グレージング視で筋状に見える。裾を早めに切って背後のGNMに任せる
     alphaTest: 0.3,
   });
+  if (normalTexture) {
+    material.normalMap = normalTexture;
+    material.normalMapType = THREE.ObjectSpaceNormalMap;
+  }
 
   return { mesh: new THREE.Mesh(geometry, material), alphaTexture };
 }
