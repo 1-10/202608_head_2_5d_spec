@@ -112,6 +112,17 @@ export interface GnmHeadBuild {
   /** レイヤー画像プレビューの頭部クロップ (画像に対する割合 0-1, yは上から)。 */
   layerPreviewCrop: { x: number; y: number; w: number; h: number };
   fit: GnmFitResult;
+  /**
+   * 未変換空間 (fit.simを外した空間) のneutral頂点。残差ワープ・鼻孔封止は焼き込み済み。
+   * 表情basisはこの空間で加算される — Unityエクスポートのblendshape基準もここ。
+   */
+  neutralUntransformed: Float32Array;
+  /** 残差ワープ由来の表情成分別振幅スケール (目領域の開口幅補正)。長さexpressionCount。 */
+  exprScales: Float32Array;
+  /** 口腔内色の基準になる肌平均色 (linear空間)。セグメンテーションなしはnull */
+  mouthSkinColorLinear: [number, number, number] | null;
+  /** 肌色が測れないときの口腔内色の代用 (写真の唇色, linear空間)。 */
+  lipFallbackColorLinear: [number, number, number];
   setNeutralExpression(): void;
   /** 表情係数を直接目標に設定する (長さexpressionCount。感情プリセット用)。 */
   setExpressionTarget(coeffs: ArrayLike<number>): void;
@@ -126,6 +137,9 @@ export interface GnmHeadBuild {
 }
 
 const UV_CLAMP_STEPS = 80; // シルエット外UVを頭部中心へ歩かせる最大ステップ数
+
+/** 表情の目標への毎フレーム追従率 (指数遷移)。Unity側も同じ値で再現する前提でexport。 */
+export const EXPR_FOLLOW_RATE = 0.06;
 
 /** 公式サンプラー由来の表情ベクトル (main.tsが gnmSampler から作って渡す)。 */
 export interface GnmExpressionVectors {
@@ -254,7 +268,10 @@ export function buildGnmHead(
     uvs[i * 2 + 1] = v;
 
     // 前面かつシルエット内でのみ写真テクスチャを使い、それ以外は頂点色へフェード。
-    // 口内側面は写真に正しい色が無いため投影を切る
+    // 口内側面は写真に正しい色が無いため投影を切る。
+    // confW: 最終UV (クランプ後) の人物確信度による減衰。頭頂の後れ毛などの
+    // ソフト縁 (確信度0.5〜0.9) は写真画素に背景 (壁など) が混ざっており、
+    // マスク0.5で飽和する判定だけだと背景がそのまま頭皮に焼き付く
     const iw = mouthInteriorW[i];
     photoW[i] = smoothstep(0.08, 0.4, nz) * (seg ? smoothstep(0.2, 0.5, maskAtUv) : 1) * (1 - iw);
 
@@ -480,6 +497,10 @@ export function buildGnmHead(
     previewLayers,
     layerPreviewCrop: computeHeadCropFraction(ctx),
     fit,
+    neutralUntransformed,
+    exprScales,
+    mouthSkinColorLinear: mouthSkinColor ? [mouthSkinColor.r, mouthSkinColor.g, mouthSkinColor.b] : null,
+    lipFallbackColorLinear: [lipPhotoColor.r, lipPhotoColor.g, lipPhotoColor.b],
     setNeutralExpression() {
       exprTarget.fill(0);
     },
@@ -500,9 +521,9 @@ export function buildGnmHead(
         if (Math.abs(diff) > maxDiff) maxDiff = Math.abs(diff);
       }
       if (maxDiff < 1e-3) return;
-      const t = 0.06; // フレームごとの追従率 (指数的な滑らかな遷移。自動アニメーション向けに緩め)
+      // フレームごとの追従率 (指数的な滑らかな遷移。自動アニメーション向けに緩め)
       for (let i = 0; i < model.expressionCount; i++) {
-        exprCurrent[i] += (exprTarget[i] - exprCurrent[i]) * t;
+        exprCurrent[i] += (exprTarget[i] - exprCurrent[i]) * EXPR_FOLLOW_RATE;
       }
       // まばたきは既にエンベロープ済みの値が来るため遅延なく反映する
       blinkNow = blinkAmount;

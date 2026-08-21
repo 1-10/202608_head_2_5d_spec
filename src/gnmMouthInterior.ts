@@ -44,14 +44,38 @@ const PART_TONGUE = 4; // tongue
  * 肌色 color に対して `color * scale + offset` で各パーツの色を決める。
  * 公式の定数は「Color Pickerへ貼れるUINT8値」なので非線形(sRGB)空間の値として扱う。
  */
-const OFFICIAL_COLOR_MODIFIERS: Record<number, { scale: number; offset: number }> = {
+export const OFFICIAL_COLOR_MODIFIERS: Record<number, { scale: number; offset: number }> = {
   [PART_SOCK]: { scale: 0.7, offset: 0.0 },
   [PART_TEETH]: { scale: 0.6, offset: 0.4 },
   [PART_GUMS]: { scale: 0.7, offset: 0.0 },
   [PART_TONGUE]: { scale: 0.7, offset: 0.0 },
 };
 // 公式の 'skin' は (1.0, 0.0) = 肌色そのまま。橋渡し三角形で入ってくる唇の内縁がこれ
-const SKIN_MODIFIER = { scale: 1.0, offset: 0.0 };
+export const SKIN_MODIFIER = { scale: 1.0, offset: 0.0 };
+
+/**
+ * 口腔内の三角形が参照する頂点だけを詰め直す (橋渡し三角形経由で唇の内縁も入る)。
+ * buildMouthInteriorとUnityテンプレートエクスポートで同じ詰め直し順を共有する
+ * (Unity側はvertexMapで頭部頂点から口腔内頂点を切り出すため、順序が正本)。
+ */
+export function compactInteriorVertices(
+  model: GnmModel,
+): { vertexMap: Uint32Array; index: Uint32Array } | null {
+  const tris = model.interiorTriangles;
+  if (tris.length === 0) return null;
+  const localOf = new Int32Array(model.vertexCount).fill(-1);
+  const globalOf: number[] = [];
+  const index = new Uint32Array(tris.length);
+  for (let k = 0; k < tris.length; k++) {
+    const g = tris[k];
+    if (localOf[g] < 0) {
+      localOf[g] = globalOf.length;
+      globalOf.push(g);
+    }
+    index[k] = localOf[g];
+  }
+  return { vertexMap: new Uint32Array(globalOf), index };
+}
 
 /**
  * 開口した口の中で舌が収まる姿勢。公式デモGIF (gnm/shape/assets/readme/gnm_head_demo.gif)
@@ -66,7 +90,7 @@ const SKIN_MODIFIER = { scale: 1.0, offset: 0.0 };
  * 舌を動かす機構はこの表情成分だけ。公式デモは手動スライダーなので顎の開閉とは
  * 連動しない — ここでも連動させない (振幅1.0 = 公式デモと同じ姿勢)。
  */
-const OFFICIAL_TONGUE_POSE: Record<string, number> = {
+export const OFFICIAL_TONGUE_POSE: Record<string, number> = {
   tongue_mean: 0.7,
   tongue_000: -1.7,
   tongue_001: 0,
@@ -75,6 +99,8 @@ const OFFICIAL_TONGUE_POSE: Record<string, number> = {
 
 export interface MouthInteriorBuild {
   mesh: THREE.Mesh;
+  /** 詰め直し後のローカル頂点index → 頭部頂点配列のグローバルindex (Unityエクスポート用)。 */
+  vertexMap: Uint32Array;
   /** 表情適用後の頭部頂点配列 (相似変換済み) から位置を取り込み、法線を作り直す。 */
   update(headVertices: Float32Array): void;
   dispose(): void;
@@ -91,23 +117,10 @@ export function buildMouthInterior(
   skinPhotoColor: THREE.Color | null,
   fallbackColor: THREE.Color,
 ): MouthInteriorBuild | null {
-  const tris = model.interiorTriangles;
-  if (tris.length === 0) return null;
-
-  // 口腔内の三角形が参照する頂点だけを詰め直す (橋渡し三角形経由で唇の内縁も入る)
-  const localOf = new Int32Array(model.vertexCount).fill(-1);
-  const globalOf: number[] = [];
-  const index = new Uint32Array(tris.length);
-  for (let k = 0; k < tris.length; k++) {
-    const g = tris[k];
-    if (localOf[g] < 0) {
-      localOf[g] = globalOf.length;
-      globalOf.push(g);
-    }
-    index[k] = localOf[g];
-  }
-  const count = globalOf.length;
-  const map = new Uint32Array(globalOf);
+  const compacted = compactInteriorVertices(model);
+  if (!compacted) return null;
+  const { vertexMap: map, index } = compacted;
+  const count = map.length;
 
   const positions = new Float32Array(count * 3);
   const copyPositions = (src: Float32Array): void => {
@@ -162,6 +175,7 @@ export function buildMouthInterior(
   const mesh = new THREE.Mesh(geometry, material);
   return {
     mesh,
+    vertexMap: map,
     update(headVerts: Float32Array): void {
       copyPositions(headVerts);
       posAttr.needsUpdate = true;
@@ -177,7 +191,7 @@ export function buildMouthInterior(
 
 // 舌成分の係数上限。公式デモGUI (gnm_head_demo.ipynb) のスライダー範囲と同じ。
 // ここを超えると学習分布の外への外挿になり、舌先が反転して尖る (実測で確認済み)
-const TONGUE_COEFF_LIMIT = 3;
+export const TONGUE_COEFF_LIMIT = 3;
 
 export interface TongueDriver {
   /**
