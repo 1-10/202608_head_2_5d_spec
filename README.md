@@ -33,10 +33,13 @@
   - `NEURAL`: BiRefNetのアルファマット(MediaPipeの意味分けと合成) + Depth Anything V2 SmallのDepth。
     選択時に初めてtransformers.jsごと遅延ロードする(下記ライセンス注意を参照)
   - `NONE`: 不使用 (UVクランプ・髪シェルなしの素のGNM)
-- 表情アニメーション (GNM公式ExpressionSampler由来のプリセット):
-  - `Auto`: 喜怒哀楽驚の感情プリセットを自動巡回 (感情→ニュートラル→別の感情…)
-  - 感情固定 / `Manual` (Mouth Open・Smile・Eyes Close等のパーツ別スライダー合成)
-  - 周期的なBlink(目パチ)を表情へ合成
+- 表情アニメーション (GNM公式ExpressionSamplerをブラウザ内で実行):
+  - 公式のCVAEデコーダ (`semantic_sampler.py`) をTypeScriptへ移植し、`sample_expression` /
+    `blend_expressions` / `randomize_expressions` をそのまま使う (重み0.75MB, float16)
+  - `Auto`: 喜怒哀楽驚を巡回。同じ感情でも毎回 潜在zを引き直すので表情が変わる
+  - 感情固定 (公式Expressionクラス20種すべて選択可) / `Manual`
+    (Mouth Open・Smile・Eyes Close等のパーツ別スライダー合成。領域分割は公式に無い独自処理)
+  - 周期的なBlink(目パチ)を表情へ合成 (左右ウインククラスの合成から目領域だけ使う)
 - ビューをドラッグするとYaw(±可変)/Pitch角に回転
 - GUI: フィット/髪シェルパラメータ、表情、Camera/Rotation、Wireframe表示
 
@@ -62,6 +65,8 @@ git clone --depth 1 https://github.com/google/GNM.git /tmp/GNM
 curl -LO https://raw.githubusercontent.com/google-ai-edge/mediapipe/master/mediapipe/modules/face_geometry/data/canonical_face_model.obj
 python tools/export_gnm_assets.py /tmp/GNM/gnm/shape/data/versions/v3_0/gnm_head.npz canonical_face_model.obj
 # → public/gnm/gnm_head_lite.bin (約11.7MB) が生成される
+python tools/export_gnm_sampler.py /tmp/GNM/gnm/shape/data/semantic_sampler/expression_decoder_model.h5                                    /tmp/GNM/gnm/shape/data/versions/v3_0/gnm_head.npz
+# → public/gnm/gnm_expression_decoder.bin (約0.76MB) が生成される
 # .obj (MediaPipe canonical face model) を省略すると468点密対応が省かれ、フィットが68点フォールバックになる
 ```
 
@@ -98,7 +103,9 @@ npm run preview  # ビルド結果のプレビュー
 ```text
 index.html
 tools/
-  export_gnm_assets.py # GNM Head npz → ブラウザ用軽量アセット変換 (ビルド時)
+  export_gnm_assets.py   # GNM Head npz → ブラウザ用軽量アセット変換 (ビルド時)
+  export_gnm_sampler.py  # 公式ExpressionSamplerのCVAEデコーダ重み → ブラウザ用 (ビルド時)
+  verify_gnm_asset.py    # 生成アセットと公式npzのデータ突き合わせ検証
 src/
   main.ts          # エントリポイント。UI配線・シーン構築・レンダーループ
   input.ts         # Webcam / ファイル入力
@@ -112,7 +119,7 @@ src/
   gnmHeadMesh.ts   # GNMメッシュ構築 (真3D頭部+実測髪シェル) と表情機構
   gnmRefine.ts     # 残差ワープ・鼻孔封止・眼球非貫通拘束などフィット後の品質改善
   gnmMouthInterior.ts # 口腔内 (口腔壁・歯・歯茎・舌) メッシュと舌の姿勢駆動
-  gnmExpressions.ts # 公式ExpressionSampler由来の表情プリセット (生成物)
+  gnmSampler.ts    # 公式ExpressionSampler (CVAEデコーダ) のブラウザ移植
   meshUtils.ts     # メッシュ共通処理 (法線+Z固定・格子index・smoothstep)
   blink.ts         # Blink(目パチ)の周期エンベロープ
   interaction.ts   # ドラッグによるYaw/Pitch操作

@@ -87,6 +87,32 @@ function updateLayerPreview(gnmHead: GnmHeadBuild, visible: boolean, scale: numb
   }
 }
 
+// Emotionの基本選択肢。公式クラスは表情サンプラーのロード後に
+// refreshEmotionOptions() で追加する (クラス名の正本はサンプラー側)
+const BASE_EMOTION_OPTIONS: Record<string, string> = {
+  'Auto (喜怒哀楽を巡回)': 'AUTO',
+  Neutral: 'NEUTRAL',
+  'Manual (下のスライダー)': 'MANUAL',
+  '喜 Happy': 'joy',
+  '楽 Smile': 'fun',
+  '哀 Sad': 'sad',
+  '怒 Snarl': 'anger',
+  '驚 Surprise': 'surprise',
+};
+
+/**
+ * Emotionの選択肢へ公式Expressionクラス20種を追加する。
+ * classNames は gnm_expression_decoder.bin 由来なので、公式側が増えても追従する。
+ */
+export function refreshEmotionOptions(gui: GUI, params: Params, classNames: string[]): void {
+  const ctrl = gui.controllersRecursive().find((c) => c.property === 'gnmEmotion');
+  if (!ctrl) return;
+  const opts: Record<string, string> = { ...BASE_EMOTION_OPTIONS };
+  for (const n of classNames) opts[`公式: ${n}`] = n;
+  ctrl.options(opts).name('Emotion');
+  params.gnmEmotion = params.gnmEmotion; // 現在値を保つ
+}
+
 export function setupDebugGui(container: HTMLElement, params: Params, options: DebugGuiOptions): GUI {
   const gui = new GUI({ container, title: 'Parameters' });
 
@@ -167,18 +193,7 @@ export function setupDebugGui(container: HTMLElement, params: Params, options: D
 
   // プリセットは公式ExpressionSampler由来 (gnmExpressions.ts)
   const exprFolder = gui.addFolder('Expression');
-  exprFolder
-    .add(params, 'gnmEmotion', {
-      'Auto (喜怒哀楽を巡回)': 'AUTO',
-      Neutral: 'NEUTRAL',
-      'Manual (下のスライダー)': 'MANUAL',
-      '喜 Happy': 'joy',
-      '楽 Smile': 'fun',
-      '哀 Sad': 'sad',
-      '怒 Snarl': 'anger',
-      '驚 Surprise': 'surprise',
-    })
-    .name('Emotion');
+  exprFolder.add(params, 'gnmEmotion', BASE_EMOTION_OPTIONS).name('Emotion');
   exprFolder.add(params, 'gnmExprIntensity', 0, 2, 0.05).name('Intensity');
   // パーツ別スライダー (Emotion=Manual時に有効。公式クラスを目/下顔面領域で分離)
   exprFolder.add(params, 'gnmMouthOpen', 0, 1.5, 0.05).name('Mouth Open');

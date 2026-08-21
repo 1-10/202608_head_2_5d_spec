@@ -8,9 +8,10 @@ sample/
 Thumbs.db
 desktop.ini
 
-# GNM作業ファイル (テスト画像等)。生成済みアセット gnm_head_lite.bin だけはコミットする
+# GNM作業ファイル (テスト画像等)。生成済みアセットだけはコミットする
 public/gnm/*
 !public/gnm/gnm_head_lite.bin
+!public/gnm/gnm_expression_decoder.bin
 
 # DAViD Depthモデル (100MB超のためコミットしない。tools/prepare_david_model.py で生成)
 public/david/

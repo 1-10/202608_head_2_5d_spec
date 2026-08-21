@@ -18,9 +18,11 @@ export type PersonSource = 'DAVID' | 'SELFIE_MULTICLASS';
 // 回転時の照明応答を与える (写真の陰影 + 実測法線のシェーディング)。NONE=平坦(+Z)
 export type NormalSource = 'DAVID' | 'NONE';
 
-// GNMの表情感情 (AUTO=自動巡回, MANUAL=パーツ別スライダー)。
-// キーは main.ts の感情→プリセット表と対応する
-export type GnmEmotion = 'AUTO' | 'NEUTRAL' | 'MANUAL' | 'joy' | 'fun' | 'sad' | 'anger' | 'surprise';
+// GNMの表情選択。'AUTO'=自動巡回 / 'NEUTRAL'=無表情 / 'MANUAL'=パーツ別スライダー、
+// それ以外は「main.ts の日本語ラベル感情キー」または「公式 Expression クラス名」。
+// 有効なクラス名は表情サンプラー (gnm_expression_decoder.bin の classNames) が正本なので
+// ここでは列挙しない (列挙すると公式側が増えたとき黙って古くなる)
+export type GnmEmotion = string;
 
 export interface Params {
   // --- 回転操作 ---

@@ -20,7 +20,6 @@ import {
   type GnmModel,
   type SimilarityTransform,
 } from './gnmHead';
-import { GNM_EXPRESSION_PRESETS } from './gnmExpressions';
 import { buildMouthInterior, buildTongueDriver } from './gnmMouthInterior';
 import { MP_EYES, MP_LIPS, applyResidualWarp, buildEyeballContainment, fillNostrils } from './gnmRefine';
 import { applyFlatNormals, buildGridIndices, smoothstep } from './meshUtils';
@@ -108,12 +107,21 @@ export interface GnmHeadBuild {
 
 const UV_CLAMP_STEPS = 80; // シルエット外UVを頭部中心へ歩かせる最大ステップ数
 
+/** 公式サンプラー由来の表情ベクトル (main.tsが gnmSampler から作って渡す)。 */
+export interface GnmExpressionVectors {
+  /** まばたき (左右ウインクの合成の目領域だけ)。長さ = expressionCount */
+  blink: number[];
+  /** 舌の顎追随の基準にする「大きく開いた口」の表情。長さ = expressionCount */
+  jawOpenReference: number[];
+}
+
 export function buildGnmHead(
   model: GnmModel,
   ctx: GnmBuildContext,
   sourceCanvas: HTMLCanvasElement,
   texture: THREE.Texture,
   params: Params,
+  vectors: GnmExpressionVectors,
 ): GnmHeadBuild {
   const fit = fitGnmToLandmarks(model, ctx.landmarks, params.gnmIdentityReg, params.gnmDenseFit);
   const seg = selectSegmentation(ctx, params);
@@ -335,8 +343,8 @@ export function buildGnmHead(
 
   // まばたきベクトル: 公式ExpressionSamplerのWINK_LEFT+WINK_RIGHT合成 (目領域のみ)。
   const blinkVec =
-    GNM_EXPRESSION_PRESETS.blink?.length === model.expressionCount
-      ? GNM_EXPRESSION_PRESETS.blink
+    vectors.blink.length === model.expressionCount
+      ? vectors.blink
       : new Array<number>(model.expressionCount).fill(0);
   let blinkNow = 0;
 
@@ -349,7 +357,7 @@ export function buildGnmHead(
   }
 
   // 舌: 公式の姿勢 (定数) + 顎の開きへの追随 (公式に無い連動)。gnmMouthInterior参照
-  const tongueDriver = buildTongueDriver(model, GNM_EXPRESSION_PRESETS.surprise);
+  const tongueDriver = buildTongueDriver(model, vectors.jawOpenReference);
   const coeffs = new Float32Array(model.expressionCount);
 
   const applyExpressionNow = (): void => {

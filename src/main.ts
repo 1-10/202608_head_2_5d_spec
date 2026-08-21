@@ -17,9 +17,9 @@ import {
   type GnmHeadBuild,
   type MeasuredHeadData,
 } from './gnmHeadMesh';
-import { GNM_EXPRESSION_PRESETS } from './gnmExpressions';
+import { loadExpressionSampler, type ExpressionSampler } from './gnmSampler';
 import { createParams, type Params } from './params';
-import { applyDebugVisualization, setupDebugGui } from './debugView';
+import { applyDebugVisualization, refreshEmotionOptions, setupDebugGui } from './debugView';
 import { OrbitDragController } from './interaction';
 
 class Viewport {
@@ -122,6 +122,7 @@ const portraitDepth = new PortraitDepthEstimator();
 
 // GNMアセット (gnm_head_lite.bin 約8.5MB) は初回構築時に一度だけロードする。
 let gnmModel: GnmModel | null = null;
+let exprSampler: ExpressionSampler | null = null;
 let gnmBusy = false;
 
 let sceneState: SceneState | null = null;
@@ -129,13 +130,14 @@ let yawDeg = 0;
 let pitchDeg = 0;
 let blinkState: BlinkState = createBlinkState(performance.now(), params);
 // --- GNM表情の自動巡回 (Emotion=AUTO時): 感情→ニュートラル→別の感情… ---
-// 感情 → 公式ExpressionSamplerプリセット群 (Varはseed違いの変化形。巡回のたびに選ぶ)
-const GNM_EMOTION_VARIANTS: Record<string, string[]> = {
-  joy: ['happy', 'happyVar1', 'happyVar2'],
-  fun: ['smileWide', 'smileWideVar1', 'smileWideVar2'],
-  sad: ['cornersDown', 'cornersDownVar1', 'cornersDownVar2'],
-  anger: ['snarl', 'snarlVar1', 'snarlVar2'],
-  surprise: ['surprise', 'surpriseVar1', 'surpriseVar2'],
+// 日本語ラベルの感情 → 公式 Expression クラス名 (semantic_sampler.py の enum)。
+// AUTO巡回はこの5つを回す。個別のクラスはGUIのEmotionから直接20種すべて選べる
+const GNM_EMOTION_CLASSES: Record<string, string> = {
+  joy: 'happy',
+  fun: 'smile_wide',
+  sad: 'corners_down',
+  anger: 'snarl',
+  surprise: 'surprise',
 };
 /**
  * 表情成分ごとの領域ラベルを成分名から導出する (アセットの並びに依存しない)。
@@ -153,21 +155,64 @@ function expressionRegions(model: GnmModel | null): ExprRegion[] {
 }
 
 let gnmExprNextChangeAt = 0; // 次回遷移時刻
-let gnmAutoTarget: number[] | null = null; // 現在の目標プリセット (null=ニュートラル区間)
+let gnmAutoTarget: number[] | null = null; // 現在の目標表情 (null=ニュートラル区間)
 let gnmLastEmotion = ''; // 直前の感情 (同じ感情の連続を避ける)
+
+/** 公式クラス名 → クラス番号。サンプラーの classNames が正本 */
+function classIndex(name: string): number {
+  return exprSampler ? exprSampler.classNames.indexOf(name) : -1;
+}
+/**
+ * 公式 sample_expression でクラスの表情を作り、アセットの成分並びへ射影する。
+ * latent=null は潜在空間の中心 (=クラスの代表)。公式には無い決め打ちだが、
+ * 固定表情・パーツ別スライダーの基準として再現性が要る
+ */
+function sampleClass(name: string, latent: Float32Array | null = null): number[] | null {
+  if (!exprSampler || !gnmModel) return null;
+  const ci = classIndex(name);
+  if (ci < 0) return null;
+  return exprSampler.toModelCoeffs(exprSampler.sample(ci, latent), gnmModel);
+}
 
 // Emotion=MANUAL用のパーツ別スライダー定義。公式プリセットを領域で分離して合成する。
 // 領域の判定は成分名 (model.expressionNames) から導出する — 成分数や並びを
 // 変えても嘘にならないようにするため (位置決め打ちは舌成分の追加で壊れた)
-const GNM_MANUAL_CONTROLS: { param: keyof Params; preset: string; region: 'eyes' | 'lower' }[] = [
-  { param: 'gnmMouthOpen', preset: 'surprise', region: 'lower' },
-  { param: 'gnmSmile', preset: 'smileWide', region: 'lower' },
-  { param: 'gnmPucker', preset: 'pucker', region: 'lower' },
-  { param: 'gnmCornersDown', preset: 'cornersDown', region: 'lower' },
-  { param: 'gnmEyesClose', preset: 'blink', region: 'eyes' },
-  { param: 'gnmEyesWide', preset: 'surprise', region: 'eyes' },
-  { param: 'gnmSquint', preset: 'squint', region: 'eyes' },
+const GNM_MANUAL_CONTROLS: { param: keyof Params; classes: string[]; region: 'eyes' | 'lower' }[] = [
+  { param: 'gnmMouthOpen', classes: ['surprise'], region: 'lower' },
+  { param: 'gnmSmile', classes: ['smile_wide'], region: 'lower' },
+  { param: 'gnmPucker', classes: ['pucker'], region: 'lower' },
+  { param: 'gnmCornersDown', classes: ['corners_down'], region: 'lower' },
+  // 閉眼は片目ウインクの左右合成 (公式に「両目を閉じる」クラスは無い)
+  { param: 'gnmEyesClose', classes: ['wink_left', 'wink_right'], region: 'eyes' },
+  { param: 'gnmEyesWide', classes: ['surprise'], region: 'eyes' },
+  { param: 'gnmSquint', classes: ['squint'], region: 'eyes' },
 ];
+
+/** クラスの代表表情を足し合わせる (キャッシュ付き)。 */
+const sampleSumCache = new Map<string, number[] | null>();
+function sampleClassSum(classes: string[]): number[] | null {
+  const key = classes.join('+');
+  const hit = sampleSumCache.get(key);
+  if (hit !== undefined) return hit;
+  let acc: number[] | null = null;
+  for (const c of classes) {
+    const v = sampleClass(c);
+    if (!v) return null;
+    acc = acc ? acc.map((x, i) => x + v[i]) : v.slice();
+  }
+  sampleSumCache.set(key, acc);
+  return acc;
+}
+
+/**
+ * まばたきベクトル: 左右ウインクの合成から目領域だけを残す
+ * (下顔面を0にしないと、まばたきのたびに口が動いてしまう)。
+ */
+function buildBlinkVector(model: GnmModel): number[] {
+  const both = sampleClassSum(['wink_left', 'wink_right']);
+  if (!both) return new Array<number>(model.expressionCount).fill(0);
+  return both.map((v, i) => (/^(left|right)_eye/.test(model.expressionNames[i] ?? '') ? v : 0));
+}
 
 function setStatus(message: string, isError = false): void {
   els.status.textContent = message;
@@ -326,6 +371,12 @@ async function rebuildGnmHead(): Promise<void> {
       setStatus('GNM Headアセットを読み込んでいます…');
       gnmModel = await loadGnmModel();
     }
+    if (!exprSampler) {
+      setStatus('表情サンプラーを読み込んでいます…');
+      exprSampler = await loadExpressionSampler();
+      sampleSumCache.clear();
+      refreshEmotionOptions(gui, params, exprSampler.classNames);
+    }
     setStatus('GNM Headをフィットしています…');
     s.gnmHead?.dispose();
 
@@ -335,7 +386,11 @@ async function rebuildGnmHead(): Promise<void> {
     s.ctx.headCenterPx = normalized.headCenterPx;
     s.ctx.faceWidthPx = normalized.faceWidth;
 
-    const build = buildGnmHead(gnmModel, s.ctx, s.sourceCanvas, s.texture, params);
+    const build = buildGnmHead(gnmModel, s.ctx, s.sourceCanvas, s.texture, params, {
+      blink: buildBlinkVector(gnmModel),
+      // 舌の顎追随の基準となる「大きく開いた口」。公式surpriseクラスの代表表情
+      jawOpenReference: sampleClass('surprise') ?? [],
+    });
     build.group.rotation.order = 'YXZ'; // yaw→pitchの順で直感的に合成されるよう明示する
     s.gnmHead = build;
     // デバッグ用: コンソールから表情係数や対応残差を直接調べられるようにする
@@ -461,7 +516,7 @@ els.toggleBlink.addEventListener('change', () => {
 window.addEventListener('resize', () => viewport.resize());
 
 // --- GUIパラメータパネル ---
-setupDebugGui(els.guiContainer, params, {
+const gui = setupDebugGui(els.guiContainer, params, {
   onSourceChanged: () => {
     // まず取得済みソースで即時再構築し、DAVIDが未取得なら裏で取得して再構築する
     void rebuildGnmHead().then(() => ensureDavid());
@@ -494,12 +549,12 @@ function animate(): void {
           gnmAutoTarget = null;
           gnmExprNextChangeAt = now + 800 + Math.random() * 1200;
         } else {
-          const emotions = Object.keys(GNM_EMOTION_VARIANTS).filter((e) => e !== gnmLastEmotion);
+          const emotions = Object.keys(GNM_EMOTION_CLASSES).filter((e) => e !== gnmLastEmotion);
           const emotion = emotions[Math.floor(Math.random() * emotions.length)];
           gnmLastEmotion = emotion;
-          const variants = GNM_EMOTION_VARIANTS[emotion];
-          gnmAutoTarget =
-            GNM_EXPRESSION_PRESETS[variants[Math.floor(Math.random() * variants.length)]] ?? null;
+          // 公式 sample_expression: 潜在zをランダムに引いて同じ感情でも毎回違う表情にする
+          const latent = exprSampler?.randomLatent(Math.random) ?? null;
+          gnmAutoTarget = sampleClass(GNM_EMOTION_CLASSES[emotion], latent);
           gnmExprNextChangeAt = now + 2000 + Math.random() * 2500;
         }
       }
@@ -511,7 +566,7 @@ function animate(): void {
       for (const c of GNM_MANUAL_CONTROLS) {
         const amount = params[c.param] as number;
         if (amount === 0) continue;
-        const p = GNM_EXPRESSION_PRESETS[c.preset];
+        const p = sampleClassSum(c.classes);
         if (!p) continue;
         vec ??= new Array<number>(p.length).fill(0);
         for (let i = 0; i < p.length; i++) {
@@ -520,7 +575,8 @@ function animate(): void {
       }
       preset = vec;
     } else if (params.gnmEmotion !== 'NEUTRAL') {
-      preset = GNM_EXPRESSION_PRESETS[GNM_EMOTION_VARIANTS[params.gnmEmotion]?.[0] ?? ''] ?? null;
+      // 感情固定: 日本語ラベルなら対応クラス、それ以外は公式クラス名そのもの
+      preset = sampleClassSum([GNM_EMOTION_CLASSES[params.gnmEmotion] ?? params.gnmEmotion]);
     }
     if (preset) {
       gnmHead.setExpressionTarget(preset.map((v) => v * params.gnmExprIntensity));
