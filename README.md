@@ -35,9 +35,11 @@
 - 表情アニメーション (GNM公式ExpressionSamplerをブラウザ内で実行):
   - 公式のCVAEデコーダ (`semantic_sampler.py`) をTypeScriptへ移植し、`sample_expression` /
     `blend_expressions` / `randomize_expressions` をそのまま使う (重み0.75MB, float16)
-  - `Auto`: 喜怒哀楽驚を巡回。同じ感情でも毎回 潜在zを引き直すので表情が変わる
+  - `Auto`: 公式Expressionクラス20種を巡回。潜在zも引き直すので同じクラスでも毎回変わる
   - `Random`: 公式 `randomize_expressions` (2〜3クラスをランダムに公式blend)
-  - 感情固定: 公式Expressionクラス20種すべて選択可
+  - クラス固定: 公式Expressionクラス20種すべて選択可
+  - `Manual`: パーツ別スライダー合成 (公式クラスの代表表情を目/下顔面領域に分けて加算。
+    領域分割は公式に無い操作なのでこのモード限定)
   - 周期的なBlink(目パチ)を表情へ合成 (左右ウインククラスの合成から目領域だけ使う)
 - ビューをドラッグするとYaw(±可変)/Pitch角に回転
 - GUI: フィット/髪シェルパラメータ、表情、Camera/Rotation、Wireframe表示

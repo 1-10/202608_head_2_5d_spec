@@ -18,9 +18,9 @@ export type PersonSource = 'DAVID' | 'SELFIE_MULTICLASS';
 // 回転時の照明応答を与える (写真の陰影 + 実測法線のシェーディング)。NONE=平坦(+Z)
 export type NormalSource = 'DAVID' | 'NONE';
 
-// GNMの表情選択。'AUTO'=感情を自動巡回 / 'RANDOM'=公式randomize_expressions /
-// 'NEUTRAL'=無表情、それ以外は「main.ts の日本語ラベル感情キー」または
-// 「公式 Expression クラス名」。
+// GNMの表情選択。'AUTO'=公式Expressionクラスを自動巡回 /
+// 'RANDOM'=公式randomize_expressions / 'NEUTRAL'=無表情 /
+// 'MANUAL'=パーツ別スライダー合成、それ以外は公式 Expression クラス名そのもの。
 // 有効なクラス名は表情サンプラー (gnm_expression_decoder.bin の classNames) が正本なので
 // ここでは列挙しない (列挙すると公式側が増えたとき黙って古くなる)
 export type GnmEmotion = string;
@@ -64,6 +64,16 @@ export interface Params {
   // NEUTRAL=無表情、MANUAL=下のパーツ別スライダーで合成、それ以外=その感情で固定。
   // プリセットはGNM公式ExpressionSampler由来
   gnmEmotion: GnmEmotion;
+  // --- パーツ別スライダー (Emotion=MANUAL時に有効) ---
+  // 公式クラスの代表表情を領域 (目成分/下顔面成分) で分離して加算する。
+  // 領域分割そのものは公式に無い操作なのでMANUALモード限定
+  gnmMouthOpen: number; // surprise の下顔面 (顎開き)
+  gnmSmile: number; // smile_wide の下顔面
+  gnmPucker: number; // pucker の下顔面 (口すぼめ)
+  gnmCornersDown: number; // corners_down の下顔面 (口角下げ)
+  gnmEyesClose: number; // wink_left+wink_right の目領域 (閉眼)
+  gnmEyesWide: number; // surprise の目領域 (見開き)
+  gnmSquint: number; // squint の目領域 (細目)
 
   // --- アニメーション (Blink) ---
   blinkEnabled: boolean;
@@ -118,6 +128,13 @@ export const DEFAULT_PARAMS: Params = {
 
   gnmExprIntensity: 1.0,
   gnmEmotion: 'AUTO',
+  gnmMouthOpen: 0,
+  gnmSmile: 0,
+  gnmPucker: 0,
+  gnmCornersDown: 0,
+  gnmEyesClose: 0,
+  gnmEyesWide: 0,
+  gnmSquint: 0,
 
   blinkEnabled: true,
   blinkPeriodMinSec: 3,

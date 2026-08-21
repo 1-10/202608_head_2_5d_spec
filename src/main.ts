@@ -130,15 +130,6 @@ let yawDeg = 0;
 let pitchDeg = 0;
 let blinkState: BlinkState = createBlinkState(performance.now(), params);
 // --- GNM表情の自動巡回 (Emotion=AUTO時): 感情→ニュートラル→別の感情… ---
-// 日本語ラベルの感情 → 公式 Expression クラス名 (semantic_sampler.py の enum)。
-// AUTO巡回はこの5つを回す。個別のクラスはGUIのEmotionから直接20種すべて選べる
-const GNM_EMOTION_CLASSES: Record<string, string> = {
-  joy: 'happy',
-  fun: 'smile_wide',
-  sad: 'corners_down',
-  anger: 'snarl',
-  surprise: 'surprise',
-};
 let gnmExprNextChangeAt = 0; // 次回遷移時刻
 let gnmAutoTarget: number[] | null = null; // 現在の目標表情 (null=ニュートラル区間)
 let gnmLastEmotion = ''; // 直前の感情 (同じ感情の連続を避ける)
@@ -159,10 +150,35 @@ function sampleClass(name: string, latent: Float32Array | null = null): number[]
   return exprSampler.toModelCoeffs(exprSampler.sample(ci, latent), gnmModel);
 }
 
+// Emotion=MANUAL用のパーツ別スライダー定義。公式クラスの代表表情を領域で分離して合成する。
+// 領域の判定は成分名 (model.expressionNames) から導出する — 成分数や並びを
+// 変えても嘘にならないようにするため (位置決め打ちは舌成分の追加で壊れた)
+const GNM_MANUAL_CONTROLS: { param: keyof Params; classes: string[]; region: 'eyes' | 'lower' }[] = [
+  { param: 'gnmMouthOpen', classes: ['surprise'], region: 'lower' },
+  { param: 'gnmSmile', classes: ['smile_wide'], region: 'lower' },
+  { param: 'gnmPucker', classes: ['pucker'], region: 'lower' },
+  { param: 'gnmCornersDown', classes: ['corners_down'], region: 'lower' },
+  // 閉眼は片目ウインクの左右合成 (公式に「両目を閉じる」クラスは無い)
+  { param: 'gnmEyesClose', classes: ['wink_left', 'wink_right'], region: 'eyes' },
+  { param: 'gnmEyesWide', classes: ['surprise'], region: 'eyes' },
+  { param: 'gnmSquint', classes: ['squint'], region: 'eyes' },
+];
+
+/** 表情成分ごとの領域ラベルを成分名から導出する (アセットの並びに依存しない)。 */
+type ExprRegion = 'eyes' | 'lower' | 'other';
+let exprRegionsCache: ExprRegion[] | null = null;
+function expressionRegions(model: GnmModel): ExprRegion[] {
+  if (exprRegionsCache) return exprRegionsCache;
+  exprRegionsCache = model.expressionNames.map((n) =>
+    /^(left|right)_eye/.test(n) ? 'eyes' : n.startsWith('lower_face') ? 'lower' : 'other',
+  );
+  return exprRegionsCache;
+}
+
 /**
  * クラスの代表表情を足し合わせる (キャッシュ付き)。
- * まばたきベクトルの生成にだけ使う — 出力ベクトルの線形和は公式の blend_expressions
- * とは別物なので、表情の合成には使わない (合成は公式blendを使う)。
+ * 出力ベクトルの線形和は公式の blend_expressions とは別物なので、
+ * まばたきとMANUALモードのパーツ合成にだけ使う。
  */
 const sampleSumCache = new Map<string, number[] | null>();
 function sampleClassSum(classes: string[]): number[] | null {
@@ -529,20 +545,36 @@ function animate(): void {
                 ? exprSampler.toModelCoeffs(exprSampler.randomize(Math.random), gnmModel)
                 : null;
           } else {
-            const emotions = Object.keys(GNM_EMOTION_CLASSES).filter((e) => e !== gnmLastEmotion);
-            const emotion = emotions[Math.floor(Math.random() * emotions.length)];
-            gnmLastEmotion = emotion;
-            // 公式 sample_expression: 潜在zを引き直して同じ感情でも毎回違う表情にする
+            // 公式Expressionクラスを巡回。潜在zも引き直すので同じクラスでも毎回変わる
+            const classes = (exprSampler?.classNames ?? []).filter((c) => c !== gnmLastEmotion);
+            const cls = classes[Math.floor(Math.random() * classes.length)];
+            gnmLastEmotion = cls;
             const latent = exprSampler?.randomLatent(Math.random) ?? null;
-            gnmAutoTarget = sampleClass(GNM_EMOTION_CLASSES[emotion], latent);
+            gnmAutoTarget = cls ? sampleClass(cls, latent) : null;
           }
           gnmExprNextChangeAt = now + 2000 + Math.random() * 2500;
         }
       }
       preset = gnmAutoTarget;
+    } else if (params.gnmEmotion === 'MANUAL') {
+      // パーツ別スライダーの合成。公式クラスの代表表情を目/下顔面領域に分けて加算する
+      // (領域分割は公式に無い操作なのでMANUALモード限定)
+      const region = gnmModel ? expressionRegions(gnmModel) : [];
+      let vec: number[] | null = null;
+      for (const c of GNM_MANUAL_CONTROLS) {
+        const amount = params[c.param] as number;
+        if (amount === 0) continue;
+        const p = sampleClassSum(c.classes);
+        if (!p) continue;
+        vec ??= new Array<number>(p.length).fill(0);
+        for (let i = 0; i < p.length; i++) {
+          if (region[i] === c.region) vec[i] += p[i] * amount;
+        }
+      }
+      preset = vec;
     } else if (params.gnmEmotion !== 'NEUTRAL') {
-      // 感情固定: 日本語ラベルなら対応クラス、それ以外は公式クラス名そのもの
-      preset = sampleClassSum([GNM_EMOTION_CLASSES[params.gnmEmotion] ?? params.gnmEmotion]);
+      // 感情固定: 値は公式Expressionクラス名そのもの
+      preset = sampleClassSum([params.gnmEmotion]);
     }
     if (preset) {
       gnmHead.setExpressionTarget(preset.map((v) => v * params.gnmExprIntensity));
