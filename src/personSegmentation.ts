@@ -18,14 +18,19 @@ const CLASS_BACKGROUND = 0;
 const CLASS_HAIR = 1;
 const CLASS_BODY_SKIN = 2;
 const CLASS_FACE_SKIN = 3;
-// 4 = clothes (頭部に含めない)
+// 4 = clothes (どのマスクにも含めない)
 const CLASS_ACCESSORIES = 5; // 帽子・メガネ等。頭部シルエットに含める
 
 export interface SegmentationResult {
   person: ScalarField; // 1 - background
+  /** 髪 (クラス1) 単体。 */
   hair: ScalarField;
-  /** Guided Filter精細化前の生の髪マスク (精細化を適用した場合のみ。比較用)。 */
-  hairRaw?: ScalarField;
+  /**
+   * 髪 + accessories (クラス5 = 帽子・メガネ等) の顎より上の部分。
+   * 髪シェルに帽子を含めたいとき用。accessoriesが無ければ hair と厳密に一致する
+   * (差分が「帽子を足したかどうか」だけになるよう、personゲートもaccessories項にしか掛けない)。
+   */
+  hairWithAccessories: ScalarField;
   faceSkin: ScalarField;
   /** 頭部シルエット: hair + faceSkin + accessories + (顎より上のbodySkin=耳など) */
   head: ScalarField;
@@ -86,6 +91,7 @@ export class PersonSegmenter {
     const fadeRows = height * 0.04;
 
     const head = new Float32Array(width * height);
+    const hairWithAccessories = new Float32Array(width * height);
     for (let y = 0; y < height; y++) {
       // 顎より上=1、顎から下へfadeRowsかけて0
       const aboveChin = clamp01(1 - (y - chinRow) / Math.max(1, fadeRows));
@@ -96,6 +102,9 @@ export class PersonSegmenter {
         const h = hair[i] + (faceSkin[i] + accessories[i] + bodySkin[i]) * aboveChin;
         // personマスクとの積で背景誤検出を抑える
         head[i] = clamp01(h) * person[i];
+        // 髪シェル用の「髪+帽子」。accessoriesは背景の誤検出を拾うと髪シェルの
+        // 格子が背景に伸びるのでperson積で抑える。髪側は素のまま (hairと厳密一致させる)
+        hairWithAccessories[i] = clamp01(hair[i] + accessories[i] * aboveChin * person[i]);
       }
     }
 
@@ -103,6 +112,7 @@ export class PersonSegmenter {
     return {
       person: { width, height, data: person, rect },
       hair: { width, height, data: hair, rect },
+      hairWithAccessories: { width, height, data: hairWithAccessories, rect },
       faceSkin: { width, height, data: faceSkin, rect },
       head: { width, height, data: head, rect },
     };

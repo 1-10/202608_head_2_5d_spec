@@ -25,6 +25,8 @@ export function applyDebugVisualization(gnmHead: GnmHeadBuild | null, params: Pa
   if (gnmHead.hairMesh) gnmHead.hairMesh.visible = params.gnmShowHair;
   if (gnmHead.mouthInteriorMesh) gnmHead.mouthInteriorMesh.visible = params.gnmShowMouthInterior;
   gnmHead.landmarkOverlay.visible = params.showLandmarks;
+  // 表情が静止しているとtickExpressionが走らないので、onにした時点で引き直す
+  if (params.showLandmarks) gnmHead.refreshLandmarkOverlay();
   updateLayerPreview(gnmHead, params.showLayerImages, params.layerImageScale);
 }
 
@@ -32,7 +34,9 @@ const LAYER_PREVIEW_ID = 'gnm-layer-preview';
 const LAYER_PREVIEW_BASE_HEIGHT = 160; // サムネイル表示高さの基準 (px, scale=1)
 
 /**
- * レイヤー分離画像 (headテクスチャ / 髪だけの画像) を画面左下へ表示する。
+ * 加工工程のレイヤー画像を画面左下へ並べる (元写真 → 最終出力で使うテクスチャ)。
+ * 並びと中身は gnmHead.previewLayers が正本 — ここでは順に描くだけにして、
+ * 「表示側が工程を知っている」状態を作らない (工程が変わると黙って古くなるため)。
  * パネルはbody直下のシングルトンで、再構築のたびに描き直す。
  */
 function updateLayerPreview(gnmHead: GnmHeadBuild, visible: boolean, scale: number): void {
@@ -45,42 +49,36 @@ function updateLayerPreview(gnmHead: GnmHeadBuild, visible: boolean, scale: numb
     panel = document.createElement('div');
     panel.id = LAYER_PREVIEW_ID;
     panel.style.cssText =
-      'position:fixed;left:12px;bottom:40px;z-index:20;display:flex;gap:8px;' +
-      'pointer-events:none;font:11px sans-serif;color:#ddd;';
+      'position:fixed;left:12px;right:12px;bottom:40px;z-index:20;display:flex;gap:8px;' +
+      'flex-wrap:wrap;align-items:flex-end;pointer-events:none;font:11px sans-serif;color:#ddd;';
     document.body.appendChild(panel);
   }
   panel.style.display = 'flex';
   panel.replaceChildren();
 
-  const items: Array<{ label: string; source: HTMLCanvasElement }> = [
-    { label: '顔テクスチャ (head)', source: gnmHead.headCanvas },
-  ];
-  if (gnmHead.hairLayerCanvas) items.push({ label: '髪レイヤー (shell)', source: gnmHead.hairLayerCanvas });
-  if (gnmHead.depthCanvas) items.push({ label: '深度 (depth)', source: gnmHead.depthCanvas });
-  if (gnmHead.normalCanvas) items.push({ label: '法線 (normal)', source: gnmHead.normalCanvas });
-
-  // 頭部まわりだけをクロップして表示する (全身写真だと頭部が小さすぎるため)
+  // 頭部まわりだけをクロップして表示する (全身写真だと頭部が小さすぎるため)。
+  // photoAspect=falseのレイヤーは元写真と縦横比が違うのでクロップを掛けない
   const crop = gnmHead.layerPreviewCrop;
   const previewHeight = Math.max(32, Math.round(LAYER_PREVIEW_BASE_HEIGHT * scale));
-  for (const item of items) {
+  for (const layer of gnmHead.previewLayers) {
     const fig = document.createElement('div');
     fig.style.cssText = 'display:flex;flex-direction:column;gap:2px;align-items:flex-start;';
     const thumb = document.createElement('canvas');
-    const sx = crop.x * item.source.width;
-    const sy = crop.y * item.source.height;
-    const sw = crop.w * item.source.width;
-    const sh = crop.h * item.source.height;
-    thumb.width = Math.max(1, Math.round((sw / sh) * previewHeight));
+    const src = layer.canvas;
+    const box = layer.photoAspect
+      ? { x: crop.x * src.width, y: crop.y * src.height, w: crop.w * src.width, h: crop.h * src.height }
+      : { x: 0, y: 0, w: src.width, h: src.height };
+    thumb.width = Math.max(1, Math.round((box.w / box.h) * previewHeight));
     thumb.height = previewHeight;
-    // 透明部分 (髪レイヤーの髪以外) が見えるようダークグレー下地を敷く
+    // 透明部分 (マスク外) が見えるようダークグレー下地を敷く
     thumb.style.cssText = 'background:#2a2a2a;border:1px solid #555;border-radius:3px;';
     const c = thumb.getContext('2d')!;
     c.imageSmoothingEnabled = true;
     c.imageSmoothingQuality = 'high';
-    c.drawImage(item.source, sx, sy, sw, sh, 0, 0, thumb.width, thumb.height);
+    c.drawImage(src, box.x, box.y, box.w, box.h, 0, 0, thumb.width, thumb.height);
 
     const caption = document.createElement('span');
-    caption.textContent = item.label;
+    caption.textContent = layer.label;
     caption.style.cssText = 'background:rgba(0,0,0,0.5);padding:1px 4px;border-radius:2px;';
     fig.append(thumb, caption);
     panel.appendChild(fig);
@@ -118,6 +116,15 @@ export function setupDebugGui(container: HTMLElement, params: Params, options: D
     .add(params, 'maskSource', { SelfieMulticlass: 'SELFIE_MULTICLASS', None: 'NONE' })
     .name('Mask Source')
     .onChange(() => options.onSourceChanged());
+  // マスクの作り方 (精細化・帽子の扱い) はソース選択と一体なのでここに置く
+  sourceFolder
+    .add(params, 'gnmMaskRefine')
+    .name('Mask Refine (GF)')
+    .onChange(() => options.onGnmParamsChanged());
+  sourceFolder
+    .add(params, 'gnmHairIncludeAccessories')
+    .name('髪に帽子を含む (class5)')
+    .onChange(() => options.onGnmParamsChanged());
   sourceFolder
     .add(params, 'depthSource', { 'DAViD': 'DAVID', 'ARPortraitDepth': 'ARPORTRAIT_DEPTH', 'None': 'NONE' })
     .name('Depth Source')
@@ -165,10 +172,6 @@ export function setupDebugGui(container: HTMLElement, params: Params, options: D
     .add(params, 'gnmHairRelief', 0, 2, 0.05)
     .name('Hair Relief (法線)')
     .onFinishChange(() => options.onGnmParamsChanged());
-  fitFolder
-    .add(params, 'gnmMaskRefine')
-    .name('Mask Refine (GF)')
-    .onChange(() => options.onGnmParamsChanged());
   fitFolder
     .add(params, 'gnmShowHair')
     .name('Show Hair')

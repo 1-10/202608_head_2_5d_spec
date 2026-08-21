@@ -255,6 +255,7 @@ async function acquireMeasuredData(
 ): Promise<MeasuredHeadData> {
   const measured: MeasuredHeadData = {
     segmentation: null,
+    segmentationRefined: null,
     depth: null,
     davidDepth: null,
     davidNormalCanvas: null,
@@ -269,17 +270,22 @@ async function acquireMeasuredData(
     console.warn('セグメンテーションに失敗。UVクランプ・髪シェルなしで表示します。', err);
   }
 
-  // 髪マスクをGuided Filterで写真エッジへ整合 (256px→768px)。
-  // 失敗しても生マスクで続行できるよう分離してtryする
+  // 髪系マスクをGuided Filterで写真エッジへ整合 (256px→768px)。
+  // 「髪のみ」と「髪+帽子」は独立に精細化する — 合成後に掛けると帽子の縁が
+  // 髪の縁と混ざる。失敗しても生マスクで続行できるよう分離してtryする
   if (measured.segmentation) {
     try {
       const t0 = performance.now();
-      const refined = refineMaskWithGuide(captured.canvas, measured.segmentation.hair);
-      measured.segmentation.hairRaw = measured.segmentation.hair;
-      measured.segmentation.hair = refined;
-      console.debug(`髪マスク精細化 (Guided Filter): ${(performance.now() - t0).toFixed(0)}ms`);
+      const seg = measured.segmentation;
+      measured.segmentationRefined = {
+        ...seg,
+        hair: refineMaskWithGuide(captured.canvas, seg.hair),
+        hairWithAccessories: refineMaskWithGuide(captured.canvas, seg.hairWithAccessories),
+      };
+      console.debug(`髪マスク精細化 (Guided Filter x2): ${(performance.now() - t0).toFixed(0)}ms`);
     } catch (err) {
       console.warn('髪マスクの精細化に失敗。生マスクで続行します。', err);
+      measured.segmentationRefined = null;
     }
   }
 

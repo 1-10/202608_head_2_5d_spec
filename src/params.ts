@@ -53,6 +53,9 @@ export interface Params {
   gnmHairRelief: number;
   // 髪マスクをGuided Filterで写真エッジへ整合させた精細版を使う (offで生の256px)
   gnmMaskRefine: boolean;
+  // 髪シェルのマスクに accessories (SelfieMulticlassクラス5 = 帽子・メガネ等) を含める。
+  // onで帽子が髪と同じシェル (実測Depth) に乗る。帽子が写っていなければ見た目は変わらない
+  gnmHairIncludeAccessories: boolean;
   gnmShowMouthInterior: boolean; // 口腔内 (口腔壁・歯・歯茎・舌) の表示切替
   // 舌の姿勢。0=GNMのneutral (口を閉じた姿勢なので舌は口蓋に張り付いている) /
   // 1=公式デモGIFの舌スライダー姿勢そのまま (tongue_mean=0.7 / tongue_000=-1.7)
@@ -123,6 +126,7 @@ export const DEFAULT_PARAMS: Params = {
   gnmShowHair: true,
   gnmHairRelief: 1.0,
   gnmMaskRefine: true,
+  gnmHairIncludeAccessories: true,
   gnmShowMouthInterior: true,
   gnmTonguePose: 1.0,
 

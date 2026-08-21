@@ -31,7 +31,9 @@ import type { Params } from './params';
  * DAVID系がnullのままDAVIDを選ぶと該当のGoogle系ソースへフォールバックする。
  */
 export interface MeasuredHeadData {
-  segmentation: SegmentationResult | null; // MediaPipe SelfieMulticlass
+  segmentation: SegmentationResult | null; // MediaPipe SelfieMulticlass (生 256px)
+  /** 髪系マスクをGuided Filterで写真エッジへ整合させた版 (768px)。失敗・未実行はnull */
+  segmentationRefined: SegmentationResult | null;
   depth: ScalarField | null; // ARPortraitDepth 相対Depth (0-1)
   // --- DAViD multi-task (1回の推論で同時取得。遅延ロード。商用クリーン) ---
   davidDepth: ScalarField | null; // 人物相対Depth
@@ -54,11 +56,14 @@ export interface GnmBuildContext {
 export function selectSegmentation(ctx: GnmBuildContext, params: Params): SegmentationResult | null {
   const m = ctx.measured;
   if (!m) return null;
-  const seg0 = params.maskSource === 'SELFIE_MULTICLASS' ? m.segmentation : null;
-  if (!seg0) return null;
-  let seg = seg0;
-  // Mask Refine off時はGuided Filter前の生マスクへ戻す (効果比較用)
-  if (!params.gnmMaskRefine && seg.hairRaw) seg = { ...seg, hair: seg.hairRaw };
+  if (params.maskSource !== 'SELFIE_MULTICLASS') return null;
+  // Mask Refine off時 (と精細化失敗時) は生マスクを使う
+  let seg = (params.gnmMaskRefine ? m.segmentationRefined : null) ?? m.segmentation;
+  if (!seg) return null;
+  // 髪シェル用マスクに帽子・メガネ (accessories) を含める。
+  // 下流 (髪シェル・alphaMap・レイヤー画像・均一髪色) はすべて seg.hair を見るので、
+  // ここで差し替えるだけで一貫して帽子込みになる
+  if (params.gnmHairIncludeAccessories) seg = { ...seg, hair: seg.hairWithAccessories };
   // 人物シルエットはDAViDソフト前景を優先 (境界精度が高い。意味分けはMediaPipeのまま)
   if (params.personSource === 'DAVID' && m.davidPerson) seg = { ...seg, person: m.davidPerson };
   return seg;
@@ -73,6 +78,17 @@ export function selectDepth(ctx: GnmBuildContext, params: Params): ScalarField |
   return null;
 }
 
+/** レイヤー分離プレビューの1枚。 */
+export interface PreviewLayer {
+  label: string;
+  canvas: HTMLCanvasElement;
+  /**
+   * キャンバスが元写真と同じアスペクト比か。falseなら頭部クロップを掛けても
+   * 縦横比が合わない (髪alphaMapは正方形へ引き伸ばしたものをGPUへ渡している)。
+   */
+  photoAspect: boolean;
+}
+
 export interface GnmHeadBuild {
   group: THREE.Group;
   headMesh: THREE.Mesh;
@@ -81,14 +97,18 @@ export interface GnmHeadBuild {
   mouthInteriorMesh: THREE.Mesh | null;
   /** ランドマーク重畳デバッグ表示 (既定で非表示。Show Landmarksで切替)。 */
   landmarkOverlay: THREE.Object3D;
-  /** headに投影している画像 (元写真)。デバッグ表示用 */
-  headCanvas: HTMLCanvasElement;
-  /** 髪シェルが描く髪だけの画像 (写真×髪マスクalpha)。セグメンテーション無しはnull */
-  hairLayerCanvas: HTMLCanvasElement | null;
-  /** 使用中のDepth場のグレースケール可視化 (白=手前)。Depth無しはnull */
-  depthCanvas: HTMLCanvasElement | null;
-  /** 使用中の法線マップ (RGBエンコード)。法線無しはnull */
-  normalCanvas: HTMLCanvasElement | null;
+  /**
+   * ランドマーク重畳の対応点を現在の表情姿勢へ引き直す。
+   * 表情が静止しているとtickExpressionが早期returnするため、
+   * 表示をonにした直後は明示的に呼ぶ必要がある。
+   */
+  refreshLandmarkOverlay(): void;
+  /**
+   * レイヤー分離プレビュー。元写真から最終出力までの加工工程を順に並べる。
+   * 「実際に使っているもの」だけを入れる — 表示用に作り直した近似は入れない
+   * (GPUへ渡しているテクスチャはそのキャンバス自体を渡す)。
+   */
+  previewLayers: PreviewLayer[];
   /** レイヤー画像プレビューの頭部クロップ (画像に対する割合 0-1, yは上から)。 */
   layerPreviewCrop: { x: number; y: number; w: number; h: number };
   fit: GnmFitResult;
@@ -191,6 +211,18 @@ export function buildGnmHead(
   const uniformHairColor = seg ? maskedAverageColor(sourceCanvas, seg.hair, 0.85) : null;
   const uniformSkinColor = seg ? maskedAverageColor(sourceCanvas, seg.faceSkin, 0.85) : null;
 
+  /**
+   * テクスチャを引いてよい領域 = 人物マスク (境界精度の高いDAViD前景が入りうる)。
+   *
+   * 服 (SelfieMulticlassクラス4) を除かないのは意図的。GNMの首〜肩は写真では実際に
+   * 服なので、服の色が「正しい」色。実測 (test_portrait.jpg): 服へ投影される頂点は
+   * 2,183個 (モデル空間 y -1.47〜-0.42)、除外すると広い面が顎の縁の画素へ潰れて
+   * 縦縞のスメアになり明確に悪化した (実装して比較した上で撤回した)。
+   * 背景が入る写真があるとしたら真因はpersonマスク側。
+   */
+  const textureMask = (u: number, v: number): number =>
+    seg ? sampleField(seg.person, u, v) : 1;
+
   for (let i = 0; i < n; i++) {
     const x = fit.vertices[i * 3];
     const y = fit.vertices[i * 3 + 1];
@@ -207,12 +239,14 @@ export function buildGnmHead(
     const vProjected = v;
     let maskAtUv = 1;
     if (seg) {
-      maskAtUv = sampleField(seg.person, u, v);
+      // maskAtUvは「投影先」の値のまま保つ (歩いた後の値にはしない) —
+      // 下のphotoWがこれを使い、シルエット外へ落ちた頂点の写真重みを落としている
+      maskAtUv = textureMask(u, v);
       if (maskAtUv < 0.5) {
         for (let s = 0; s < UV_CLAMP_STEPS; s++) {
           u += (centerU - u) * 0.03;
           v += (centerV - v) * 0.03;
-          if (sampleField(seg.person, u, v) >= 0.5) break;
+          if (textureMask(u, v) >= 0.5) break;
         }
       }
     }
@@ -357,6 +391,10 @@ export function buildGnmHead(
   // 舌: 公式の姿勢 (定数) + 顎の開きへの追随 (公式に無い連動)。gnmMouthInterior参照
   const tongueDriver = buildTongueDriver(model);
   const coeffs = new Float32Array(model.expressionCount);
+  // 表情適用後の頂点 (相似変換済み)。毎フレーム作り直さず使い回す
+  // (17k頂点 = 1フレームあたり200KBの割当を避ける)。初期値は無表情の最終頂点そのもの —
+  // 表情が静止したままオーバーレイをonにしたときもここから現在の姿勢が取れるように
+  const applied = new Float32Array(fit.vertices);
 
   const applyExpressionNow = (): void => {
     for (let i = 0; i < model.expressionCount; i++) {
@@ -368,7 +406,8 @@ export function buildGnmHead(
     }
     tongueDriver?.apply(coeffs, params.gnmTonguePose);
 
-    const out = new Float32Array(neutralUntransformed);
+    const out = applied;
+    out.set(neutralUntransformed);
     for (let i = 0; i < model.expressionCount; i++) {
       const c = coeffs[i];
       if (c === 0) continue;
@@ -382,7 +421,52 @@ export function buildGnmHead(
     (posAttr.array as Float32Array).set(out);
     posAttr.needsUpdate = true;
     mouthInterior?.update(out);
+    // 非表示のときは対応点の引き直しを丸ごと省く (既定でoffなので通常はここで抜ける)
+    if (landmarkOverlay.object.visible) landmarkOverlay.update(out);
   };
+
+  // --- レイヤー分離プレビュー: 元写真 → 最終出力の加工工程を順に並べる ---
+  // GPUへ渡しているテクスチャはそのキャンバス自体を入れる (作り直した近似は入れない)
+  const previewLayers: PreviewLayer[] = [{ label: '1 元写真', canvas: sourceCanvas, photoAspect: true }];
+  if (seg) {
+    previewLayers.push({
+      label: '2 人物マスク (person)',
+      canvas: buildMaskedPhotoLayer(sourceCanvas, (u, v) => sampleField(seg.person, u, v)),
+      photoAspect: true,
+    });
+  }
+  previewLayers.push({
+    label: '3 head参照画素 (UVクランプ後)',
+    canvas: buildSampledPixelsLayer(sourceCanvas, uvs, photoW),
+    photoAspect: true,
+  });
+  if (seg) {
+    previewLayers.push({
+      label: `4 髪マスク (帽子:${params.gnmHairIncludeAccessories ? 'on' : 'off'} / GF:${params.gnmMaskRefine ? 'on' : 'off'})`,
+      canvas: buildMaskedPhotoLayer(sourceCanvas, (u, v) => sampleField(seg.hair, u, v)),
+      photoAspect: true,
+    });
+  }
+  if (hair) {
+    previewLayers.push({
+      // 正方形1024pxへ引き伸ばしたものをGPUへ渡しているので、そのまま出す
+      label: '5 髪alphaMap (GPU実物1024²)',
+      canvas: hair.alphaTexture.image as HTMLCanvasElement,
+      photoAspect: false,
+    });
+  }
+  const depthCanvas = buildDepthPreviewCanvas(ctx, params);
+  if (depthCanvas) {
+    previewLayers.push({ label: '6 深度 (使用中)', canvas: depthCanvas, photoAspect: true });
+  }
+  if (normalTexture) {
+    previewLayers.push({
+      // Normal Strengthを適用した後の実物 (生のDAViD出力ではない)
+      label: `7 法線 (強度${params.gnmNormalStrength.toFixed(2)}適用後)`,
+      canvas: normalTexture.image as HTMLCanvasElement,
+      photoAspect: true,
+    });
+  }
 
   return {
     group,
@@ -390,10 +474,10 @@ export function buildGnmHead(
     hairMesh: hair?.mesh ?? null,
     mouthInteriorMesh: mouthInterior?.mesh ?? null,
     landmarkOverlay: landmarkOverlay.object,
-    headCanvas,
-    hairLayerCanvas: seg ? buildHairLayerCanvas(sourceCanvas, seg) : null,
-    depthCanvas: buildDepthPreviewCanvas(ctx, params),
-    normalCanvas: useNormal ? (ctx.measured?.davidNormalCanvas ?? null) : null,
+    refreshLandmarkOverlay() {
+      landmarkOverlay.update(applied);
+    },
+    previewLayers,
     layerPreviewCrop: computeHeadCropFraction(ctx),
     fit,
     setNeutralExpression() {
@@ -490,28 +574,76 @@ function computeHeadCropFraction(ctx: GnmBuildContext): { x: number; y: number; 
   return { x: x0, y: y0, w: Math.max(1e-6, x1 - x0), h: Math.max(1e-6, y1 - y0) };
 }
 
-const HAIR_LAYER_PREVIEW_MAX_DIM = 512;
+const LAYER_PREVIEW_MAX_DIM = 512;
 
-/** 写真×髪マスクalphaの「髪だけの画像」を作る (レイヤー分離のデバッグ表示用)。 */
-function buildHairLayerCanvas(
-  sourceCanvas: HTMLCanvasElement,
-  seg: SegmentationResult,
-): HTMLCanvasElement {
-  const scale = Math.min(1, HAIR_LAYER_PREVIEW_MAX_DIM / Math.max(sourceCanvas.width, sourceCanvas.height));
-  const w = Math.max(2, Math.round(sourceCanvas.width * scale));
-  const h = Math.max(2, Math.round(sourceCanvas.height * scale));
+/** 元写真と同じアスペクト比の作業キャンバスを作る (長辺512上限)。 */
+function previewCanvas(sourceCanvas: HTMLCanvasElement): HTMLCanvasElement {
+  const scale = Math.min(1, LAYER_PREVIEW_MAX_DIM / Math.max(sourceCanvas.width, sourceCanvas.height));
   const canvas = document.createElement('canvas');
-  canvas.width = w;
-  canvas.height = h;
+  canvas.width = Math.max(2, Math.round(sourceCanvas.width * scale));
+  canvas.height = Math.max(2, Math.round(sourceCanvas.height * scale));
+  return canvas;
+}
+
+/**
+ * 写真を alpha(u,v) でマスクした画像を作る。
+ * 「この工程が写真のどこを使っているか」を1枚で見せるための表現。
+ */
+function buildMaskedPhotoLayer(
+  sourceCanvas: HTMLCanvasElement,
+  alpha: (u: number, v: number) => number,
+): HTMLCanvasElement {
+  const canvas = previewCanvas(sourceCanvas);
+  const { width: w, height: h } = canvas;
   const c = canvas.getContext('2d')!;
   c.drawImage(sourceCanvas, 0, 0, w, h);
   const img = c.getImageData(0, 0, w, h);
   for (let y = 0; y < h; y++) {
     const v = 1 - (y + 0.5) / h;
     for (let x = 0; x < w; x++) {
-      const u = (x + 0.5) / w;
-      img.data[(y * w + x) * 4 + 3] = Math.round(sampleField(seg.hair, u, v) * 255);
+      const a = alpha((x + 0.5) / w, v);
+      img.data[(y * w + x) * 4 + 3] = Math.round(Math.min(1, Math.max(0, a)) * 255);
     }
+  }
+  c.putImageData(img, 0, 0);
+  return canvas;
+}
+
+/**
+ * headメッシュが実際に読んだ写真画素の分布。クランプ済みUVを photoW 重みで
+ * 3x3スプラットして密度にする。
+ * シルエット外から歩かされた頂点は縁の同じ画素へ集まるので、
+ * 「引き伸ばし (スメア) が起きている場所」が明るい線として見える。
+ */
+function buildSampledPixelsLayer(
+  sourceCanvas: HTMLCanvasElement,
+  uvs: Float32Array,
+  photoW: Float32Array,
+): HTMLCanvasElement {
+  const canvas = previewCanvas(sourceCanvas);
+  const { width: w, height: h } = canvas;
+  const acc = new Float32Array(w * h);
+  for (let i = 0; i < photoW.length; i++) {
+    const weight = photoW[i];
+    if (weight <= 0.01) continue;
+    const cx = Math.round(uvs[i * 2] * w - 0.5);
+    const cy = Math.round((1 - uvs[i * 2 + 1]) * h - 0.5);
+    for (let dy = -1; dy <= 1; dy++) {
+      const y = cy + dy;
+      if (y < 0 || y >= h) continue;
+      for (let dx = -1; dx <= 1; dx++) {
+        const x = cx + dx;
+        if (x < 0 || x >= w) continue;
+        acc[y * w + x] += weight;
+      }
+    }
+  }
+  const c = canvas.getContext('2d')!;
+  c.drawImage(sourceCanvas, 0, 0, w, h);
+  const img = c.getImageData(0, 0, w, h);
+  for (let i = 0; i < acc.length; i++) {
+    // 1頂点でもほぼ不透明、重なるほど飽和。密度の絶対値に依存しない形にする
+    img.data[i * 4 + 3] = Math.round((1 - Math.exp(-acc[i] * 1.5)) * 255);
   }
   c.putImageData(img, 0, 0);
   return canvas;
@@ -687,66 +819,85 @@ function computeMouthInteriorWeights(
 }
 
 /**
- * ランドマーク重畳デバッグ表示を作る。
- * 色点 = 写真のランドマーク位置 (残差ワープの目標。唇=赤 / 目=シアン / その他=黄)、
- * 白線 = フィット+ワープ後のGNM表面対応点から写真位置への残差ベクトル。
- * 開口シームが赤点 (内唇) から外れていれば、フィット/ワープの残差が
- * 「開口位置ズレ」の原因だと切り分けられる。
- * zはワープ後表面のzを使う (透視投影の視差で写真とXY比較が狂わないように)。
+ * ランドマーク重畳デバッグ表示を作る。3種を重ねる:
+ * - 色点 (大)  = 写真のランドマーク位置 (残差ワープの目標。唇=赤 / 目=シアン / その他=黄)。
+ *                写真から測った固定値なので表情では動かない
+ * - 暗点 (小)  = 現在の表情を適用したGNM表面の対応点。表情に追従して動く
+ * - 白線       = 暗点→色点 の残差ベクトル
+ *
+ * 表情アニメーション中は「表情が対応点をどこへ運んだか」と「写真の目標」の差が
+ * そのまま線の長さになる。無表情で線が短く、開口時に唇の線が伸びるなら、
+ * 伸びた分が表情基底では張れていない差分。
+ * zは常に現在の表面zを使う (透視投影の視差で写真とXY比較が狂わないように)。
  */
+interface LandmarkOverlayBuild {
+  object: THREE.Object3D;
+  /** 表情適用後の頂点配列 (相似変換済み) から対応点を引き直す。 */
+  update(vertices: Float32Array): void;
+  dispose(): void;
+}
+
 function buildLandmarkOverlay(
   model: GnmModel,
   fit: GnmFitResult,
   landmarks: NormalizedFaceLandmark[],
-): { object: THREE.Object3D; dispose(): void } {
+): LandmarkOverlayBuild {
   const useDense = model.denseCount > 0;
   const corrCount = useDense ? model.denseCount : MEDIAPIPE_IBUG68.length;
   const corrIdx = useDense ? model.denseTriIndices : model.landmarkIndices;
   const corrBary = useDense ? model.denseBaryWeights : model.landmarkWeights;
   const corrMp = (k: number) => (useDense ? model.denseMpIndices[k] : MEDIAPIPE_IBUG68[k]);
 
-  const points: number[] = [];
-  const colors: number[] = [];
-  const lines: number[] = [];
-  const zLift = 0.01; // 表面と重ならないよう僅かに手前へ
-
+  // 対応点を持つものだけを詰め直す (毎フレーム参照するので事前に平坦化しておく)
+  const tri: number[] = [];
+  const bary: number[] = [];
+  const photoXy: number[] = [];
+  const photoColors: number[] = [];
+  const meshColors: number[] = [];
   for (let k = 0; k < corrCount; k++) {
     const mp = corrMp(k);
     const lm = landmarks[mp];
     if (!lm) continue;
-    let sx = 0;
-    let sy = 0;
-    let sz = 0;
     for (let j = 0; j < 3; j++) {
-      const vi = corrIdx[k * 3 + j];
-      const bw = corrBary[k * 3 + j];
-      sx += fit.vertices[vi * 3] * bw;
-      sy += fit.vertices[vi * 3 + 1] * bw;
-      sz += fit.vertices[vi * 3 + 2] * bw;
+      tri.push(corrIdx[k * 3 + j]);
+      bary.push(corrBary[k * 3 + j]);
     }
-    const z = sz + zLift;
-    points.push(lm.x, lm.y, z);
-    if (MP_LIPS.has(mp)) colors.push(1, 0.15, 0.3);
-    else if (MP_EYES.has(mp)) colors.push(0.15, 0.9, 1);
-    else colors.push(1, 0.85, 0.2);
-    lines.push(sx, sy, z, lm.x, lm.y, z);
+    photoXy.push(lm.x, lm.y);
+    const c = MP_LIPS.has(mp) ? [1, 0.15, 0.3] : MP_EYES.has(mp) ? [0.15, 0.9, 1] : [1, 0.85, 0.2];
+    photoColors.push(...c);
+    // GNM側は同じ色相を暗くして「目標と現在」が対で読めるようにする
+    meshColors.push(c[0] * 0.45, c[1] * 0.45, c[2] * 0.45);
   }
+  const count = photoXy.length / 2;
+  const triIdx = Int32Array.from(tri);
+  const baryW = Float32Array.from(bary);
+  const photo = Float32Array.from(photoXy);
 
-  const pointsGeo = new THREE.BufferGeometry();
-  pointsGeo.setAttribute('position', new THREE.Float32BufferAttribute(points, 3));
-  pointsGeo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
-  const pointsMat = new THREE.PointsMaterial({
-    size: 0.012,
-    vertexColors: true,
-    sizeAttenuation: true,
-    depthTest: false,
-    transparent: true,
-  });
-  const pointsObj = new THREE.Points(pointsGeo, pointsMat);
-  pointsObj.renderOrder = 10;
+  const zLift = 0.01; // 表面と重ならないよう僅かに手前へ
+  const photoPos = new Float32Array(count * 3);
+  const meshPos = new Float32Array(count * 3);
+  const linePos = new Float32Array(count * 6);
+
+  const makePoints = (pos: Float32Array, colors: number[], size: number): THREE.Points => {
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    g.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+    const m = new THREE.PointsMaterial({
+      size,
+      vertexColors: true,
+      sizeAttenuation: true,
+      depthTest: false,
+      transparent: true,
+    });
+    return new THREE.Points(g, m);
+  };
+  const photoObj = makePoints(photoPos, photoColors, 0.012);
+  photoObj.renderOrder = 11;
+  const meshObj = makePoints(meshPos, meshColors, 0.008);
+  meshObj.renderOrder = 10;
 
   const linesGeo = new THREE.BufferGeometry();
-  linesGeo.setAttribute('position', new THREE.Float32BufferAttribute(lines, 3));
+  linesGeo.setAttribute('position', new THREE.BufferAttribute(linePos, 3));
   const linesMat = new THREE.LineBasicMaterial({
     color: 0xffffff,
     depthTest: false,
@@ -757,12 +908,50 @@ function buildLandmarkOverlay(
   linesObj.renderOrder = 9;
 
   const object = new THREE.Group();
-  object.add(linesObj, pointsObj);
+  object.add(linesObj, meshObj, photoObj);
+
+  const update = (verts: Float32Array): void => {
+    for (let k = 0; k < count; k++) {
+      let sx = 0;
+      let sy = 0;
+      let sz = 0;
+      for (let j = 0; j < 3; j++) {
+        const vi = triIdx[k * 3 + j] * 3;
+        const bw = baryW[k * 3 + j];
+        sx += verts[vi] * bw;
+        sy += verts[vi + 1] * bw;
+        sz += verts[vi + 2] * bw;
+      }
+      const z = sz + zLift;
+      const px = photo[k * 2];
+      const py = photo[k * 2 + 1];
+      meshPos[k * 3] = sx;
+      meshPos[k * 3 + 1] = sy;
+      meshPos[k * 3 + 2] = z;
+      photoPos[k * 3] = px;
+      photoPos[k * 3 + 1] = py;
+      photoPos[k * 3 + 2] = z;
+      linePos[k * 6] = sx;
+      linePos[k * 6 + 1] = sy;
+      linePos[k * 6 + 2] = z;
+      linePos[k * 6 + 3] = px;
+      linePos[k * 6 + 4] = py;
+      linePos[k * 6 + 5] = z;
+    }
+    (photoObj.geometry.getAttribute('position') as THREE.BufferAttribute).needsUpdate = true;
+    (meshObj.geometry.getAttribute('position') as THREE.BufferAttribute).needsUpdate = true;
+    (linesGeo.getAttribute('position') as THREE.BufferAttribute).needsUpdate = true;
+  };
+  update(fit.vertices); // 無表情の初期姿勢
+
   return {
     object,
+    update,
     dispose() {
-      pointsGeo.dispose();
-      pointsMat.dispose();
+      photoObj.geometry.dispose();
+      (photoObj.material as THREE.Material).dispose();
+      meshObj.geometry.dispose();
+      (meshObj.material as THREE.Material).dispose();
       linesGeo.dispose();
       linesMat.dispose();
     },
