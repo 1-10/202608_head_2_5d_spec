@@ -24,7 +24,8 @@
 - 口腔内 (口腔壁・歯・歯茎・舌): GNM Head同梱のジオメトリをそのまま別メッシュで描く。
   色・マテリアル・法線の扱いはGNM公式の可視化コード (`visualization/vertex_colors.py`,
   `visualization/gnm_pyrender.py`) からの移植で、写真から取るのは基準色 (肌の平均色) だけ。
-  舌の姿勢は公式デモGIFのスライダー値そのまま (`Tongue Pose`)
+  舌の姿勢は公式デモGIFのスライダー値そのまま (`Tongue Pose`)。
+  開口時に舌を退かせる連動 (`Tongue Follow`) だけは公式に対応する機構が無い追加分
 - 実測髪シェル: 実測髪マスク+実測Depthの前面シェルをGNMの手前に重ねる。
   シルエット・髪マスク・Depthの供給源はGUIで切替できる:
   - `MEASURED`(既定): MediaPipe Image Segmenter (SelfieMulticlass)による実測シルエット/髪マスク +

@@ -54,6 +54,9 @@ export interface Params {
   // 舌の姿勢。0=GNMのneutral (口を閉じた姿勢なので舌は口蓋に張り付いている) /
   // 1=公式デモGIFの舌スライダー姿勢そのまま (tongue_mean=0.7 / tongue_000=-1.7)
   gnmTonguePose: number;
+  // 顎の開きに追随して舌をさらに退かせる量。**公式に対応する機構が無い追加分**。
+  // 0=公式どおり (開口時に舌が開口部に残る) / 1=公式姿勢1回ぶんを開き量に比例して上乗せ
+  gnmTongueFollow: number;
 
   // --- GNM 表情 ---
   gnmExprIntensity: number; // 感情表情の強さ (プリセット係数への乗数)
@@ -121,6 +124,7 @@ export const DEFAULT_PARAMS: Params = {
   gnmMaskRefine: true,
   gnmShowMouthInterior: true,
   gnmTonguePose: 1.0,
+  gnmTongueFollow: 0.6,
 
   gnmExprIntensity: 1.0,
   gnmEmotion: 'AUTO',

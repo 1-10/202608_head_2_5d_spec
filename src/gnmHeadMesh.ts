@@ -21,7 +21,7 @@ import {
   type SimilarityTransform,
 } from './gnmHead';
 import { GNM_EXPRESSION_PRESETS } from './gnmExpressions';
-import { applyOfficialTonguePose, buildMouthInterior } from './gnmMouthInterior';
+import { buildMouthInterior, buildTongueDriver } from './gnmMouthInterior';
 import { MP_EYES, MP_LIPS, applyResidualWarp, buildEyeballContainment, fillNostrils } from './gnmRefine';
 import { applyFlatNormals, buildGridIndices, smoothstep } from './meshUtils';
 import { rasterizeMaskCanvas, type SegmentationResult } from './personSegmentation';
@@ -348,6 +348,8 @@ export function buildGnmHead(
     if (/^(left|right)_eye/.test(model.expressionNames[i] ?? '')) isEyeExpr[i] = 1;
   }
 
+  // 舌: 公式の姿勢 (定数) + 顎の開きへの追随 (公式に無い連動)。gnmMouthInterior参照
+  const tongueDriver = buildTongueDriver(model, GNM_EXPRESSION_PRESETS.surprise);
   const coeffs = new Float32Array(model.expressionCount);
 
   const applyExpressionNow = (): void => {
@@ -358,7 +360,7 @@ export function buildGnmHead(
         ? exprCurrent[i] * (1 - blinkNow) + blinkVec[i] * blinkNow
         : exprCurrent[i] + blinkVec[i] * blinkNow;
     }
-    applyOfficialTonguePose(model, coeffs, params.gnmTonguePose);
+    tongueDriver?.apply(coeffs, params.gnmTonguePose, params.gnmTongueFollow);
 
     const out = new Float32Array(neutralUntransformed);
     for (let i = 0; i < model.expressionCount; i++) {

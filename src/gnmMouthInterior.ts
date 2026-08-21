@@ -175,14 +175,82 @@ export function buildMouthInterior(
   };
 }
 
+// 舌成分の係数上限。公式デモGUI (gnm_head_demo.ipynb) のスライダー範囲と同じ。
+// ここを超えると学習分布の外への外挿になり、舌先が反転して尖る (実測で確認済み)
+const TONGUE_COEFF_LIMIT = 3;
+
+export interface TongueDriver {
+  /**
+   * 舌の表情係数を書き込む (in-place)。
+   * pose: 公式デモの姿勢の振幅 (0=GNMのneutral / 1=公式デモそのまま)。表情に依らない定数。
+   * follow: 顎の開きに追随して追加で退かせる量。**公式に無い連動** (下記)。
+   */
+  apply(coeffs: Float32Array, pose: number, follow: number): void;
+}
+
 /**
- * 舌の表情係数へ公式デモの姿勢を書き込む (in-place)。
- * amount: 0=GNMのneutral姿勢そのまま / 1=公式デモのスライダー姿勢そのまま。
+ * 舌の姿勢を書き込むドライバを作る。
+ *
+ * `pose` は公式そのまま (OFFICIAL_TONGUE_POSE)。
+ *
+ * `follow` はこちら側の追加で、**公式には対応する機構が無い**。公式デモは舌を手動
+ * スライダーで動かすだけで顎とは連動せず、公式ExpressionSampler が出す舌成分の係数も
+ * 全プリセットで実質0 (実測 |c|<=0.06)。一方 GNM の neutral は口を閉じた姿勢なので
+ * 舌は口蓋に張り付いており、`lower_face_region` の副作用で舌が顎に追随する量は
+ * 下顎の約65%しかない (実測: surpriseで下顎-5.37mm に対し舌-3.5mm)。そのため口を
+ * 大きく開けると舌が開口部に残る。
+ *
+ * 方向は自前で推定せず OFFICIAL_TONGUE_POSE をそのまま流用し、量だけ顎の開き量に
+ * 比例させる。顎の開き量は「舌以外の成分が舌を下げている量」で測り、公式 surprise
+ * プリセットの値を1.0の基準に取る (基準も実測から取る)。
  */
-export function applyOfficialTonguePose(model: GnmModel, coeffs: Float32Array, amount: number): void {
-  if (amount === 0) return;
+export function buildTongueDriver(
+  model: GnmModel,
+  openReferencePreset: readonly number[] | undefined,
+): TongueDriver | null {
+  const n = model.vertexCount;
+  const tongue: number[] = [];
+  for (let i = 0; i < n; i++) if (model.mouthPartId[i] === PART_TONGUE) tongue.push(i);
+  const comps: number[] = [];
   for (let i = 0; i < model.expressionCount; i++) {
-    const v = OFFICIAL_TONGUE_POSE[model.expressionNames[i] ?? ''];
-    if (v) coeffs[i] += v * amount;
+    if ((model.expressionNames[i] ?? '').startsWith('tongue')) comps.push(i);
   }
+  if (tongue.length === 0 || comps.length === 0) return null;
+  const dir = comps.map((c) => OFFICIAL_TONGUE_POSE[model.expressionNames[c] ?? ''] ?? 0);
+  if (!dir.some((v) => v !== 0)) return null;
+
+  // 成分ごとの「舌頂点の平均y変位」(係数1あたり、モデル空間)。顎の開き量の実測に使う
+  const dyPerComp = new Float32Array(model.expressionCount);
+  for (let c = 0; c < model.expressionCount; c++) {
+    const base = c * n * 3;
+    let sum = 0;
+    for (const v of tongue) sum += model.expressionBasisQ[base + v * 3 + 1];
+    dyPerComp[c] = (sum / tongue.length) * (model.expressionScales[c] / 32767);
+  }
+  const isTongue = new Uint8Array(model.expressionCount);
+  for (const c of comps) isTongue[c] = 1;
+  const jawDrop = (coeffs: ArrayLike<number>): number => {
+    let drop = 0;
+    for (let c = 0; c < model.expressionCount; c++) {
+      if (!isTongue[c]) drop -= (coeffs[c] ?? 0) * dyPerComp[c];
+    }
+    return drop;
+  };
+  const reference = openReferencePreset ? jawDrop(openReferencePreset) : 0;
+
+  return {
+    apply(coeffs: Float32Array, pose: number, follow: number): void {
+      let amount = pose;
+      if (follow !== 0 && reference > 1e-9) {
+        // 開き量は基準の2倍で打ち切る (Intensityを上げても係数が伸び続けないように)
+        amount += follow * Math.min(2, Math.max(0, jawDrop(coeffs) / reference));
+      }
+      if (amount === 0) return;
+      for (let k = 0; k < comps.length; k++) {
+        const c = comps[k];
+        const v = coeffs[c] + amount * dir[k];
+        coeffs[c] = Math.min(TONGUE_COEFF_LIMIT, Math.max(-TONGUE_COEFF_LIMIT, v));
+      }
+    },
+  };
 }

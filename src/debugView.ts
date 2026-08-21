@@ -159,6 +159,10 @@ export function setupDebugGui(container: HTMLElement, params: Params, options: D
     .add(params, 'gnmTonguePose', 0, 1, 0.05)
     .name('Tongue Pose (公式)')
     .onFinishChange(() => options.onGnmParamsChanged());
+  fitFolder
+    .add(params, 'gnmTongueFollow', 0, 1.5, 0.05)
+    .name('Tongue Follow (非公式)')
+    .onFinishChange(() => options.onGnmParamsChanged());
   fitFolder.open();
 
   // プリセットは公式ExpressionSampler由来 (gnmExpressions.ts)
