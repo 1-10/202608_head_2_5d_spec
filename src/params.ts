@@ -18,8 +18,9 @@ export type PersonSource = 'DAVID' | 'SELFIE_MULTICLASS';
 // 回転時の照明応答を与える (写真の陰影 + 実測法線のシェーディング)。NONE=平坦(+Z)
 export type NormalSource = 'DAVID' | 'NONE';
 
-// GNMの表情選択。'AUTO'=自動巡回 / 'NEUTRAL'=無表情 / 'MANUAL'=パーツ別スライダー、
-// それ以外は「main.ts の日本語ラベル感情キー」または「公式 Expression クラス名」。
+// GNMの表情選択。'AUTO'=感情を自動巡回 / 'RANDOM'=公式randomize_expressions /
+// 'NEUTRAL'=無表情、それ以外は「main.ts の日本語ラベル感情キー」または
+// 「公式 Expression クラス名」。
 // 有効なクラス名は表情サンプラー (gnm_expression_decoder.bin の classNames) が正本なので
 // ここでは列挙しない (列挙すると公式側が増えたとき黙って古くなる)
 export type GnmEmotion = string;
@@ -56,9 +57,6 @@ export interface Params {
   // 舌の姿勢。0=GNMのneutral (口を閉じた姿勢なので舌は口蓋に張り付いている) /
   // 1=公式デモGIFの舌スライダー姿勢そのまま (tongue_mean=0.7 / tongue_000=-1.7)
   gnmTonguePose: number;
-  // 顎の開きに追随して舌をさらに退かせる量。**公式に対応する機構が無い追加分**。
-  // 0=公式どおり (開口時に舌が開口部に残る) / 1=公式姿勢1回ぶんを開き量に比例して上乗せ
-  gnmTongueFollow: number;
 
   // --- GNM 表情 ---
   gnmExprIntensity: number; // 感情表情の強さ (プリセット係数への乗数)
@@ -66,15 +64,6 @@ export interface Params {
   // NEUTRAL=無表情、MANUAL=下のパーツ別スライダーで合成、それ以外=その感情で固定。
   // プリセットはGNM公式ExpressionSampler由来
   gnmEmotion: GnmEmotion;
-  // --- パーツ別スライダー (Emotion=MANUAL時に有効) ---
-  // 公式ExpressionSamplerのクラスを領域 (目成分/下顔面成分) で分離した強度
-  gnmMouthOpen: number; // SURPRISEの下顔面 (顎開き)
-  gnmSmile: number; // SMILE_WIDEの下顔面
-  gnmPucker: number; // PUCKERの下顔面 (口すぼめ)
-  gnmCornersDown: number; // CORNERS_DOWNの下顔面 (口角下げ)
-  gnmEyesClose: number; // WINK合成の目領域 (閉眼)
-  gnmEyesWide: number; // SURPRISEの目領域 (見開き)
-  gnmSquint: number; // SQUINTの目領域 (細目)
 
   // --- アニメーション (Blink) ---
   blinkEnabled: boolean;
@@ -126,17 +115,9 @@ export const DEFAULT_PARAMS: Params = {
   gnmMaskRefine: true,
   gnmShowMouthInterior: true,
   gnmTonguePose: 1.0,
-  gnmTongueFollow: 0.6,
 
   gnmExprIntensity: 1.0,
   gnmEmotion: 'AUTO',
-  gnmMouthOpen: 0,
-  gnmSmile: 0,
-  gnmPucker: 0,
-  gnmCornersDown: 0,
-  gnmEyesClose: 0,
-  gnmEyesWide: 0,
-  gnmSquint: 0,
 
   blinkEnabled: true,
   blinkPeriodMinSec: 3,

@@ -111,8 +111,6 @@ const UV_CLAMP_STEPS = 80; // シルエット外UVを頭部中心へ歩かせる
 export interface GnmExpressionVectors {
   /** まばたき (左右ウインクの合成の目領域だけ)。長さ = expressionCount */
   blink: number[];
-  /** 舌の顎追随の基準にする「大きく開いた口」の表情。長さ = expressionCount */
-  jawOpenReference: number[];
 }
 
 export function buildGnmHead(
@@ -357,7 +355,7 @@ export function buildGnmHead(
   }
 
   // 舌: 公式の姿勢 (定数) + 顎の開きへの追随 (公式に無い連動)。gnmMouthInterior参照
-  const tongueDriver = buildTongueDriver(model, vectors.jawOpenReference);
+  const tongueDriver = buildTongueDriver(model);
   const coeffs = new Float32Array(model.expressionCount);
 
   const applyExpressionNow = (): void => {
@@ -368,7 +366,7 @@ export function buildGnmHead(
         ? exprCurrent[i] * (1 - blinkNow) + blinkVec[i] * blinkNow
         : exprCurrent[i] + blinkVec[i] * blinkNow;
     }
-    tongueDriver?.apply(coeffs, params.gnmTonguePose, params.gnmTongueFollow);
+    tongueDriver?.apply(coeffs, params.gnmTonguePose);
 
     const out = new Float32Array(neutralUntransformed);
     for (let i = 0; i < model.expressionCount; i++) {

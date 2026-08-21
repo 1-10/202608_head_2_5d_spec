@@ -139,21 +139,6 @@ const GNM_EMOTION_CLASSES: Record<string, string> = {
   anger: 'snarl',
   surprise: 'surprise',
 };
-/**
- * 表情成分ごとの領域ラベルを成分名から導出する (アセットの並びに依存しない)。
- * 'tongue' は舌 (公式デモGUIと同じ tongue_mean + tongue_000..002)。
- */
-type ExprRegion = 'eyes' | 'lower' | 'tongue' | 'other';
-let exprRegionsCache: ExprRegion[] | null = null;
-function expressionRegions(model: GnmModel | null): ExprRegion[] {
-  if (exprRegionsCache) return exprRegionsCache;
-  const names = model?.expressionNames ?? [];
-  exprRegionsCache = names.map((n) =>
-    /^(left|right)_eye/.test(n) ? 'eyes' : n.startsWith('lower_face') ? 'lower' : n.startsWith('tongue') ? 'tongue' : 'other',
-  );
-  return exprRegionsCache;
-}
-
 let gnmExprNextChangeAt = 0; // 次回遷移時刻
 let gnmAutoTarget: number[] | null = null; // 現在の目標表情 (null=ニュートラル区間)
 let gnmLastEmotion = ''; // 直前の感情 (同じ感情の連続を避ける)
@@ -174,21 +159,11 @@ function sampleClass(name: string, latent: Float32Array | null = null): number[]
   return exprSampler.toModelCoeffs(exprSampler.sample(ci, latent), gnmModel);
 }
 
-// Emotion=MANUAL用のパーツ別スライダー定義。公式プリセットを領域で分離して合成する。
-// 領域の判定は成分名 (model.expressionNames) から導出する — 成分数や並びを
-// 変えても嘘にならないようにするため (位置決め打ちは舌成分の追加で壊れた)
-const GNM_MANUAL_CONTROLS: { param: keyof Params; classes: string[]; region: 'eyes' | 'lower' }[] = [
-  { param: 'gnmMouthOpen', classes: ['surprise'], region: 'lower' },
-  { param: 'gnmSmile', classes: ['smile_wide'], region: 'lower' },
-  { param: 'gnmPucker', classes: ['pucker'], region: 'lower' },
-  { param: 'gnmCornersDown', classes: ['corners_down'], region: 'lower' },
-  // 閉眼は片目ウインクの左右合成 (公式に「両目を閉じる」クラスは無い)
-  { param: 'gnmEyesClose', classes: ['wink_left', 'wink_right'], region: 'eyes' },
-  { param: 'gnmEyesWide', classes: ['surprise'], region: 'eyes' },
-  { param: 'gnmSquint', classes: ['squint'], region: 'eyes' },
-];
-
-/** クラスの代表表情を足し合わせる (キャッシュ付き)。 */
+/**
+ * クラスの代表表情を足し合わせる (キャッシュ付き)。
+ * まばたきベクトルの生成にだけ使う — 出力ベクトルの線形和は公式の blend_expressions
+ * とは別物なので、表情の合成には使わない (合成は公式blendを使う)。
+ */
 const sampleSumCache = new Map<string, number[] | null>();
 function sampleClassSum(classes: string[]): number[] | null {
   const key = classes.join('+');
@@ -388,8 +363,6 @@ async function rebuildGnmHead(): Promise<void> {
 
     const build = buildGnmHead(gnmModel, s.ctx, s.sourceCanvas, s.texture, params, {
       blink: buildBlinkVector(gnmModel),
-      // 舌の顎追随の基準となる「大きく開いた口」。公式surpriseクラスの代表表情
-      jawOpenReference: sampleClass('surprise') ?? [],
     });
     build.group.rotation.order = 'YXZ'; // yaw→pitchの順で直感的に合成されるよう明示する
     s.gnmHead = build;
@@ -542,38 +515,31 @@ function animate(): void {
 
     // GNM表情: 感情プリセットを目標に設定し、tickExpressionの指数遷移で滑らかに繋ぐ
     let preset: number[] | null = null;
-    if (params.gnmEmotion === 'AUTO') {
+    if (params.gnmEmotion === 'AUTO' || params.gnmEmotion === 'RANDOM') {
       if (now >= gnmExprNextChangeAt) {
         if (gnmAutoTarget) {
           // 感情の保持が終わったら短いニュートラル区間を挟む
           gnmAutoTarget = null;
           gnmExprNextChangeAt = now + 800 + Math.random() * 1200;
         } else {
-          const emotions = Object.keys(GNM_EMOTION_CLASSES).filter((e) => e !== gnmLastEmotion);
-          const emotion = emotions[Math.floor(Math.random() * emotions.length)];
-          gnmLastEmotion = emotion;
-          // 公式 sample_expression: 潜在zをランダムに引いて同じ感情でも毎回違う表情にする
-          const latent = exprSampler?.randomLatent(Math.random) ?? null;
-          gnmAutoTarget = sampleClass(GNM_EMOTION_CLASSES[emotion], latent);
+          if (params.gnmEmotion === 'RANDOM') {
+            // 公式 randomize_expressions: 2〜3クラスをランダムに選んで公式blendする
+            gnmAutoTarget =
+              exprSampler && gnmModel
+                ? exprSampler.toModelCoeffs(exprSampler.randomize(Math.random), gnmModel)
+                : null;
+          } else {
+            const emotions = Object.keys(GNM_EMOTION_CLASSES).filter((e) => e !== gnmLastEmotion);
+            const emotion = emotions[Math.floor(Math.random() * emotions.length)];
+            gnmLastEmotion = emotion;
+            // 公式 sample_expression: 潜在zを引き直して同じ感情でも毎回違う表情にする
+            const latent = exprSampler?.randomLatent(Math.random) ?? null;
+            gnmAutoTarget = sampleClass(GNM_EMOTION_CLASSES[emotion], latent);
+          }
           gnmExprNextChangeAt = now + 2000 + Math.random() * 2500;
         }
       }
       preset = gnmAutoTarget;
-    } else if (params.gnmEmotion === 'MANUAL') {
-      // パーツ別スライダーの合成 (公式プリセットの目/下顔面領域を強度倍して加算)
-      const region = expressionRegions(gnmModel);
-      let vec: number[] | null = null;
-      for (const c of GNM_MANUAL_CONTROLS) {
-        const amount = params[c.param] as number;
-        if (amount === 0) continue;
-        const p = sampleClassSum(c.classes);
-        if (!p) continue;
-        vec ??= new Array<number>(p.length).fill(0);
-        for (let i = 0; i < p.length; i++) {
-          if (region[i] === c.region) vec[i] += p[i] * amount;
-        }
-      }
-      preset = vec;
     } else if (params.gnmEmotion !== 'NEUTRAL') {
       // 感情固定: 日本語ラベルなら対応クラス、それ以外は公式クラス名そのもの
       preset = sampleClassSum([GNM_EMOTION_CLASSES[params.gnmEmotion] ?? params.gnmEmotion]);

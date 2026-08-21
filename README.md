@@ -24,8 +24,7 @@
 - 口腔内 (口腔壁・歯・歯茎・舌): GNM Head同梱のジオメトリをそのまま別メッシュで描く。
   色・マテリアル・法線の扱いはGNM公式の可視化コード (`visualization/vertex_colors.py`,
   `visualization/gnm_pyrender.py`) からの移植で、写真から取るのは基準色 (肌の平均色) だけ。
-  舌の姿勢は公式デモGIFのスライダー値そのまま (`Tongue Pose`)。
-  開口時に舌を退かせる連動 (`Tongue Follow`) だけは公式に対応する機構が無い追加分
+  舌の姿勢は公式デモGIFのスライダー値そのまま (`Tongue Pose`)
 - 実測髪シェル: 実測髪マスク+実測Depthの前面シェルをGNMの手前に重ねる。
   シルエット・髪マスク・Depthの供給源はGUIで切替できる:
   - `MEASURED`(既定): MediaPipe Image Segmenter (SelfieMulticlass)による実測シルエット/髪マスク +
@@ -37,8 +36,8 @@
   - 公式のCVAEデコーダ (`semantic_sampler.py`) をTypeScriptへ移植し、`sample_expression` /
     `blend_expressions` / `randomize_expressions` をそのまま使う (重み0.75MB, float16)
   - `Auto`: 喜怒哀楽驚を巡回。同じ感情でも毎回 潜在zを引き直すので表情が変わる
-  - 感情固定 (公式Expressionクラス20種すべて選択可) / `Manual`
-    (Mouth Open・Smile・Eyes Close等のパーツ別スライダー合成。領域分割は公式に無い独自処理)
+  - `Random`: 公式 `randomize_expressions` (2〜3クラスをランダムに公式blend)
+  - 感情固定: 公式Expressionクラス20種すべて選択可
   - 周期的なBlink(目パチ)を表情へ合成 (左右ウインククラスの合成から目領域だけ使う)
 - ビューをドラッグするとYaw(±可変)/Pitch角に回転
 - GUI: フィット/髪シェルパラメータ、表情、Camera/Rotation、Wireframe表示

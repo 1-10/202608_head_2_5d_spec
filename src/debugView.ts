@@ -91,8 +91,8 @@ function updateLayerPreview(gnmHead: GnmHeadBuild, visible: boolean, scale: numb
 // refreshEmotionOptions() で追加する (クラス名の正本はサンプラー側)
 const BASE_EMOTION_OPTIONS: Record<string, string> = {
   'Auto (喜怒哀楽を巡回)': 'AUTO',
+  'Random (公式randomize_expressions)': 'RANDOM',
   Neutral: 'NEUTRAL',
-  'Manual (下のスライダー)': 'MANUAL',
   '喜 Happy': 'joy',
   '楽 Smile': 'fun',
   '哀 Sad': 'sad',
@@ -185,24 +185,12 @@ export function setupDebugGui(container: HTMLElement, params: Params, options: D
     .add(params, 'gnmTonguePose', 0, 1, 0.05)
     .name('Tongue Pose (公式)')
     .onFinishChange(() => options.onGnmParamsChanged());
-  fitFolder
-    .add(params, 'gnmTongueFollow', 0, 1.5, 0.05)
-    .name('Tongue Follow (非公式)')
-    .onFinishChange(() => options.onGnmParamsChanged());
   fitFolder.open();
 
   // プリセットは公式ExpressionSampler由来 (gnmExpressions.ts)
   const exprFolder = gui.addFolder('Expression');
   exprFolder.add(params, 'gnmEmotion', BASE_EMOTION_OPTIONS).name('Emotion');
   exprFolder.add(params, 'gnmExprIntensity', 0, 2, 0.05).name('Intensity');
-  // パーツ別スライダー (Emotion=Manual時に有効。公式クラスを目/下顔面領域で分離)
-  exprFolder.add(params, 'gnmMouthOpen', 0, 1.5, 0.05).name('Mouth Open');
-  exprFolder.add(params, 'gnmSmile', 0, 1.5, 0.05).name('Smile');
-  exprFolder.add(params, 'gnmPucker', 0, 1.5, 0.05).name('Pucker');
-  exprFolder.add(params, 'gnmCornersDown', 0, 1.5, 0.05).name('Corners Down');
-  exprFolder.add(params, 'gnmEyesClose', 0, 1.2, 0.05).name('Eyes Close');
-  exprFolder.add(params, 'gnmEyesWide', 0, 1.5, 0.05).name('Eyes Wide');
-  exprFolder.add(params, 'gnmSquint', 0, 1.5, 0.05).name('Squint');
 
   const cameraFolder = gui.addFolder('Camera / Rotation');
   // 180まで上げると±180=一周でき、側面・背面の検分に使える
