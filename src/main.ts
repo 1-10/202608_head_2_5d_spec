@@ -4,8 +4,9 @@
 import * as THREE from 'three';
 import './style.css';
 import { InputManager, type CapturedImage } from './input';
-import { FaceDetectionError, FaceDetector } from './faceDetector';
+import { FaceDetectionError, FaceDetector, type FaceLandmark } from './faceDetector';
 import { normalizeFaceLandmarks, type NormalizedFaceResult } from './faceTopology';
+import { refineMaskWithGuide } from './maskRefine';
 import { PersonSegmenter } from './personSegmentation';
 import { PortraitDepthEstimator } from './portraitDepth';
 import { createBlinkState, updateBlink, type BlinkState } from './blink';
@@ -16,9 +17,9 @@ import {
   type GnmHeadBuild,
   type MeasuredHeadData,
 } from './gnmHeadMesh';
-import { GNM_EXPRESSION_PRESETS } from './gnmExpressions';
+import { loadExpressionSampler, type ExpressionSampler } from './gnmSampler';
 import { createParams, type Params } from './params';
-import { applyDebugVisualization, setupDebugGui } from './debugView';
+import { applyDebugVisualization, refreshEmotionOptions, setupDebugGui } from './debugView';
 import { OrbitDragController } from './interaction';
 
 class Viewport {
@@ -31,7 +32,6 @@ class Viewport {
   constructor(container: HTMLElement) {
     this.container = container;
     this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true });
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     container.appendChild(this.renderer.domElement);
 
     this.camera = new THREE.PerspectiveCamera(30, 1, 0.05, 50);
@@ -42,6 +42,8 @@ class Viewport {
     this.scene.add(ambient, key);
 
     this.resize();
+    // window resizeイベントだけだとコンテナ単独のレイアウト変化を取りこぼす
+    new ResizeObserver(() => this.resize()).observe(container);
   }
 
   setGroup(group: THREE.Object3D): void {
@@ -57,6 +59,10 @@ class Viewport {
     }
   }
 
+  setBackground(color: string): void {
+    this.scene.background = new THREE.Color(color);
+  }
+
   updateCamera(fovDeg: number, distance: number): void {
     this.camera.fov = fovDeg;
     this.camera.position.set(0, 0, distance);
@@ -65,6 +71,10 @@ class Viewport {
   }
 
   resize(): void {
+    // pixelRatioは毎回読み直す — ページズーム変更でdevicePixelRatioが変わるため。
+    // 構築時の値で固定すると、ズーム状態でロードした場合に低解像度のまま
+    // 引き伸ばされて全体がぼやける
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     const w = this.container.clientWidth || 1;
     const h = this.container.clientHeight || 1;
     this.renderer.setSize(w, h, false);
@@ -79,8 +89,9 @@ class Viewport {
 
 interface SceneState {
   ctx: GnmBuildContext;
-  sourceCanvas: HTMLCanvasElement; // NEURAL系の遅延推論で再利用する入力画像
+  sourceCanvas: HTMLCanvasElement; // DAViDの遅延推論で再利用する入力画像
   normalized: NormalizedFaceResult;
+  rawLandmarks: FaceLandmark[]; // 元画像でのMediaPipe生検出値
   gnmHead: GnmHeadBuild | null;
   texture: THREE.Texture;
 }
@@ -102,20 +113,16 @@ const els = {
 };
 
 const viewport = new Viewport(els.paneHead);
+viewport.setBackground(params.backgroundColor);
 
 const inputManager = new InputManager(els.video);
 const faceDetector = new FaceDetector();
 const personSegmenter = new PersonSegmenter();
 const portraitDepth = new PortraitDepthEstimator();
 
-// NEURAL系 (transformers.js) はモデル・ランタイムとも大きいため、
-// ソースとして選択されて初めてdynamic importする。
-let neuralModule: typeof import('./neuralSources') | null = null;
-let neuralDepthEst: import('./neuralSources').NeuralDepthEstimator | null = null;
-let neuralMatteEst: import('./neuralSources').NeuralMatteEstimator | null = null;
-
 // GNMアセット (gnm_head_lite.bin 約8.5MB) は初回構築時に一度だけロードする。
 let gnmModel: GnmModel | null = null;
+let exprSampler: ExpressionSampler | null = null;
 let gnmBusy = false;
 
 let sceneState: SceneState | null = null;
@@ -123,29 +130,80 @@ let yawDeg = 0;
 let pitchDeg = 0;
 let blinkState: BlinkState = createBlinkState(performance.now(), params);
 // --- GNM表情の自動巡回 (Emotion=AUTO時): 感情→ニュートラル→別の感情… ---
-// 感情 → 公式ExpressionSamplerプリセット群 (Varはseed違いの変化形。巡回のたびに選ぶ)
-const GNM_EMOTION_VARIANTS: Record<string, string[]> = {
-  joy: ['happy', 'happyVar1', 'happyVar2'],
-  fun: ['smileWide', 'smileWideVar1', 'smileWideVar2'],
-  sad: ['cornersDown', 'cornersDownVar1', 'cornersDownVar2'],
-  anger: ['snarl', 'snarlVar1', 'snarlVar2'],
-  surprise: ['surprise', 'surpriseVar1', 'surpriseVar2'],
-};
 let gnmExprNextChangeAt = 0; // 次回遷移時刻
-let gnmAutoTarget: number[] | null = null; // 現在の目標プリセット (null=ニュートラル区間)
+let gnmAutoTarget: number[] | null = null; // 現在の目標表情 (null=ニュートラル区間)
 let gnmLastEmotion = ''; // 直前の感情 (同じ感情の連続を避ける)
 
-// Emotion=MANUAL用のパーツ別スライダー定義。公式プリセットを領域で分離して合成する。
-// 領域はアセットの表情成分レイアウト (前半=目20成分, 後半=下顔面20成分) に対応
-const GNM_MANUAL_CONTROLS: { param: keyof Params; preset: string; region: 'eyes' | 'lower' }[] = [
-  { param: 'gnmMouthOpen', preset: 'surprise', region: 'lower' },
-  { param: 'gnmSmile', preset: 'smileWide', region: 'lower' },
-  { param: 'gnmPucker', preset: 'pucker', region: 'lower' },
-  { param: 'gnmCornersDown', preset: 'cornersDown', region: 'lower' },
-  { param: 'gnmEyesClose', preset: 'blink', region: 'eyes' },
-  { param: 'gnmEyesWide', preset: 'surprise', region: 'eyes' },
-  { param: 'gnmSquint', preset: 'squint', region: 'eyes' },
+/** 公式クラス名 → クラス番号。サンプラーの classNames が正本 */
+function classIndex(name: string): number {
+  return exprSampler ? exprSampler.classNames.indexOf(name) : -1;
+}
+/**
+ * 公式 sample_expression でクラスの表情を作り、アセットの成分並びへ射影する。
+ * latent=null は潜在空間の中心 (=クラスの代表)。公式には無い決め打ちだが、
+ * 固定表情・パーツ別スライダーの基準として再現性が要る
+ */
+function sampleClass(name: string, latent: Float32Array | null = null): number[] | null {
+  if (!exprSampler || !gnmModel) return null;
+  const ci = classIndex(name);
+  if (ci < 0) return null;
+  return exprSampler.toModelCoeffs(exprSampler.sample(ci, latent), gnmModel);
+}
+
+// Emotion=MANUAL用のパーツ別スライダー定義。公式クラスの代表表情を領域で分離して合成する。
+// 領域の判定は成分名 (model.expressionNames) から導出する — 成分数や並びを
+// 変えても嘘にならないようにするため (位置決め打ちは舌成分の追加で壊れた)
+const GNM_MANUAL_CONTROLS: { param: keyof Params; classes: string[]; region: 'eyes' | 'lower' }[] = [
+  { param: 'gnmMouthOpen', classes: ['surprise'], region: 'lower' },
+  { param: 'gnmSmile', classes: ['smile_wide'], region: 'lower' },
+  { param: 'gnmPucker', classes: ['pucker'], region: 'lower' },
+  { param: 'gnmCornersDown', classes: ['corners_down'], region: 'lower' },
+  // 閉眼は片目ウインクの左右合成 (公式に「両目を閉じる」クラスは無い)
+  { param: 'gnmEyesClose', classes: ['wink_left', 'wink_right'], region: 'eyes' },
+  { param: 'gnmEyesWide', classes: ['surprise'], region: 'eyes' },
+  { param: 'gnmSquint', classes: ['squint'], region: 'eyes' },
 ];
+
+/** 表情成分ごとの領域ラベルを成分名から導出する (アセットの並びに依存しない)。 */
+type ExprRegion = 'eyes' | 'lower' | 'other';
+let exprRegionsCache: ExprRegion[] | null = null;
+function expressionRegions(model: GnmModel): ExprRegion[] {
+  if (exprRegionsCache) return exprRegionsCache;
+  exprRegionsCache = model.expressionNames.map((n) =>
+    /^(left|right)_eye/.test(n) ? 'eyes' : n.startsWith('lower_face') ? 'lower' : 'other',
+  );
+  return exprRegionsCache;
+}
+
+/**
+ * クラスの代表表情を足し合わせる (キャッシュ付き)。
+ * 出力ベクトルの線形和は公式の blend_expressions とは別物なので、
+ * まばたきとMANUALモードのパーツ合成にだけ使う。
+ */
+const sampleSumCache = new Map<string, number[] | null>();
+function sampleClassSum(classes: string[]): number[] | null {
+  const key = classes.join('+');
+  const hit = sampleSumCache.get(key);
+  if (hit !== undefined) return hit;
+  let acc: number[] | null = null;
+  for (const c of classes) {
+    const v = sampleClass(c);
+    if (!v) return null;
+    acc = acc ? acc.map((x, i) => x + v[i]) : v.slice();
+  }
+  sampleSumCache.set(key, acc);
+  return acc;
+}
+
+/**
+ * まばたきベクトル: 左右ウインクの合成から目領域だけを残す
+ * (下顔面を0にしないと、まばたきのたびに口が動いてしまう)。
+ */
+function buildBlinkVector(model: GnmModel): number[] {
+  const both = sampleClassSum(['wink_left', 'wink_right']);
+  if (!both) return new Array<number>(model.expressionCount).fill(0);
+  return both.map((v, i) => (/^(left|right)_eye/.test(model.expressionNames[i] ?? '') ? v : 0));
+}
 
 function setStatus(message: string, isError = false): void {
   els.status.textContent = message;
@@ -197,9 +255,11 @@ async function acquireMeasuredData(
 ): Promise<MeasuredHeadData> {
   const measured: MeasuredHeadData = {
     segmentation: null,
+    segmentationRefined: null,
     depth: null,
-    neuralSegmentation: null,
-    neuralDepth: null,
+    davidDepth: null,
+    davidNormalCanvas: null,
+    davidPerson: null,
   };
 
   try {
@@ -208,6 +268,25 @@ async function acquireMeasuredData(
     measured.segmentation = personSegmenter.segment(captured.canvas, normalized.landmarks);
   } catch (err) {
     console.warn('セグメンテーションに失敗。UVクランプ・髪シェルなしで表示します。', err);
+  }
+
+  // 髪系マスクをGuided Filterで写真エッジへ整合 (256px→768px)。
+  // 「髪のみ」と「髪+帽子」は独立に精細化する — 合成後に掛けると帽子の縁が
+  // 髪の縁と混ざる。失敗しても生マスクで続行できるよう分離してtryする
+  if (measured.segmentation) {
+    try {
+      const t0 = performance.now();
+      const seg = measured.segmentation;
+      measured.segmentationRefined = {
+        ...seg,
+        hair: refineMaskWithGuide(captured.canvas, seg.hair),
+        hairWithAccessories: refineMaskWithGuide(captured.canvas, seg.hairWithAccessories),
+      };
+      console.debug(`髪マスク精細化 (Guided Filter x2): ${(performance.now() - t0).toFixed(0)}ms`);
+    } catch (err) {
+      console.warn('髪マスクの精細化に失敗。生マスクで続行します。', err);
+      measured.segmentationRefined = null;
+    }
   }
 
   if (measured.segmentation) {
@@ -229,64 +308,49 @@ async function acquireMeasuredData(
   return measured;
 }
 
-let neuralAcquisitionBusy = false;
+let davidAcquisitionBusy = false;
+let davidEstimator: import('./david').DavidEstimator | null = null;
 
 /**
- * NEURALソース (BiRefNetマット / Depth Anything V2) を必要時に遅延取得する。
- * モデルDLが大きい(数十〜数百MB)ため、ソースとして選択されて初めてロードする。
- * 取得済みならそのまま、未取得なら推論してctx.measuredへ格納し、頭部を再構築する。
+ * DAViD multi-task (Depth / 表面法線 / ソフト前景を1回の推論で同時取得) を
+ * 必要時に遅延取得する。モデルDLが大きいため、いずれかのソースとして
+ * 選択されて初めてロードする。
  */
-async function ensureNeuralSources(): Promise<void> {
-  if (!sceneState || neuralAcquisitionBusy) return;
+async function ensureDavid(): Promise<void> {
+  if (!sceneState || davidAcquisitionBusy) return;
   const s = sceneState;
   const m = s.ctx.measured;
   if (!m) return;
+  const need =
+    (params.depthSource === 'DAVID' && !m.davidDepth) ||
+    (params.normalSource === 'DAVID' && !m.davidNormalCanvas) ||
+    (params.personSource === 'DAVID' && !m.davidPerson);
+  if (!need) return;
 
-  const needMatte = params.maskSource === 'NEURAL' && !m.neuralSegmentation;
-  const needDepth = params.depthSource === 'NEURAL' && !m.neuralDepth;
-  if (!needMatte && !needDepth) return;
-
-  neuralAcquisitionBusy = true;
+  davidAcquisitionBusy = true;
   try {
-    const mod = (neuralModule ??= await import('./neuralSources'));
-
-    if (needMatte) {
-      if (!m.segmentation) {
-        setStatus('NEURALマスクにはMediaPipeセグメンテーションが必要です (意味分けに使用)。', true);
-      } else {
-        setStatus('BiRefNetでマットを推定しています… (初回はモデルDLで時間がかかります)');
-        neuralMatteEst ??= new mod.NeuralMatteEstimator();
-        await neuralMatteEst.init();
-        const matte = await neuralMatteEst.estimate(s.sourceCanvas);
-        m.neuralSegmentation = mod.refineSegmentationWithMatte(m.segmentation, matte);
-      }
-    }
-
-    if (needDepth) {
-      const personMask = m.neuralSegmentation?.person ?? m.segmentation?.person ?? null;
-      if (!personMask) {
-        setStatus('NEURAL Depthには人物マスクが必要です (セグメンテーション取得失敗)。', true);
-      } else {
-        setStatus('Depth Anything V2でDepthを推定しています… (初回はモデルDLで時間がかかります)');
-        neuralDepthEst ??= new mod.NeuralDepthEstimator();
-        await neuralDepthEst.init();
-        m.neuralDepth = await neuralDepthEst.estimate(
-          s.sourceCanvas,
-          personMask,
-          s.normalized.headCenterPx,
-          s.normalized.faceWidth,
-        );
-      }
-    }
-
+    setStatus('DAViDでDepth/法線/前景を推定しています… (初回はモデルDLで時間がかかります)');
+    const mod = await import('./david');
+    davidEstimator ??= new mod.DavidEstimator();
+    await davidEstimator.init();
+    const t0 = performance.now();
+    const result = await davidEstimator.estimate(
+      s.sourceCanvas,
+      s.normalized.headCenterPx,
+      s.normalized.faceWidth,
+      m.segmentation?.person ?? null,
+    );
+    m.davidDepth = result.depth;
+    m.davidNormalCanvas = result.normalCanvas;
+    m.davidPerson = result.person;
+    console.debug(`DAViD multi-task推定: ${(performance.now() - t0).toFixed(0)}ms`);
     await rebuildGnmHead();
     if (!els.status.classList.contains('error')) setStatus('');
   } catch (err) {
-    console.error('NEURALソースの取得に失敗しました。', err);
-    setStatus('NEURALソースの取得に失敗しました。フォールバックで表示しています。', true);
-    await rebuildGnmHead();
+    console.error('DAViDの取得に失敗しました。', err);
+    setStatus('DAViDの取得に失敗しました。ARPortraitDepth等へフォールバックして表示しています。', true);
   } finally {
-    neuralAcquisitionBusy = false;
+    davidAcquisitionBusy = false;
   }
 }
 
@@ -304,19 +368,34 @@ async function rebuildGnmHead(): Promise<void> {
       setStatus('GNM Headアセットを読み込んでいます…');
       gnmModel = await loadGnmModel();
     }
+    if (!exprSampler) {
+      setStatus('表情サンプラーを読み込んでいます…');
+      exprSampler = await loadExpressionSampler();
+      sampleSumCache.clear();
+      refreshEmotionOptions(gui, params, exprSampler.classNames);
+    }
     setStatus('GNM Headをフィットしています…');
     s.gnmHead?.dispose();
-    const build = buildGnmHead(gnmModel, s.ctx, s.sourceCanvas, s.texture, params);
+
+    const normalized = normalizeFaceLandmarks(s.rawLandmarks, s.ctx.imageWidth, s.ctx.imageHeight);
+    s.normalized = normalized;
+    s.ctx.landmarks = normalized.landmarks;
+    s.ctx.headCenterPx = normalized.headCenterPx;
+    s.ctx.faceWidthPx = normalized.faceWidth;
+
+    const build = buildGnmHead(gnmModel, s.ctx, s.sourceCanvas, s.texture, params, {
+      blink: buildBlinkVector(gnmModel),
+    });
     build.group.rotation.order = 'YXZ'; // yaw→pitchの順で直感的に合成されるよう明示する
     s.gnmHead = build;
     // デバッグ用: コンソールから表情係数や対応残差を直接調べられるようにする
     (window as unknown as Record<string, unknown>).__gnmHead = build;
-    (window as unknown as Record<string, unknown>).__gnmDebug = { model: gnmModel, ctx: s.ctx, build };
+    (window as unknown as Record<string, unknown>).__gnmDebug = { model: gnmModel, ctx: s.ctx, build, params };
     viewport.setGroup(build.group);
     updateYaw(yawDeg);
     updatePitch(pitchDeg);
     applyDebugVisualization(build, params);
-    if (!build.hairMesh) {
+    if (!build.hairMesh && params.gnmShowHair) {
       setStatus('GNM: 髪シェルを構築できなかったため頭部のみ表示しています。');
     } else {
       setStatus('');
@@ -355,6 +434,7 @@ async function processImage(captured: CapturedImage): Promise<void> {
       },
       sourceCanvas: captured.canvas,
       normalized,
+      rawLandmarks,
       gnmHead: null,
       texture,
     };
@@ -365,8 +445,8 @@ async function processImage(captured: CapturedImage): Promise<void> {
 
     await rebuildGnmHead();
 
-    // NEURALが選択済みの状態で新しい画像が来た場合は遅延取得を開始する
-    void ensureNeuralSources();
+    // DAVIDが選択済みの状態で新しい画像が来た場合は遅延取得を開始する
+    void ensureDavid();
   } catch (err) {
     if (err instanceof FaceDetectionError) {
       setStatus(err.message, true);
@@ -431,15 +511,16 @@ els.toggleBlink.addEventListener('change', () => {
 window.addEventListener('resize', () => viewport.resize());
 
 // --- GUIパラメータパネル ---
-setupDebugGui(els.guiContainer, params, {
+const gui = setupDebugGui(els.guiContainer, params, {
   onSourceChanged: () => {
-    // まず取得済みソースで即時再構築し、NEURAL系が未取得なら裏で取得して再構築する
-    void rebuildGnmHead().then(() => ensureNeuralSources());
+    // まず取得済みソースで即時再構築し、DAVIDが未取得なら裏で取得して再構築する
+    void rebuildGnmHead().then(() => ensureDavid());
   },
   onGnmParamsChanged: () => {
     void rebuildGnmHead();
   },
   onCameraChanged: () => updateCameras(),
+  onBackgroundChanged: () => viewport.setBackground(params.backgroundColor),
   onYawRangeChanged: () => updateYaw(yawDeg),
   onPitchRangeChanged: () => updatePitch(pitchDeg),
   getGnmHead: () => sceneState?.gnmHead ?? null,
@@ -456,41 +537,50 @@ function animate(): void {
 
     // GNM表情: 感情プリセットを目標に設定し、tickExpressionの指数遷移で滑らかに繋ぐ
     let preset: number[] | null = null;
-    if (params.gnmEmotion === 'AUTO') {
+    if (params.gnmEmotion === 'AUTO' || params.gnmEmotion === 'RANDOM') {
       if (now >= gnmExprNextChangeAt) {
         if (gnmAutoTarget) {
           // 感情の保持が終わったら短いニュートラル区間を挟む
           gnmAutoTarget = null;
           gnmExprNextChangeAt = now + 800 + Math.random() * 1200;
         } else {
-          const emotions = Object.keys(GNM_EMOTION_VARIANTS).filter((e) => e !== gnmLastEmotion);
-          const emotion = emotions[Math.floor(Math.random() * emotions.length)];
-          gnmLastEmotion = emotion;
-          const variants = GNM_EMOTION_VARIANTS[emotion];
-          gnmAutoTarget =
-            GNM_EXPRESSION_PRESETS[variants[Math.floor(Math.random() * variants.length)]] ?? null;
+          if (params.gnmEmotion === 'RANDOM') {
+            // 公式 randomize_expressions: 2〜3クラスをランダムに選んで公式blendする
+            gnmAutoTarget =
+              exprSampler && gnmModel
+                ? exprSampler.toModelCoeffs(exprSampler.randomize(Math.random), gnmModel)
+                : null;
+          } else {
+            // 公式Expressionクラスを巡回。潜在zも引き直すので同じクラスでも毎回変わる
+            const classes = (exprSampler?.classNames ?? []).filter((c) => c !== gnmLastEmotion);
+            const cls = classes[Math.floor(Math.random() * classes.length)];
+            gnmLastEmotion = cls;
+            const latent = exprSampler?.randomLatent(Math.random) ?? null;
+            gnmAutoTarget = cls ? sampleClass(cls, latent) : null;
+          }
           gnmExprNextChangeAt = now + 2000 + Math.random() * 2500;
         }
       }
       preset = gnmAutoTarget;
     } else if (params.gnmEmotion === 'MANUAL') {
-      // パーツ別スライダーの合成 (公式プリセットの目/下顔面領域を強度倍して加算)
+      // パーツ別スライダーの合成。公式クラスの代表表情を目/下顔面領域に分けて加算する
+      // (領域分割は公式に無い操作なのでMANUALモード限定)
+      const region = gnmModel ? expressionRegions(gnmModel) : [];
       let vec: number[] | null = null;
       for (const c of GNM_MANUAL_CONTROLS) {
         const amount = params[c.param] as number;
         if (amount === 0) continue;
-        const p = GNM_EXPRESSION_PRESETS[c.preset];
+        const p = sampleClassSum(c.classes);
         if (!p) continue;
         vec ??= new Array<number>(p.length).fill(0);
-        const half = p.length / 2;
         for (let i = 0; i < p.length; i++) {
-          const inRegion = c.region === 'lower' ? i >= half : i < half;
-          if (inRegion) vec[i] += p[i] * amount;
+          if (region[i] === c.region) vec[i] += p[i] * amount;
         }
       }
       preset = vec;
     } else if (params.gnmEmotion !== 'NEUTRAL') {
-      preset = GNM_EXPRESSION_PRESETS[GNM_EMOTION_VARIANTS[params.gnmEmotion]?.[0] ?? ''] ?? null;
+      // 感情固定: 値は公式Expressionクラス名そのもの
+      preset = sampleClassSum([params.gnmEmotion]);
     }
     if (preset) {
       gnmHead.setExpressionTarget(preset.map((v) => v * params.gnmExprIntensity));

@@ -31,7 +31,7 @@ export class PortraitDepthEstimator {
   ): Promise<ScalarField> {
     if (!this.estimator) throw new Error('PortraitDepthEstimatorが初期化されていません。');
 
-    const crop = computeHeadCrop(source.width, source.height, headCenterPx, faceWidthPx);
+    const crop = computeHeadCrop(source.width, source.height, headCenterPx, faceWidthPx, MODEL_ASPECT);
 
     // crop領域を切り出し、背景をpersonMaskで白へ
     const cropCanvas = document.createElement('canvas');
@@ -82,11 +82,28 @@ export class PortraitDepthEstimator {
   }
 }
 
-const CORE_ERODE_ITERATIONS = 2; // 境界の混合画素(halo)を信頼しない幅
-const SMOOTH_PASSES = 2; // 3x3 box blurの回数
+/** Depthクリーンアップの強度。供給源のノイズ特性に合わせて調整する。 */
+export interface DepthCleanupOptions {
+  erodeIterations: number; // 境界の混合画素(halo)を信頼しない幅
+  clampLoPct: number; // 外れ値clampの下側パーセンタイル (0-1)
+  clampHiPct: number; // 外れ値clampの上側パーセンタイル (0-1)
+  smoothPasses: number; // 3x3 box blurの回数
+}
+
+// 既定はARPortraitDepth (低解像度・ノイズ多め) 向けの強いクリーンアップ
+const DEFAULT_CLEANUP: DepthCleanupOptions = {
+  erodeIterations: 2,
+  clampLoPct: 0.02,
+  clampHiPct: 0.98,
+  smoothPasses: 2,
+};
 
 /** Depth場のシルエット際halo/外れ値対策 (erode→clamp→前景dilation→平滑化)。他のDepth供給源からも使う。 */
-export function cleanupDepthField(depth: ScalarField, personMask: ScalarField): void {
+export function cleanupDepthField(
+  depth: ScalarField,
+  personMask: ScalarField,
+  options: DepthCleanupOptions = DEFAULT_CLEANUP,
+): void {
   const { width, height, data, rect } = depth;
   const total = width * height;
 
@@ -106,7 +123,7 @@ export function cleanupDepthField(depth: ScalarField, personMask: ScalarField): 
   if (fgCount === 0) return;
 
   // erodeして「コア」(境界halo画素を除いた信頼できる前景)を得る
-  for (let it = 0; it < CORE_ERODE_ITERATIONS; it++) {
+  for (let it = 0; it < options.erodeIterations; it++) {
     const next = new Uint8Array(fg);
     for (let y = 0; y < height; y++) {
       for (let x = 0; x < width; x++) {
@@ -135,8 +152,8 @@ export function cleanupDepthField(depth: ScalarField, personMask: ScalarField): 
   const coreValues: number[] = [];
   for (let i = 0; i < total; i++) if (fg[i]) coreValues.push(data[i]);
   coreValues.sort((a, b) => a - b);
-  const lo = coreValues[Math.floor(coreValues.length * 0.02)];
-  const hi = coreValues[Math.min(coreValues.length - 1, Math.floor(coreValues.length * 0.98))];
+  const lo = coreValues[Math.floor(coreValues.length * options.clampLoPct)];
+  const hi = coreValues[Math.min(coreValues.length - 1, Math.floor(coreValues.length * options.clampHiPct))];
   for (let i = 0; i < total; i++) data[i] = Math.min(hi, Math.max(lo, data[i]));
 
   // コアからBFSで外側(halo+背景)へDepthを伝播
@@ -173,7 +190,7 @@ export function cleanupDepthField(depth: ScalarField, personMask: ScalarField): 
   }
 
   // 3x3 box blurで残るノイズを平滑化
-  for (let p = 0; p < SMOOTH_PASSES; p++) {
+  for (let p = 0; p < options.smoothPasses; p++) {
     const src = data.slice();
     for (let y = 0; y < height; y++) {
       for (let x = 0; x < width; x++) {
@@ -195,13 +212,17 @@ export function cleanupDepthField(depth: ScalarField, personMask: ScalarField): 
   }
 }
 
-/** 頭部中心に指定アスペクト比(w/h)のcrop矩形を取る (顔幅の約3.2倍を横幅目安)。 */
+/**
+ * 頭部中心に指定アスペクト比(w/h)のcrop矩形を取る (顔幅の約3.2倍を横幅目安)。
+ * aspectは呼び出し側のモデル入力に合わせて必ず明示する
+ * (デフォルトを持たせると、渡し忘れが黙って別モデルの比率になる事故の芽になる)
+ */
 export function computeHeadCrop(
   imageWidth: number,
   imageHeight: number,
   headCenterPx: { x: number; y: number },
   faceWidthPx: number,
-  aspect: number = MODEL_ASPECT,
+  aspect: number,
 ): { x: number; y: number; w: number; h: number } {
   let w = Math.min(imageWidth, faceWidthPx * 3.2);
   let h = w / aspect;

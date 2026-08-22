@@ -20,21 +20,26 @@ import {
   type GnmModel,
   type SimilarityTransform,
 } from './gnmHead';
-import { GNM_EXPRESSION_PRESETS } from './gnmExpressions';
-import { MP_EYES, MP_LIPS, applyResidualWarp, fillNostrils } from './gnmRefine';
+import { buildMouthInterior, buildTongueDriver } from './gnmMouthInterior';
+import { MP_EYES, MP_LIPS, applyResidualWarp, buildEyeballContainment, fillNostrils } from './gnmRefine';
 import { applyFlatNormals, buildGridIndices, smoothstep } from './meshUtils';
 import { rasterizeMaskCanvas, type SegmentationResult } from './personSegmentation';
 import type { Params } from './params';
 
 /**
- * 実測/ニューラルソース一式。取得に失敗した(または未取得の)ものはnull。
- * NEURAL系がnullのままNEURALを選ぶとMEASURED系へフォールバックする。
+ * 実測ソース一式。取得に失敗した(または未取得の)ものはnull。
+ * DAVID系がnullのままDAVIDを選ぶと該当のGoogle系ソースへフォールバックする。
  */
 export interface MeasuredHeadData {
-  segmentation: SegmentationResult | null; // MediaPipe SelfieMulticlass
+  segmentation: SegmentationResult | null; // MediaPipe SelfieMulticlass (生 256px)
+  /** 髪系マスクをGuided Filterで写真エッジへ整合させた版 (768px)。失敗・未実行はnull */
+  segmentationRefined: SegmentationResult | null;
   depth: ScalarField | null; // ARPortraitDepth 相対Depth (0-1)
-  neuralSegmentation: SegmentationResult | null; // BiRefNet×MediaPipe合成 (遅延取得)
-  neuralDepth: ScalarField | null; // Depth Anything V2 (遅延取得)
+  // --- DAViD multi-task (1回の推論で同時取得。遅延ロード。商用クリーン) ---
+  davidDepth: ScalarField | null; // 人物相対Depth
+  // 表面法線 (RGBエンコード済みObjectSpaceNormalMap, 画像全体UV空間)
+  davidNormalCanvas: HTMLCanvasElement | null;
+  davidPerson: ScalarField | null; // ソフト前景 (crop外はSelfieMulticlassで補完済み)
 }
 
 /** GNM頭部の構築に必要な入力一式 (画像1枚から導出される)。 */
@@ -47,30 +52,65 @@ export interface GnmBuildContext {
   measured: MeasuredHeadData | null;
 }
 
-/** maskSourceに応じたセグメンテーションを選ぶ (NEURAL未取得時はMEASUREDへフォールバック)。 */
+/** maskSourceに応じたセグメンテーションを選ぶ。 */
 export function selectSegmentation(ctx: GnmBuildContext, params: Params): SegmentationResult | null {
   const m = ctx.measured;
   if (!m) return null;
-  if (params.maskSource === 'NEURAL') return m.neuralSegmentation ?? m.segmentation;
-  if (params.maskSource === 'MEASURED') return m.segmentation;
-  return null;
+  if (params.maskSource !== 'SELFIE_MULTICLASS') return null;
+  // Mask Refine off時 (と精細化失敗時) は生マスクを使う
+  let seg = (params.gnmMaskRefine ? m.segmentationRefined : null) ?? m.segmentation;
+  if (!seg) return null;
+  // 髪シェル用マスクに帽子・メガネ (accessories) を含める。
+  // 下流 (髪シェル・alphaMap・レイヤー画像・均一髪色) はすべて seg.hair を見るので、
+  // ここで差し替えるだけで一貫して帽子込みになる
+  if (params.gnmHairIncludeAccessories) seg = { ...seg, hair: seg.hairWithAccessories };
+  // 人物シルエットはDAViDソフト前景を優先 (境界精度が高い。意味分けはMediaPipeのまま)
+  if (params.personSource === 'DAVID' && m.davidPerson) seg = { ...seg, person: m.davidPerson };
+  return seg;
 }
 
-/** depthSourceに応じたDepth場を選ぶ (NEURAL未取得時はMEASUREDへフォールバック)。 */
+/** depthSourceに応じたDepth場を選ぶ (DAVID未取得時はARPortraitDepthへフォールバック)。 */
 export function selectDepth(ctx: GnmBuildContext, params: Params): ScalarField | null {
   const m = ctx.measured;
   if (!m) return null;
-  if (params.depthSource === 'NEURAL') return m.neuralDepth ?? m.depth;
-  if (params.depthSource === 'MEASURED') return m.depth;
+  if (params.depthSource === 'DAVID') return m.davidDepth ?? m.depth;
+  if (params.depthSource === 'ARPORTRAIT_DEPTH') return m.depth;
   return null;
+}
+
+/** レイヤー分離プレビューの1枚。 */
+export interface PreviewLayer {
+  label: string;
+  canvas: HTMLCanvasElement;
+  /**
+   * キャンバスが元写真と同じアスペクト比か。falseなら頭部クロップを掛けても
+   * 縦横比が合わない (髪alphaMapは正方形へ引き伸ばしたものをGPUへ渡している)。
+   */
+  photoAspect: boolean;
 }
 
 export interface GnmHeadBuild {
   group: THREE.Group;
   headMesh: THREE.Mesh;
   hairMesh: THREE.Mesh | null;
+  /** 口腔内 (口腔壁・歯・歯茎・舌)。旧アセットはnull */
+  mouthInteriorMesh: THREE.Mesh | null;
   /** ランドマーク重畳デバッグ表示 (既定で非表示。Show Landmarksで切替)。 */
   landmarkOverlay: THREE.Object3D;
+  /**
+   * ランドマーク重畳の対応点を現在の表情姿勢へ引き直す。
+   * 表情が静止しているとtickExpressionが早期returnするため、
+   * 表示をonにした直後は明示的に呼ぶ必要がある。
+   */
+  refreshLandmarkOverlay(): void;
+  /**
+   * レイヤー分離プレビュー。元写真から最終出力までの加工工程を順に並べる。
+   * 「実際に使っているもの」だけを入れる — 表示用に作り直した近似は入れない
+   * (GPUへ渡しているテクスチャはそのキャンバス自体を渡す)。
+   */
+  previewLayers: PreviewLayer[];
+  /** レイヤー画像プレビューの頭部クロップ (画像に対する割合 0-1, yは上から)。 */
+  layerPreviewCrop: { x: number; y: number; w: number; h: number };
   fit: GnmFitResult;
   setNeutralExpression(): void;
   /** 表情係数を直接目標に設定する (長さexpressionCount。感情プリセット用)。 */
@@ -87,15 +127,25 @@ export interface GnmHeadBuild {
 
 const UV_CLAMP_STEPS = 80; // シルエット外UVを頭部中心へ歩かせる最大ステップ数
 
+/** 公式サンプラー由来の表情ベクトル (main.tsが gnmSampler から作って渡す)。 */
+export interface GnmExpressionVectors {
+  /** まばたき (左右ウインクの合成の目領域だけ)。長さ = expressionCount */
+  blink: number[];
+}
+
 export function buildGnmHead(
   model: GnmModel,
   ctx: GnmBuildContext,
   sourceCanvas: HTMLCanvasElement,
   texture: THREE.Texture,
   params: Params,
+  vectors: GnmExpressionVectors,
 ): GnmHeadBuild {
   const fit = fitGnmToLandmarks(model, ctx.landmarks, params.gnmIdentityReg, params.gnmDenseFit);
   const seg = selectSegmentation(ctx, params);
+
+  const headCanvas = sourceCanvas;
+  const headTexture = texture;
 
   // 残差ワープ: identity係数 (統計モデル) では張り切れない目・唇の位置残差を
   // neutral頂点へ焼き込む。まばたき・開口が「写真の目・口の位置」で起きる。
@@ -122,7 +172,7 @@ export function buildGnmHead(
   const fallback = new Float32Array(n * 3);
   const photoW = new Float32Array(n);
 
-  const img = sourceCanvas.getContext('2d')!.getImageData(0, 0, sourceCanvas.width, sourceCanvas.height);
+  const img = headCanvas.getContext('2d')!.getImageData(0, 0, headCanvas.width, headCanvas.height);
   const centerU = ctx.headCenterPx.x / ctx.imageWidth;
   const centerV = 1 - ctx.headCenterPx.y / ctx.imageHeight;
   const linear = new THREE.Color();
@@ -142,12 +192,36 @@ export function buildGnmHead(
       lipB += img.data[o + 2];
     }
   }
+  const lipPhotoColor = new THREE.Color().setRGB(
+    lipR / 9 / 255,
+    lipG / 9 / 255,
+    lipB / 9 / 255,
+    THREE.SRGBColorSpace,
+  );
   const interiorColor = new THREE.Color().setRGB(
     (lipR / 9 / 255) * 0.4,
     (lipG / 9 / 255) * 0.4,
     (lipB / 9 / 255) * 0.4,
     THREE.SRGBColorSpace,
   );
+
+  // 背面・遠距離クランプ領域の均一色 (口内色と同じ発想)。写真に色情報が
+  // 無い領域をクランプ済UVの引き伸ばしスメアで塗ると背面が縞・ピンク染みに
+  // なるため、写真から測った髪/肌の平均色 (暗め=陰) で塗り潰す
+  const uniformHairColor = seg ? maskedAverageColor(sourceCanvas, seg.hair, 0.85) : null;
+  const uniformSkinColor = seg ? maskedAverageColor(sourceCanvas, seg.faceSkin, 0.85) : null;
+
+  /**
+   * テクスチャを引いてよい領域 = 人物マスク (境界精度の高いDAViD前景が入りうる)。
+   *
+   * 服 (SelfieMulticlassクラス4) を除かないのは意図的。GNMの首〜肩は写真では実際に
+   * 服なので、服の色が「正しい」色。実測 (test_portrait.jpg): 服へ投影される頂点は
+   * 2,183個 (モデル空間 y -1.47〜-0.42)、除外すると広い面が顎の縁の画素へ潰れて
+   * 縦縞のスメアになり明確に悪化した (実装して比較した上で撤回した)。
+   * 背景が入る写真があるとしたら真因はpersonマスク側。
+   */
+  const textureMask = (u: number, v: number): number =>
+    seg ? sampleField(seg.person, u, v) : 1;
 
   for (let i = 0; i < n; i++) {
     const x = fit.vertices[i * 3];
@@ -161,14 +235,18 @@ export function buildGnmHead(
     // シルエット外のUVは頭部中心方向へ歩かせてマスク内へクランプ (edge-extend)。
     // 歩幅は細かく取る — 頭頂では髪の帯が薄く、粗い歩幅だと帯を飛び越えて
     // 額の肌色を拾ってしまう (頭頂が禿げて見えるバグの原因)
+    const uProjected = u;
+    const vProjected = v;
     let maskAtUv = 1;
     if (seg) {
-      maskAtUv = sampleField(seg.person, u, v);
+      // maskAtUvは「投影先」の値のまま保つ (歩いた後の値にはしない) —
+      // 下のphotoWがこれを使い、シルエット外へ落ちた頂点の写真重みを落としている
+      maskAtUv = textureMask(u, v);
       if (maskAtUv < 0.5) {
         for (let s = 0; s < UV_CLAMP_STEPS; s++) {
           u += (centerU - u) * 0.03;
           v += (centerV - v) * 0.03;
-          if (sampleField(seg.person, u, v) >= 0.5) break;
+          if (textureMask(u, v) >= 0.5) break;
         }
       }
     }
@@ -195,6 +273,28 @@ export function buildGnmHead(
       }
     }
     linear.setRGB(r / 9 / 255, g / 9 / 255, b / 9 / 255, THREE.SRGBColorSpace);
+
+    // 写真に色情報が無い度合い: 真の背面 (nz<0) と、クランプで長距離歩いたUV。
+    // その分だけ3x3平均 (スメア) を捨て、髪/肌の均一色へ寄せる。
+    // 閾値は背面側に寄せる — 側面 (nz≈0) はyaw回転で普通に見える領域で、
+    // 写真の頬色の方が均一色より自然なため
+    if (uniformHairColor && uniformSkinColor && seg) {
+      const walked = Math.hypot(u - uProjected, v - vProjected);
+      const invalidW = Math.max(1 - smoothstep(-0.25, -0.02, nz), smoothstep(0.08, 0.25, walked));
+      if (invalidW > 0) {
+        const hs = smoothstep(0.2, 0.6, sampleField(seg.hair, u, v));
+        const ur = uniformSkinColor.r + (uniformHairColor.r - uniformSkinColor.r) * hs;
+        const ug = uniformSkinColor.g + (uniformHairColor.g - uniformSkinColor.g) * hs;
+        const ub = uniformSkinColor.b + (uniformHairColor.b - uniformSkinColor.b) * hs;
+        linear.setRGB(
+          linear.r + (ur - linear.r) * invalidW,
+          linear.g + (ug - linear.g) * invalidW,
+          linear.b + (ub - linear.b) * invalidW,
+          THREE.LinearSRGBColorSpace,
+        );
+      }
+    }
+
     fallback[i * 3] = linear.r + (interiorColor.r - linear.r) * iw;
     fallback[i * 3 + 1] = linear.g + (interiorColor.g - linear.g) * iw;
     fallback[i * 3 + 2] = linear.b + (interiorColor.b - linear.b) * iw;
@@ -206,26 +306,53 @@ export function buildGnmHead(
   geometry.setAttribute('aPhotoW', new THREE.BufferAttribute(photoW, 1));
   applyFlatNormals(geometry); // ライティングは「写真の陰影のみ」の方針 (偽の影の帯を防ぐ)
 
+  // 実測法線 (DAViD): ObjectSpaceNormalMapとしてhead/髪に貼り、回転時の
+  // 照明応答を与える。頂点法線は+Z固定のまま — 法線マップが全面的に置き換える
+  let normalTexture: THREE.Texture | null = null;
+  const useNormal = params.normalSource === 'DAVID' && ctx.measured?.davidNormalCanvas;
+  if (useNormal) {
+    normalTexture = new THREE.CanvasTexture(
+      blendNormalCanvasToFlat(ctx.measured!.davidNormalCanvas!, params.gnmNormalStrength),
+    );
+    normalTexture.colorSpace = THREE.NoColorSpace;
+  }
+
   const headMaterial = new THREE.MeshStandardMaterial({
-    map: texture,
+    map: headTexture,
     roughness: 0.95,
     metalness: 0.0,
   });
+  if (normalTexture) {
+    headMaterial.normalMap = normalTexture;
+    headMaterial.normalMapType = THREE.ObjectSpaceNormalMap;
+  }
   patchPhotoMixShader(headMaterial);
 
   const headMesh = new THREE.Mesh(geometry, headMaterial);
 
-  // --- Hair shell (実測髪マスク+実測Depth) ---
-  const hair = buildHairShell(ctx, texture, fit, params);
+  // --- Hair (実測髪マスク+実測Depth) ---
+  // 前面1枚グリッドのシェル: 写真の髪シルエットと実測Depthの起伏に忠実。
+  // 頂点は画像平面の自由グリッドなので、頭蓋の外へ垂れる髪 (耳下・ロング) も張れる
+  const hair = buildHairShell(ctx, texture, fit, model.triangles, params, normalTexture);
+  if (hair) hair.mesh.visible = params.gnmShowHair;
+
+  // --- 口腔内 (口腔壁・歯・歯茎・舌) ---
+  // 頭部と同じ頂点配列を共有するが、写真投影を持たず実法線+ライティングで描くため別メッシュ
+  // 色の基準は公式の色式と同じ「肌色」。減光していない平均色を測り直して渡す
+  const mouthSkinColor = seg ? maskedAverageColor(sourceCanvas, seg.faceSkin, 1) : null;
+  const mouthInterior = buildMouthInterior(model, fit.vertices, mouthSkinColor, lipPhotoColor);
+  if (mouthInterior) mouthInterior.mesh.visible = params.gnmShowMouthInterior;
 
   // 回転pivotは頭部の実重心z (真3Dのため固定比率ではなく実測で決める)
   const pivotZ = fit.centerZ;
   headMesh.position.z = -pivotZ;
   if (hair) hair.mesh.position.z = -pivotZ;
+  if (mouthInterior) mouthInterior.mesh.position.z = -pivotZ;
 
   const group = new THREE.Group();
   group.position.z = pivotZ;
   group.add(headMesh);
+  if (mouthInterior) group.add(mouthInterior.mesh);
   if (hair) group.add(hair.mesh);
 
   // ランドマーク重畳デバッグ表示 (ワープ後のneutral頂点に対する残差を可視化)
@@ -240,38 +367,118 @@ export function buildGnmHead(
   // 注意: applyIdentityから作り直すと残差ワープなどの後処理が毎フレーム消えるため、
   // 最終頂点 (fit.vertices) を逆相似変換して作る
   const neutralUntransformed = invertSimilarity(fit.vertices, fit.sim);
+  // 瞼が眼球へ潜り込むのを毎フレーム禁じる拘束 (neutralの形は変えない)
+  const eyeballContainment = buildEyeballContainment(model, neutralUntransformed);
   const exprCurrent = new Float32Array(model.expressionCount);
   const exprTarget = new Float32Array(model.expressionCount);
   const posAttr = geometry.getAttribute('position') as THREE.BufferAttribute;
 
   // まばたきベクトル: 公式ExpressionSamplerのWINK_LEFT+WINK_RIGHT合成 (目領域のみ)。
-  // blinkAmountを乗算して感情表情へ加算する独立チャネル
   const blinkVec =
-    GNM_EXPRESSION_PRESETS.blink?.length === model.expressionCount
-      ? GNM_EXPRESSION_PRESETS.blink
+    vectors.blink.length === model.expressionCount
+      ? vectors.blink
       : new Array<number>(model.expressionCount).fill(0);
   let blinkNow = 0;
 
+  // 目領域の成分 (left_eye* / right_eye*)。まばたきはこれらを加算ではなく
+  // 置き換える — 加算だと開瞼系の感情 (Surprise等) と打ち消し合い、
+  // まばたき中も瞼が閉じ切らず眼球が瞼を貫通して見える
+  const isEyeExpr = new Uint8Array(model.expressionCount);
+  for (let i = 0; i < model.expressionCount; i++) {
+    if (/^(left|right)_eye/.test(model.expressionNames[i] ?? '')) isEyeExpr[i] = 1;
+  }
+
+  // 舌: 公式の姿勢 (定数) + 顎の開きへの追随 (公式に無い連動)。gnmMouthInterior参照
+  const tongueDriver = buildTongueDriver(model);
+  const coeffs = new Float32Array(model.expressionCount);
+  // 表情適用後の頂点 (相似変換済み)。毎フレーム作り直さず使い回す
+  // (17k頂点 = 1フレームあたり200KBの割当を避ける)。初期値は無表情の最終頂点そのもの —
+  // 表情が静止したままオーバーレイをonにしたときもここから現在の姿勢が取れるように
+  const applied = new Float32Array(fit.vertices);
+
   const applyExpressionNow = (): void => {
-    const out = new Float32Array(neutralUntransformed);
     for (let i = 0; i < model.expressionCount; i++) {
-      const c = exprCurrent[i] + blinkVec[i] * blinkNow;
+      // 目領域はblinkNowでクロスフェード (閉眼時はまばたきが支配)。
+      // それ以外 (下顔面) は感情表情のまま
+      coeffs[i] = isEyeExpr[i]
+        ? exprCurrent[i] * (1 - blinkNow) + blinkVec[i] * blinkNow
+        : exprCurrent[i] + blinkVec[i] * blinkNow;
+    }
+    tongueDriver?.apply(coeffs, params.gnmTonguePose);
+
+    const out = applied;
+    out.set(neutralUntransformed);
+    for (let i = 0; i < model.expressionCount; i++) {
+      const c = coeffs[i];
       if (c === 0) continue;
       // exprScales: 残差ワープで瞼開口幅が変わった分の目領域振幅補正
       const cs = (c * exprScales[i] * model.expressionScales[i]) / 32767;
       const base = i * model.vertexCount * 3;
       for (let j = 0; j < model.vertexCount * 3; j++) out[j] += model.expressionBasisQ[base + j] * cs;
     }
+    eyeballContainment?.apply(out);
     applySimilarityInPlace(out, fit.sim);
     (posAttr.array as Float32Array).set(out);
     posAttr.needsUpdate = true;
+    mouthInterior?.update(out);
+    // 非表示のときは対応点の引き直しを丸ごと省く (既定でoffなので通常はここで抜ける)
+    if (landmarkOverlay.object.visible) landmarkOverlay.update(out);
   };
+
+  // --- レイヤー分離プレビュー: 元写真 → 最終出力の加工工程を順に並べる ---
+  // GPUへ渡しているテクスチャはそのキャンバス自体を入れる (作り直した近似は入れない)
+  const previewLayers: PreviewLayer[] = [{ label: '1 元写真', canvas: sourceCanvas, photoAspect: true }];
+  if (seg) {
+    previewLayers.push({
+      label: '2 人物マスク (person)',
+      canvas: buildMaskedPhotoLayer(sourceCanvas, (u, v) => sampleField(seg.person, u, v)),
+      photoAspect: true,
+    });
+  }
+  previewLayers.push({
+    label: '3 head参照画素 (UVクランプ後)',
+    canvas: buildSampledPixelsLayer(sourceCanvas, uvs, photoW),
+    photoAspect: true,
+  });
+  if (seg) {
+    previewLayers.push({
+      label: `4 髪マスク (帽子:${params.gnmHairIncludeAccessories ? 'on' : 'off'} / GF:${params.gnmMaskRefine ? 'on' : 'off'})`,
+      canvas: buildMaskedPhotoLayer(sourceCanvas, (u, v) => sampleField(seg.hair, u, v)),
+      photoAspect: true,
+    });
+  }
+  if (hair) {
+    previewLayers.push({
+      // 正方形1024pxへ引き伸ばしたものをGPUへ渡しているので、そのまま出す
+      label: '5 髪alphaMap (GPU実物1024²)',
+      canvas: hair.alphaTexture.image as HTMLCanvasElement,
+      photoAspect: false,
+    });
+  }
+  const depthCanvas = buildDepthPreviewCanvas(ctx, params);
+  if (depthCanvas) {
+    previewLayers.push({ label: '6 深度 (使用中)', canvas: depthCanvas, photoAspect: true });
+  }
+  if (normalTexture) {
+    previewLayers.push({
+      // Normal Strengthを適用した後の実物 (生のDAViD出力ではない)
+      label: `7 法線 (強度${params.gnmNormalStrength.toFixed(2)}適用後)`,
+      canvas: normalTexture.image as HTMLCanvasElement,
+      photoAspect: true,
+    });
+  }
 
   return {
     group,
     headMesh,
     hairMesh: hair?.mesh ?? null,
+    mouthInteriorMesh: mouthInterior?.mesh ?? null,
     landmarkOverlay: landmarkOverlay.object,
+    refreshLandmarkOverlay() {
+      landmarkOverlay.update(applied);
+    },
+    previewLayers,
+    layerPreviewCrop: computeHeadCropFraction(ctx),
     fit,
     setNeutralExpression() {
       exprTarget.fill(0);
@@ -304,7 +511,9 @@ export function buildGnmHead(
     dispose() {
       geometry.dispose();
       headMaterial.dispose();
+      normalTexture?.dispose();
       landmarkOverlay.dispose();
+      mouthInterior?.dispose();
       if (hair) {
         hair.mesh.geometry.dispose();
         hair.alphaTexture.dispose();
@@ -312,6 +521,190 @@ export function buildGnmHead(
       }
     },
   };
+}
+
+/**
+ * 写真をマスク解像度へ縮小し、マスク重み付き平均色を返す (linear空間)。
+ * darkenはsRGB空間での減光率 (背面=陰の暗さ。口内色の0.4と同じ発想)。
+ * マスクがほぼ空なら null。
+ */
+function maskedAverageColor(
+  sourceCanvas: HTMLCanvasElement,
+  field: ScalarField,
+  darken: number,
+): THREE.Color | null {
+  const c = document.createElement('canvas');
+  c.width = field.width;
+  c.height = field.height;
+  const cc = c.getContext('2d')!;
+  cc.drawImage(sourceCanvas, 0, 0, field.width, field.height);
+  const data = cc.getImageData(0, 0, field.width, field.height).data;
+  let r = 0;
+  let g = 0;
+  let b = 0;
+  let wSum = 0;
+  for (let i = 0; i < field.data.length; i++) {
+    const w = field.data[i];
+    if (w <= 0.2) continue;
+    r += data[i * 4] * w;
+    g += data[i * 4 + 1] * w;
+    b += data[i * 4 + 2] * w;
+    wSum += w;
+  }
+  if (wSum < 1) return null;
+  return new THREE.Color().setRGB(
+    (r / wSum / 255) * darken,
+    (g / wSum / 255) * darken,
+    (b / wSum / 255) * darken,
+    THREE.SRGBColorSpace,
+  );
+}
+
+/** 頭部まわりのクロップ矩形を画像割合 (0-1) で求める (プレビュー表示用)。 */
+function computeHeadCropFraction(ctx: GnmBuildContext): { x: number; y: number; w: number; h: number } {
+  const cx = ctx.headCenterPx.x / ctx.imageWidth;
+  const cy = ctx.headCenterPx.y / ctx.imageHeight;
+  const fw = ctx.faceWidthPx / ctx.imageWidth;
+  const fh = ctx.faceWidthPx / ctx.imageHeight;
+  // 髪を含む頭部全体が入る余裕 (横±1.5faceWidth, 上2.0 / 下1.6faceWidth)
+  const x0 = Math.max(0, cx - fw * 1.5);
+  const x1 = Math.min(1, cx + fw * 1.5);
+  const y0 = Math.max(0, cy - fh * 2.0);
+  const y1 = Math.min(1, cy + fh * 1.6);
+  return { x: x0, y: y0, w: Math.max(1e-6, x1 - x0), h: Math.max(1e-6, y1 - y0) };
+}
+
+const LAYER_PREVIEW_MAX_DIM = 512;
+
+/** 元写真と同じアスペクト比の作業キャンバスを作る (長辺512上限)。 */
+function previewCanvas(sourceCanvas: HTMLCanvasElement): HTMLCanvasElement {
+  const scale = Math.min(1, LAYER_PREVIEW_MAX_DIM / Math.max(sourceCanvas.width, sourceCanvas.height));
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(2, Math.round(sourceCanvas.width * scale));
+  canvas.height = Math.max(2, Math.round(sourceCanvas.height * scale));
+  return canvas;
+}
+
+/**
+ * 写真を alpha(u,v) でマスクした画像を作る。
+ * 「この工程が写真のどこを使っているか」を1枚で見せるための表現。
+ */
+function buildMaskedPhotoLayer(
+  sourceCanvas: HTMLCanvasElement,
+  alpha: (u: number, v: number) => number,
+): HTMLCanvasElement {
+  const canvas = previewCanvas(sourceCanvas);
+  const { width: w, height: h } = canvas;
+  const c = canvas.getContext('2d')!;
+  c.drawImage(sourceCanvas, 0, 0, w, h);
+  const img = c.getImageData(0, 0, w, h);
+  for (let y = 0; y < h; y++) {
+    const v = 1 - (y + 0.5) / h;
+    for (let x = 0; x < w; x++) {
+      const a = alpha((x + 0.5) / w, v);
+      img.data[(y * w + x) * 4 + 3] = Math.round(Math.min(1, Math.max(0, a)) * 255);
+    }
+  }
+  c.putImageData(img, 0, 0);
+  return canvas;
+}
+
+/**
+ * headメッシュが実際に読んだ写真画素の分布。クランプ済みUVを photoW 重みで
+ * 3x3スプラットして密度にする。
+ * シルエット外から歩かされた頂点は縁の同じ画素へ集まるので、
+ * 「引き伸ばし (スメア) が起きている場所」が明るい線として見える。
+ */
+function buildSampledPixelsLayer(
+  sourceCanvas: HTMLCanvasElement,
+  uvs: Float32Array,
+  photoW: Float32Array,
+): HTMLCanvasElement {
+  const canvas = previewCanvas(sourceCanvas);
+  const { width: w, height: h } = canvas;
+  const acc = new Float32Array(w * h);
+  for (let i = 0; i < photoW.length; i++) {
+    const weight = photoW[i];
+    if (weight <= 0.01) continue;
+    const cx = Math.round(uvs[i * 2] * w - 0.5);
+    const cy = Math.round((1 - uvs[i * 2 + 1]) * h - 0.5);
+    for (let dy = -1; dy <= 1; dy++) {
+      const y = cy + dy;
+      if (y < 0 || y >= h) continue;
+      for (let dx = -1; dx <= 1; dx++) {
+        const x = cx + dx;
+        if (x < 0 || x >= w) continue;
+        acc[y * w + x] += weight;
+      }
+    }
+  }
+  const c = canvas.getContext('2d')!;
+  c.drawImage(sourceCanvas, 0, 0, w, h);
+  const img = c.getImageData(0, 0, w, h);
+  for (let i = 0; i < acc.length; i++) {
+    // 1頂点でもほぼ不透明、重なるほど飽和。密度の絶対値に依存しない形にする
+    img.data[i * 4 + 3] = Math.round((1 - Math.exp(-acc[i] * 1.5)) * 255);
+  }
+  c.putImageData(img, 0, 0);
+  return canvas;
+}
+
+/**
+ * 法線canvasを平坦 (+Z) へ向けてstrengthで弱めたコピーを返す (1ならそのまま)。
+ * RGB混合でベクトル長は縮むが、three.js側で正規化されるため問題ない。
+ */
+function blendNormalCanvasToFlat(src: HTMLCanvasElement, strength: number): HTMLCanvasElement {
+  const s = Math.min(1, Math.max(0, strength));
+  if (s >= 1) return src;
+  const out = document.createElement('canvas');
+  out.width = src.width;
+  out.height = src.height;
+  const c = out.getContext('2d')!;
+  c.drawImage(src, 0, 0);
+  c.globalAlpha = 1 - s;
+  c.fillStyle = 'rgb(128,128,255)';
+  c.fillRect(0, 0, out.width, out.height);
+  return out;
+}
+
+const DEPTH_PREVIEW_MAX_DIM = 512;
+
+/** 使用中のDepth場を画像全体空間のグレースケールへ可視化する (白=手前、rect外=黒)。 */
+function buildDepthPreviewCanvas(ctx: GnmBuildContext, params: Params): HTMLCanvasElement | null {
+  const depth = selectDepth(ctx, params);
+  if (!depth) return null;
+  const scale = Math.min(1, DEPTH_PREVIEW_MAX_DIM / Math.max(ctx.imageWidth, ctx.imageHeight));
+  const w = Math.max(2, Math.round(ctx.imageWidth * scale));
+  const h = Math.max(2, Math.round(ctx.imageHeight * scale));
+  const canvas = document.createElement('canvas');
+  canvas.width = w;
+  canvas.height = h;
+  const c = canvas.getContext('2d')!;
+  const img = c.createImageData(w, h);
+  // rect内のmin-maxで正規化して表示する
+  let min = Infinity;
+  let max = -Infinity;
+  for (let i = 0; i < depth.data.length; i++) {
+    if (depth.data[i] < min) min = depth.data[i];
+    if (depth.data[i] > max) max = depth.data[i];
+  }
+  const span = Math.max(1e-9, max - min);
+  for (let y = 0; y < h; y++) {
+    const v = 1 - (y + 0.5) / h;
+    for (let x = 0; x < w; x++) {
+      const u = (x + 0.5) / w;
+      const { u0, v0, u1, v1 } = depth.rect;
+      const inside = u >= u0 && u <= u1 && v >= v0 && v <= v1;
+      const g = inside ? Math.round(((sampleField(depth, u, v) - min) / span) * 255) : 0;
+      const i = (y * w + x) * 4;
+      img.data[i] = g;
+      img.data[i + 1] = g;
+      img.data[i + 2] = g;
+      img.data[i + 3] = 255;
+    }
+  }
+  c.putImageData(img, 0, 0);
+  return canvas;
 }
 
 const MOUTH_INTERIOR_BINS_X = 96;
@@ -426,66 +819,85 @@ function computeMouthInteriorWeights(
 }
 
 /**
- * ランドマーク重畳デバッグ表示を作る。
- * 色点 = 写真のランドマーク位置 (残差ワープの目標。唇=赤 / 目=シアン / その他=黄)、
- * 白線 = フィット+ワープ後のGNM表面対応点から写真位置への残差ベクトル。
- * 開口シームが赤点 (内唇) から外れていれば、フィット/ワープの残差が
- * 「開口位置ズレ」の原因だと切り分けられる。
- * zはワープ後表面のzを使う (透視投影の視差で写真とXY比較が狂わないように)。
+ * ランドマーク重畳デバッグ表示を作る。3種を重ねる:
+ * - 色点 (大)  = 写真のランドマーク位置 (残差ワープの目標。唇=赤 / 目=シアン / その他=黄)。
+ *                写真から測った固定値なので表情では動かない
+ * - 暗点 (小)  = 現在の表情を適用したGNM表面の対応点。表情に追従して動く
+ * - 白線       = 暗点→色点 の残差ベクトル
+ *
+ * 表情アニメーション中は「表情が対応点をどこへ運んだか」と「写真の目標」の差が
+ * そのまま線の長さになる。無表情で線が短く、開口時に唇の線が伸びるなら、
+ * 伸びた分が表情基底では張れていない差分。
+ * zは常に現在の表面zを使う (透視投影の視差で写真とXY比較が狂わないように)。
  */
+interface LandmarkOverlayBuild {
+  object: THREE.Object3D;
+  /** 表情適用後の頂点配列 (相似変換済み) から対応点を引き直す。 */
+  update(vertices: Float32Array): void;
+  dispose(): void;
+}
+
 function buildLandmarkOverlay(
   model: GnmModel,
   fit: GnmFitResult,
   landmarks: NormalizedFaceLandmark[],
-): { object: THREE.Object3D; dispose(): void } {
+): LandmarkOverlayBuild {
   const useDense = model.denseCount > 0;
   const corrCount = useDense ? model.denseCount : MEDIAPIPE_IBUG68.length;
   const corrIdx = useDense ? model.denseTriIndices : model.landmarkIndices;
   const corrBary = useDense ? model.denseBaryWeights : model.landmarkWeights;
   const corrMp = (k: number) => (useDense ? model.denseMpIndices[k] : MEDIAPIPE_IBUG68[k]);
 
-  const points: number[] = [];
-  const colors: number[] = [];
-  const lines: number[] = [];
-  const zLift = 0.01; // 表面と重ならないよう僅かに手前へ
-
+  // 対応点を持つものだけを詰め直す (毎フレーム参照するので事前に平坦化しておく)
+  const tri: number[] = [];
+  const bary: number[] = [];
+  const photoXy: number[] = [];
+  const photoColors: number[] = [];
+  const meshColors: number[] = [];
   for (let k = 0; k < corrCount; k++) {
     const mp = corrMp(k);
     const lm = landmarks[mp];
     if (!lm) continue;
-    let sx = 0;
-    let sy = 0;
-    let sz = 0;
     for (let j = 0; j < 3; j++) {
-      const vi = corrIdx[k * 3 + j];
-      const bw = corrBary[k * 3 + j];
-      sx += fit.vertices[vi * 3] * bw;
-      sy += fit.vertices[vi * 3 + 1] * bw;
-      sz += fit.vertices[vi * 3 + 2] * bw;
+      tri.push(corrIdx[k * 3 + j]);
+      bary.push(corrBary[k * 3 + j]);
     }
-    const z = sz + zLift;
-    points.push(lm.x, lm.y, z);
-    if (MP_LIPS.has(mp)) colors.push(1, 0.15, 0.3);
-    else if (MP_EYES.has(mp)) colors.push(0.15, 0.9, 1);
-    else colors.push(1, 0.85, 0.2);
-    lines.push(sx, sy, z, lm.x, lm.y, z);
+    photoXy.push(lm.x, lm.y);
+    const c = MP_LIPS.has(mp) ? [1, 0.15, 0.3] : MP_EYES.has(mp) ? [0.15, 0.9, 1] : [1, 0.85, 0.2];
+    photoColors.push(...c);
+    // GNM側は同じ色相を暗くして「目標と現在」が対で読めるようにする
+    meshColors.push(c[0] * 0.45, c[1] * 0.45, c[2] * 0.45);
   }
+  const count = photoXy.length / 2;
+  const triIdx = Int32Array.from(tri);
+  const baryW = Float32Array.from(bary);
+  const photo = Float32Array.from(photoXy);
 
-  const pointsGeo = new THREE.BufferGeometry();
-  pointsGeo.setAttribute('position', new THREE.Float32BufferAttribute(points, 3));
-  pointsGeo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
-  const pointsMat = new THREE.PointsMaterial({
-    size: 0.012,
-    vertexColors: true,
-    sizeAttenuation: true,
-    depthTest: false,
-    transparent: true,
-  });
-  const pointsObj = new THREE.Points(pointsGeo, pointsMat);
-  pointsObj.renderOrder = 10;
+  const zLift = 0.01; // 表面と重ならないよう僅かに手前へ
+  const photoPos = new Float32Array(count * 3);
+  const meshPos = new Float32Array(count * 3);
+  const linePos = new Float32Array(count * 6);
+
+  const makePoints = (pos: Float32Array, colors: number[], size: number): THREE.Points => {
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    g.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+    const m = new THREE.PointsMaterial({
+      size,
+      vertexColors: true,
+      sizeAttenuation: true,
+      depthTest: false,
+      transparent: true,
+    });
+    return new THREE.Points(g, m);
+  };
+  const photoObj = makePoints(photoPos, photoColors, 0.012);
+  photoObj.renderOrder = 11;
+  const meshObj = makePoints(meshPos, meshColors, 0.008);
+  meshObj.renderOrder = 10;
 
   const linesGeo = new THREE.BufferGeometry();
-  linesGeo.setAttribute('position', new THREE.Float32BufferAttribute(lines, 3));
+  linesGeo.setAttribute('position', new THREE.BufferAttribute(linePos, 3));
   const linesMat = new THREE.LineBasicMaterial({
     color: 0xffffff,
     depthTest: false,
@@ -496,12 +908,50 @@ function buildLandmarkOverlay(
   linesObj.renderOrder = 9;
 
   const object = new THREE.Group();
-  object.add(linesObj, pointsObj);
+  object.add(linesObj, meshObj, photoObj);
+
+  const update = (verts: Float32Array): void => {
+    for (let k = 0; k < count; k++) {
+      let sx = 0;
+      let sy = 0;
+      let sz = 0;
+      for (let j = 0; j < 3; j++) {
+        const vi = triIdx[k * 3 + j] * 3;
+        const bw = baryW[k * 3 + j];
+        sx += verts[vi] * bw;
+        sy += verts[vi + 1] * bw;
+        sz += verts[vi + 2] * bw;
+      }
+      const z = sz + zLift;
+      const px = photo[k * 2];
+      const py = photo[k * 2 + 1];
+      meshPos[k * 3] = sx;
+      meshPos[k * 3 + 1] = sy;
+      meshPos[k * 3 + 2] = z;
+      photoPos[k * 3] = px;
+      photoPos[k * 3 + 1] = py;
+      photoPos[k * 3 + 2] = z;
+      linePos[k * 6] = sx;
+      linePos[k * 6 + 1] = sy;
+      linePos[k * 6 + 2] = z;
+      linePos[k * 6 + 3] = px;
+      linePos[k * 6 + 4] = py;
+      linePos[k * 6 + 5] = z;
+    }
+    (photoObj.geometry.getAttribute('position') as THREE.BufferAttribute).needsUpdate = true;
+    (meshObj.geometry.getAttribute('position') as THREE.BufferAttribute).needsUpdate = true;
+    (linesGeo.getAttribute('position') as THREE.BufferAttribute).needsUpdate = true;
+  };
+  update(fit.vertices); // 無表情の初期姿勢
+
   return {
     object,
+    update,
     dispose() {
-      pointsGeo.dispose();
-      pointsMat.dispose();
+      photoObj.geometry.dispose();
+      (photoObj.material as THREE.Material).dispose();
+      meshObj.geometry.dispose();
+      (meshObj.material as THREE.Material).dispose();
       linesGeo.dispose();
       linesMat.dispose();
     },
@@ -547,16 +997,151 @@ interface HairShellBuild {
   alphaTexture: THREE.CanvasTexture;
 }
 
+// 髪の厚み範囲 (モデル空間, faceWidth≈1)。厚すぎるとピッチ回転時に
+// シェル/キャップと頭皮の隙間が下から見える
+const HAIR_MAX_THICKNESS = 0.16;
+const HAIR_MIN_THICKNESS = 0.02;
+
+/** 法線キャンバス (RGBエンコード) からモデル空間法線を読むサンプラを作る。 */
+function makeNormalSampler(canvas: HTMLCanvasElement): (u: number, v: number) => [number, number, number] {
+  const w = canvas.width;
+  const h = canvas.height;
+  const data = canvas.getContext('2d')!.getImageData(0, 0, w, h).data;
+  return (u, v) => {
+    const px = Math.min(w - 1, Math.max(0, Math.round(u * w - 0.5)));
+    const py = Math.min(h - 1, Math.max(0, Math.round((1 - v) * h - 0.5)));
+    const o = (py * w + px) * 4;
+    return [data[o] / 127.5 - 1, data[o + 1] / 127.5 - 1, data[o + 2] / 127.5 - 1];
+  };
+}
+
+/**
+ * 実測法線でシェル表面の起伏 (毛束の凹凸) を作る。
+ * 高さ場の法線は n ∝ (-∂z/∂x, -∂z/∂y, 1) なので ∂z/∂x = -nx/nz で勾配が決まる。
+ * その勾配に合う高さ場をJacobi反復で解く。Depth由来のzを初期値+データ項に使い
+ * 反復を有界で打ち切るため、低周波はDepthのまま・高周波だけ法線由来になる。
+ *
+ * Depthは絶対位置は取れるが毛束スケールの凹凸は潰れており、逆に法線は
+ * 高周波に強く絶対位置を持たない — 役割を分けて融合する。
+ */
+function applyNormalRelief(
+  positions: Float32Array,
+  uvs: Float32Array,
+  maskPerVertex: Float32Array,
+  cols: number,
+  rows: number,
+  sampleNormal: (u: number, v: number) => [number, number, number],
+  dx: number,
+  dy: number,
+  strength: number,
+): void {
+  const total = cols * rows;
+  const gx = new Float32Array(total);
+  const gy = new Float32Array(total);
+  const trust = new Float32Array(total);
+  for (let i = 0; i < total; i++) {
+    const [nx, ny, nz] = sampleNormal(uvs[i * 2], uvs[i * 2 + 1]);
+    // グレージング (nz小) は勾配が発散するので信頼しない。髪の外も使わない
+    const t = smoothstep(0.35, 0.6, nz) * smoothstep(0.25, 0.55, maskPerVertex[i]);
+    trust[i] = t;
+    if (t <= 0) continue;
+    const nzSafe = Math.max(0.35, nz);
+    gx[i] = -nx / nzSafe;
+    gy[i] = -ny / nzSafe;
+  }
+
+  const anchor = new Float32Array(total);
+  for (let i = 0; i < total; i++) anchor[i] = positions[i * 3 + 2];
+  const z = new Float32Array(anchor);
+  const next = new Float32Array(total);
+  const LAMBDA = 0.08; // データ項 (Depth由来zへの引き戻し) の重み
+  const MAX_STEP = 0.05; // 1セルあたりの許容起伏 (モデル空間)。法線ノイズの暴走止め
+  const ITERATIONS = 120;
+  const clampStep = (v: number) => Math.min(MAX_STEP, Math.max(-MAX_STEP, v));
+
+  for (let iter = 0; iter < ITERATIONS; iter++) {
+    for (let row = 0; row < rows; row++) {
+      for (let col = 0; col < cols; col++) {
+        const i = row * cols + col;
+        let sum = LAMBDA * anchor[i];
+        let wsum = LAMBDA;
+        // 隣接4方向。row+1はyが小さくなる向き (グリッドは上から下へ張る)
+        if (col > 0) {
+          const j = i - 1;
+          const e = Math.min(trust[i], trust[j]) * strength;
+          sum += z[j] + clampStep(0.5 * (gx[i] + gx[j]) * dx * e);
+          wsum += 1;
+        }
+        if (col < cols - 1) {
+          const j = i + 1;
+          const e = Math.min(trust[i], trust[j]) * strength;
+          sum += z[j] - clampStep(0.5 * (gx[i] + gx[j]) * dx * e);
+          wsum += 1;
+        }
+        if (row > 0) {
+          const j = i - cols;
+          const e = Math.min(trust[i], trust[j]) * strength;
+          sum += z[j] - clampStep(0.5 * (gy[i] + gy[j]) * dy * e);
+          wsum += 1;
+        }
+        if (row < rows - 1) {
+          const j = i + cols;
+          const e = Math.min(trust[i], trust[j]) * strength;
+          sum += z[j] + clampStep(0.5 * (gy[i] + gy[j]) * dy * e);
+          wsum += 1;
+        }
+        next[i] = sum / wsum;
+      }
+    }
+    z.set(next);
+  }
+
+  for (let i = 0; i < total; i++) positions[i * 3 + 2] = z[i];
+}
+
+/** グリッド上のスカラー場を3x3近傍平均で平滑化する (in-place)。 */
+function smoothGridField(field: Float32Array, cols: number, rows: number, passes: number): void {
+  if (passes <= 0) return;
+  const src = new Float32Array(field.length);
+  for (let pass = 0; pass < passes; pass++) {
+    src.set(field);
+    for (let row = 0; row < rows; row++) {
+      for (let col = 0; col < cols; col++) {
+        let sum = 0;
+        let count = 0;
+        for (let dr = -1; dr <= 1; dr++) {
+          const rr = row + dr;
+          if (rr < 0 || rr >= rows) continue;
+          for (let dc = -1; dc <= 1; dc++) {
+            const cc = col + dc;
+            if (cc < 0 || cc >= cols) continue;
+            sum += src[rr * cols + cc];
+            count++;
+          }
+        }
+        field[row * cols + col] = sum / count;
+      }
+    }
+  }
+}
+
 /**
  * 実測髪マスク+実測Depthの前面髪シェルを作る。
  * Depthの相対値はランドマーク位置の「フィット済GNM表面z」への最小二乗で
  * モデル空間zへ写像する (実比率スケール)。
+ *
+ * 役割分担: 髪マスクは「色 (RGB) と輪郭 (alphaMap)」専用で、形状には
+ * 低周波成分だけを使う。マスクの高周波 (房の切れ目・GFの滲み) をzへ通すと
+ * 房境界ごとにメッシュが折れ、グリッド解像度のジグザグになる。
+ * 形状は実測Depth (絶対位置) が担う。
  */
 function buildHairShell(
   ctx: GnmBuildContext,
   texture: THREE.Texture,
   fit: GnmFitResult,
+  triangles: Uint32Array,
   params: Params,
+  normalTexture: THREE.Texture | null = null,
 ): HairShellBuild | null {
   const seg = selectSegmentation(ctx, params);
   const depth = selectDepth(ctx, params);
@@ -586,11 +1171,34 @@ function buildHairShell(
   // フィット済GNM表面のzバッファ (XYビンごとの最前面z)。
   // 髪シェルは「頭皮z + 実測髪厚」でアンカーする — Depthフィットの外挿を
   // そのままzに使うと頭頂で過大になり、シェルが頭蓋から浮くため。
-  const scalp = buildScalpZBuffer(fit.vertices, { xMin, xMax, yMin, yMax });
-  // 厚みを厚くしすぎるとピッチ回転時にシェルと頭皮の隙間が下から見える
-  const maxThickness = 0.16; // モデル空間 (faceWidth≈1) での髪厚上限
-  const minThickness = 0.02;
+  const scalp = buildScalpZBuffer(fit.vertices, triangles, { xMin, xMax, yMin, yMax });
 
+  // 髪マスク重み付きの深度サンプル。前髪などまばらな髪帯では、毛の隙間から
+  // 見える肌 (奥) の深度が混ざって格子zがジグザグになる (高解像度のDAViDは
+  // この毛/肌の段差を実際に解像する。低解像度のARPortraitDepthでは潰れて
+  // 起きない)。シェルは「髪の表面」を張るものなので、近傍3x3を髪らしさで
+  // 重み付けし、隙間画素の肌深度を捨てて毛側の深度だけを拾う
+  const cellU = ((xMax - xMin) / (cols - 1)) * (ctx.faceWidthPx / ctx.imageWidth);
+  const cellV = ((yMax - yMin) / (rows - 1)) * (ctx.faceWidthPx / ctx.imageHeight);
+  const sampleHairDepth = (u: number, v: number, centerMask: number): number => {
+    if (centerMask < 0.05) return sampleField(depth, u, v); // 髪の外は素通し
+    let sum = 0;
+    let wsum = 0;
+    for (let dy = -1; dy <= 1; dy++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        const su = u + dx * cellU * 0.75;
+        const sv = v + dy * cellV * 0.75;
+        const w = smoothstep(0.2, 0.7, sampleField(seg.hair, su, sv));
+        if (w <= 0) continue;
+        sum += sampleField(depth, su, sv) * w;
+        wsum += w;
+      }
+    }
+    return wsum > 1e-3 ? sum / wsum : sampleField(depth, u, v);
+  };
+
+  const thicknessRaw = new Float32Array(cols * rows); // クランプ前の実測髪厚
+  const scalpZs = new Float32Array(cols * rows);
   for (let row = 0; row < rows; row++) {
     const y = yMax + (yMin - yMax) * (row / (rows - 1));
     for (let col = 0; col < cols; col++) {
@@ -601,52 +1209,65 @@ function buildHairShell(
 
       const hairMask = sampleField(seg.hair, u, v);
       maskPerVertex[idx] = hairMask;
-      const d = sampleField(depth, u, v);
+      const d = sampleHairDepth(u, v, hairMask);
       const zMeasured = (d * hairFit.scale + hairFit.offset) * params.measuredDepthGain;
-      const scalpZ = scalp(x, y);
-      const thickness = Math.min(maxThickness, Math.max(minThickness, zMeasured - scalpZ));
-      // feather帯では厚みを頭皮へ絞る (縁の浮き対策。rolloffは絞り増強として作用)
-      const edge = smoothstep(0.08, 0.5, hairMask);
-      const z = scalpZ + params.gnmHairLift + thickness * edge - params.gnmHairRolloff * (1 - edge);
+      scalpZs[idx] = scalp(x, y);
+      thicknessRaw[idx] = zMeasured - scalpZs[idx];
 
       positions[idx * 3] = x;
       positions[idx * 3 + 1] = y;
-      positions[idx * 3 + 2] = z;
       uvs[idx * 2] = u;
       uvs[idx * 2 + 1] = v;
     }
   }
 
-  // Depthノイズ (GNM実スケールで増幅) をグリッド空間で平滑化する
-  for (let pass = 0; pass < 2; pass++) {
-    const src = new Float32Array(maskPerVertex.length);
-    for (let i = 0; i < maskPerVertex.length; i++) src[i] = positions[i * 3 + 2];
-    for (let row = 0; row < rows; row++) {
-      for (let col = 0; col < cols; col++) {
-        let sum = 0;
-        let count = 0;
-        for (let dr = -1; dr <= 1; dr++) {
-          const rr = row + dr;
-          if (rr < 0 || rr >= rows) continue;
-          for (let dc = -1; dc <= 1; dc++) {
-            const cc = col + dc;
-            if (cc < 0 || cc >= cols) continue;
-            sum += src[rr * cols + cc];
-            count++;
-          }
-        }
-        positions[(row * cols + col) * 3 + 2] = sum / count;
-      }
-    }
+  // 厚み場のノイズ (GNM実スケールで増幅される) をグリッド空間で平滑化する。
+  // 3x3 blurの物理半径はセルサイズに比例して縮むため、パス数はグリッド密度の
+  // 2乗でスケールして「見た目の平滑量」を解像度から独立させる。
+  // DAViDはノイズが少ないため基準を弱め (旧64列グリッドで1パス相当) にして
+  // 生え際・毛束の実起伏を残す
+  const basePasses = params.depthSource === 'DAVID' && ctx.measured?.davidDepth ? 1 : 2;
+  const densityScale = Math.max(1, Math.round((cols / 64) ** 2));
+  smoothGridField(thicknessRaw, cols, rows, basePasses * densityScale);
+
+  // 縁の巻き込みに使うマスクは強く平滑化して低周波成分だけにする。
+  // 生のマスクを使うと房の切れ目ごとにzが (厚み+rolloff) 幅で上下し、
+  // それがメッシュのジグザグの主因になる (輪郭の精度はalphaMapが担う)
+  const edgeField = new Float32Array(maskPerVertex);
+  smoothGridField(edgeField, cols, rows, 3 * densityScale);
+
+  for (let i = 0; i < cols * rows; i++) {
+    const edge = smoothstep(0.08, 0.5, edgeField[i]);
+    const thickness = Math.min(HAIR_MAX_THICKNESS, Math.max(HAIR_MIN_THICKNESS, thicknessRaw[i]));
+    positions[i * 3 + 2] =
+      scalpZs[i] + params.gnmHairLift + thickness * edge - params.gnmHairRolloff * (1 - edge);
   }
 
-  // マスク外へはみ出すコーナーを含む三角形は張らない。境界セルの三角形が
-  // グレージング視で横倒しになり「鋸歯状のスパイク」として見えるため、
-  // 全コーナーがマスク内のセルだけ残す (縁のフェードはalphaMap+alphaTestに任せる)
+  // 毛束スケールの起伏を実測法線から作る (Depthは厚みの低周波しか持たない)
+  const normalCanvas = params.normalSource === 'DAVID' ? ctx.measured?.davidNormalCanvas : null;
+  if (normalCanvas && params.gnmHairRelief > 0) {
+    applyNormalRelief(
+      positions,
+      uvs,
+      maskPerVertex,
+      cols,
+      rows,
+      makeNormalSampler(normalCanvas),
+      (xMax - xMin) / (cols - 1),
+      (yMax - yMin) / (rows - 1),
+      params.gnmHairRelief,
+    );
+  }
+
+  // 三角形は「1つでも髪に触れていれば」張る。全コーナーがマスク内という条件だと
+  // 境界がグリッド解像度の階段になり、マスクが薄い房の内部にも穴が空く
+  // (実測: 96x120で28%の三角形がこれで落ちていた)。
+  // 実際の輪郭はalphaMap (1024px) のper-pixelカットが担うので、
+  // ジオメトリはマスクより1セル外まで張っておくのが正しい
   const gridIndices = buildGridIndices(cols, rows);
   const kept: number[] = [];
   for (let t = 0; t < gridIndices.length; t += 3) {
-    const m = Math.min(
+    const m = Math.max(
       maskPerVertex[gridIndices[t]],
       maskPerVertex[gridIndices[t + 1]],
       maskPerVertex[gridIndices[t + 2]],
@@ -660,7 +1281,8 @@ function buildHairShell(
   geometry.setIndex(new THREE.BufferAttribute(new Uint32Array(kept), 1));
   applyFlatNormals(geometry);
 
-  const alphaTexture = new THREE.CanvasTexture(rasterizeMaskCanvas(seg.hair, 512));
+  // 精細化済みマスク (768px) の解像度を活かすため1024/blur1で焼く
+  const alphaTexture = new THREE.CanvasTexture(rasterizeMaskCanvas(seg.hair, 1024, 1));
   alphaTexture.wrapS = THREE.ClampToEdgeWrapping;
   alphaTexture.wrapT = THREE.ClampToEdgeWrapping;
 
@@ -675,6 +1297,10 @@ function buildHairShell(
     // グレージング視で筋状に見える。裾を早めに切って背後のGNMに任せる
     alphaTest: 0.3,
   });
+  if (normalTexture) {
+    material.normalMap = normalTexture;
+    material.normalMapType = THREE.ObjectSpaceNormalMap;
+  }
 
   return { mesh: new THREE.Mesh(geometry, material), alphaTexture };
 }
@@ -683,12 +1309,17 @@ const SCALP_BINS_X = 96;
 const SCALP_BINS_Y = 112;
 
 /**
- * フィット済GNM頂点をXYビンへ分配し、各ビンの最前面z (最大z) を持つ
- * 「頭皮zバッファ」を作る。空ビンはBFSで最寄りの値を伝播して埋めるため、
+ * フィット済GNMの表面を平行投影でラスタライズし、各ビンの最前面z (最大z) を持つ
+ * 「頭皮zバッファ」を作る。空ビン (シルエット外) はBFSで最寄りの値を伝播するため、
  * 髪がGNMシルエットの外へはみ出す画素でも連続したzが返る。
+ *
+ * 頂点splatではなく三角形ラスタライズで埋める: GNM頂点はビン格子より疎で、
+ * splatだと内部にも空ビンが散り、BFS伝播の階段がそのまま髪シェルの段差
+ * (クシャクシャ) として現れる。
  */
 function buildScalpZBuffer(
   verts: Float32Array,
+  triangles: Uint32Array,
   bounds: { xMin: number; xMax: number; yMin: number; yMax: number },
 ): (x: number, y: number) => number {
   const { xMin, xMax, yMin, yMax } = bounds;
@@ -698,12 +1329,37 @@ function buildScalpZBuffer(
 
   const spanX = Math.max(1e-6, xMax - xMin);
   const spanY = Math.max(1e-6, yMax - yMin);
-  for (let i = 0; i < verts.length; i += 3) {
-    const bx = Math.floor(((verts[i] - xMin) / spanX) * w);
-    const by = Math.floor(((verts[i + 1] - yMin) / spanY) * h);
-    if (bx < 0 || bx >= w || by < 0 || by >= h) continue;
-    const idx = by * w + bx;
-    if (verts[i + 2] > data[idx]) data[idx] = verts[i + 2];
+  const toBx = (x: number) => ((x - xMin) / spanX) * w - 0.5;
+  const toBy = (y: number) => ((y - yMin) / spanY) * h - 0.5;
+  for (let t = 0; t < triangles.length; t += 3) {
+    const a = triangles[t] * 3;
+    const b = triangles[t + 1] * 3;
+    const c = triangles[t + 2] * 3;
+    const ax = toBx(verts[a]);
+    const ay = toBy(verts[a + 1]);
+    const bx = toBx(verts[b]);
+    const by = toBy(verts[b + 1]);
+    const cx = toBx(verts[c]);
+    const cy = toBy(verts[c + 1]);
+    const area = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+    if (Math.abs(area) < 1e-9) continue;
+    const x0 = Math.max(0, Math.floor(Math.min(ax, bx, cx)));
+    const x1 = Math.min(w - 1, Math.ceil(Math.max(ax, bx, cx)));
+    const y0 = Math.max(0, Math.floor(Math.min(ay, by, cy)));
+    const y1 = Math.min(h - 1, Math.ceil(Math.max(ay, by, cy)));
+    for (let py = y0; py <= y1; py++) {
+      for (let px = x0; px <= x1; px++) {
+        // 重心座標 (符号付き面積比)。三角形の向きに関係なく内外判定できるよう
+        // areaで正規化してから0-1範囲を見る
+        const wa = ((bx - px) * (cy - py) - (by - py) * (cx - px)) / area;
+        const wb = ((cx - px) * (ay - py) - (cy - py) * (ax - px)) / area;
+        const wc = 1 - wa - wb;
+        if (wa < -1e-4 || wb < -1e-4 || wc < -1e-4) continue;
+        const z = wa * verts[a + 2] + wb * verts[b + 2] + wc * verts[c + 2];
+        const idx = py * w + px;
+        if (z > data[idx]) data[idx] = z;
+      }
+    }
   }
 
   // 空ビンをBFSで埋める (最寄りの既知zを伝播)
@@ -745,10 +1401,44 @@ function buildScalpZBuffer(
     }
   }
 
+  // ビンは「疎なGNM頂点のmax」なのでビン単位のノイズを持つ。3x3 blurで均す
+  // (thicknessクランプ時にzがこのバッファへ直接従うため、ここのノイズは
+  // そのままメッシュのクシャクシャになる)
+  for (let pass = 0; pass < 2; pass++) {
+    const src = data.slice();
+    for (let by = 0; by < h; by++) {
+      for (let bx = 0; bx < w; bx++) {
+        let sum = 0;
+        let cnt = 0;
+        for (let dy = -1; dy <= 1; dy++) {
+          const yy = by + dy;
+          if (yy < 0 || yy >= h) continue;
+          for (let dx = -1; dx <= 1; dx++) {
+            const xx = bx + dx;
+            if (xx < 0 || xx >= w) continue;
+            sum += src[yy * w + xx];
+            cnt++;
+          }
+        }
+        data[by * w + bx] = sum / cnt;
+      }
+    }
+  }
+
+  // バイリニア補間で参照する — 最近傍参照だとビン境界の階段が
+  // グリッド解像度と干渉し、クランプ帯のメッシュが列ごとに跳ねる
   return (x: number, y: number) => {
-    const bx = Math.min(w - 1, Math.max(0, Math.floor(((x - xMin) / spanX) * w)));
-    const by = Math.min(h - 1, Math.max(0, Math.floor(((y - yMin) / spanY) * h)));
-    return data[by * w + bx];
+    const fx = Math.min(w - 1.001, Math.max(0, ((x - xMin) / spanX) * w - 0.5));
+    const fy = Math.min(h - 1.001, Math.max(0, ((y - yMin) / spanY) * h - 0.5));
+    const bx = Math.floor(fx);
+    const by = Math.floor(fy);
+    const ax = fx - bx;
+    const ay = fy - by;
+    const i00 = data[by * w + bx];
+    const i10 = data[by * w + bx + 1];
+    const i01 = data[(by + 1) * w + bx];
+    const i11 = data[(by + 1) * w + bx + 1];
+    return (i00 * (1 - ax) + i10 * ax) * (1 - ay) + (i01 * (1 - ax) + i11 * ax) * ay;
   };
 }
 

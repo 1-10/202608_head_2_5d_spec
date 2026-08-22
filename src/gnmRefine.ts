@@ -78,6 +78,129 @@ const APERTURE_PAIRS = [
  * 鼻孔の暗さだけで見た目は十分なため、凹みを均して閉じてしまう。
  * 縁 (nostrilWeight=0の隣接頂点) は動かさないので鼻の表面とは連続。
  */
+/**
+ * 眼球貫通の拘束。表情で動くのは瞼だけで、眼球頂点は表情基底上まったく動かない
+ * (実測: 目領域20成分すべてで眼球頂点の基底変位=0) ため、瞼が眼球の内側へ
+ * 潜り込むと眼球が瞼を貫通して見える。これは表情の組み合わせ・写真のフィット・
+ * 残差ワープのいずれからも起こりうるので、原因側を塞ぐのではなく
+ * 「瞼は眼球の外側」という不変条件を毎フレーム保証する。
+ *
+ * 眼球は球で十分に近似できる (実測: 半径0.107に対し平均残差0.0025=2.3%)。
+ * 各頂点の許容最小距離はneutral時の距離で下限を取るため、neutralでは
+ * 一切動かず (見た目不変)、そこより深く潜ることだけを禁じる。
+ */
+export interface EyeballContainment {
+  /** 表情適用後の頂点配列 (neutral基準の未変換空間) をin-placeで補正する。 */
+  apply(vertices: Float32Array): void;
+}
+
+const EYE_CLEARANCE = 0.0025; // 眼球表面からの最小離隔 (モデル空間, faceWidth=1)
+const EYE_CANDIDATE_SCALE = 1.9; // 拘束対象にする「中心からの距離 / 半径」上限
+
+export function buildEyeballContainment(
+  model: GnmModel,
+  neutralVertices: Float32Array,
+): EyeballContainment | null {
+  const eyeIdx: number[] = [];
+  for (let i = 0; i < model.vertexCount; i++) if (model.eyeWeight[i] > 128) eyeIdx.push(i);
+  if (eyeIdx.length < 32) return null;
+
+  // 左右に分ける (モデル空間の符号で判定。GNMの左右規約に依存しない)
+  const groups: number[][] = [[], []];
+  for (const i of eyeIdx) groups[neutralVertices[i * 3] < 0 ? 0 : 1].push(i);
+
+  const spheres: { cx: number; cy: number; cz: number; r: number; targets: Int32Array; floors: Float32Array }[] = [];
+  for (const group of groups) {
+    if (group.length < 16) continue;
+    const s = fitSphere(neutralVertices, group);
+    if (!s) continue;
+    // 拘束対象は眼球以外 (瞼・目周りの肌) で球の近傍にあるもの
+    const targets: number[] = [];
+    const floors: number[] = [];
+    const limit = s.r * EYE_CANDIDATE_SCALE;
+    for (let i = 0; i < model.vertexCount; i++) {
+      if (model.eyeWeight[i] > 128) continue;
+      const d = Math.hypot(
+        neutralVertices[i * 3] - s.cx,
+        neutralVertices[i * 3 + 1] - s.cy,
+        neutralVertices[i * 3 + 2] - s.cz,
+      );
+      if (d > limit) continue;
+      targets.push(i);
+      // neutralで既に球内にある頂点はその距離を下限にする (neutralの見た目を変えない)
+      floors.push(Math.min(d, s.r + EYE_CLEARANCE));
+    }
+    if (targets.length === 0) continue;
+    spheres.push({ ...s, targets: new Int32Array(targets), floors: new Float32Array(floors) });
+  }
+  if (spheres.length === 0) return null;
+
+  return {
+    apply(vertices: Float32Array): void {
+      for (const s of spheres) {
+        for (let k = 0; k < s.targets.length; k++) {
+          const i = s.targets[k];
+          const dx = vertices[i * 3] - s.cx;
+          const dy = vertices[i * 3 + 1] - s.cy;
+          const dz = vertices[i * 3 + 2] - s.cz;
+          const d = Math.hypot(dx, dy, dz);
+          const floor = s.floors[k];
+          if (d >= floor || d < 1e-6) continue;
+          const scale = floor / d;
+          vertices[i * 3] = s.cx + dx * scale;
+          vertices[i * 3 + 1] = s.cy + dy * scale;
+          vertices[i * 3 + 2] = s.cz + dz * scale;
+        }
+      }
+    },
+  };
+}
+
+/** 頂点群へ球を最小二乗フィットする (|p|²-2p·c+|c|²=r² の線形化)。 */
+function fitSphere(
+  vertices: Float32Array,
+  idx: number[],
+): { cx: number; cy: number; cz: number; r: number } | null {
+  // 4x4正規方程式 (未知数: cx, cy, cz, r²-|c|²)
+  const A = [
+    [0, 0, 0, 0],
+    [0, 0, 0, 0],
+    [0, 0, 0, 0],
+    [0, 0, 0, 0],
+  ];
+  const b = [0, 0, 0, 0];
+  for (const i of idx) {
+    const x = vertices[i * 3];
+    const y = vertices[i * 3 + 1];
+    const z = vertices[i * 3 + 2];
+    const row = [2 * x, 2 * y, 2 * z, 1];
+    const q = x * x + y * y + z * z;
+    for (let p = 0; p < 4; p++) {
+      for (let s = 0; s < 4; s++) A[p][s] += row[p] * row[s];
+      b[p] += row[p] * q;
+    }
+  }
+  // ガウス消去 (部分ピボット)
+  const m = A.map((row, i) => [...row, b[i]]);
+  for (let c = 0; c < 4; c++) {
+    let piv = c;
+    for (let r = c + 1; r < 4; r++) if (Math.abs(m[r][c]) > Math.abs(m[piv][c])) piv = r;
+    if (Math.abs(m[piv][c]) < 1e-12) return null;
+    [m[c], m[piv]] = [m[piv], m[c]];
+    for (let r = 0; r < 4; r++) {
+      if (r === c) continue;
+      const f = m[r][c] / m[c][c];
+      for (let k = c; k < 5; k++) m[r][k] -= f * m[c][k];
+    }
+  }
+  const cx = m[0][4] / m[0][0];
+  const cy = m[1][4] / m[1][1];
+  const cz = m[2][4] / m[2][2];
+  const r2 = m[3][4] / m[3][3] + cx * cx + cy * cy + cz * cz;
+  if (!(r2 > 1e-9)) return null;
+  return { cx, cy, cz, r: Math.sqrt(r2) };
+}
+
 export function fillNostrils(model: GnmModel, vertices: Float32Array): void {
   if (model.nostrilWeight.length === 0) return;
   const targets: number[] = [];

@@ -3,15 +3,27 @@
 // マジックナンバーはここに集約し、他モジュールはこのオブジェクトを参照する。
 
 // 実測ソース (テクスチャUVクランプ・髪シェル用) の供給源。
-// MEASURED = Google公式モデル (SelfieMulticlass / ARPortraitDepth。学習データまで商用クリーン)
-// NEURAL   = 高品質ニューラル (BiRefNet / Depth Anything V2。重みは商用可だが学習データはグレー。比較用)
-// NONE     = 不使用 (マスクなし=UVクランプ無効、Depthなし=髪シェル無効)
-export type MaskSource = 'MEASURED' | 'NEURAL' | 'NONE';
-export type DepthSource = 'MEASURED' | 'NEURAL' | 'NONE';
+// 値は実モデル名で持つ (すべて学習データまで商用クリーン):
+// SELFIE_MULTICLASS = Google SelfieMulticlass 256px (意味分け: 髪/肌/人物)
+// ARPORTRAIT_DEPTH  = Google ARPortraitDepth (低解像度Depth。DAViDとの比較用)
+// DAVID             = Microsoft DAViD multi-task (人物特化のDepth/法線/前景。
+//                     100%合成データ学習+MIT。初回のみモデルDL ~660MB)
+// NONE              = 不使用 (マスクなし=UVクランプ無効、Depthなし=髪シェル無効)
+export type MaskSource = 'SELFIE_MULTICLASS' | 'NONE';
+export type DepthSource = 'DAVID' | 'ARPORTRAIT_DEPTH' | 'NONE';
+// 人物シルエット (UVクランプ・Depth cleanup境界) の供給源。
+// DAVID=ソフト前景セグ (512px)。crop外はSelfieMulticlassで補完。
+export type PersonSource = 'DAVID' | 'SELFIE_MULTICLASS';
+// 表面法線の供給源。DAVID=実測法線をObjectSpaceNormalMapとしてhead/髪に貼り、
+// 回転時の照明応答を与える (写真の陰影 + 実測法線のシェーディング)。NONE=平坦(+Z)
+export type NormalSource = 'DAVID' | 'NONE';
 
-// GNMの表情感情 (AUTO=自動巡回, MANUAL=パーツ別スライダー)。
-// キーは main.ts の感情→プリセット表と対応する
-export type GnmEmotion = 'AUTO' | 'NEUTRAL' | 'MANUAL' | 'joy' | 'fun' | 'sad' | 'anger' | 'surprise';
+// GNMの表情選択。'AUTO'=公式Expressionクラスを自動巡回 /
+// 'RANDOM'=公式randomize_expressions / 'NEUTRAL'=無表情 /
+// 'MANUAL'=パーツ別スライダー合成、それ以外は公式 Expression クラス名そのもの。
+// 有効なクラス名は表情サンプラー (gnm_expression_decoder.bin の classNames) が正本なので
+// ここでは列挙しない (列挙すると公式側が増えたとき黙って古くなる)
+export type GnmEmotion = string;
 
 export interface Params {
   // --- 回転操作 ---
@@ -21,6 +33,9 @@ export interface Params {
   // --- 実測ソース (UVクランプ・髪シェル) ---
   maskSource: MaskSource;
   depthSource: DepthSource;
+  normalSource: NormalSource;
+  personSource: PersonSource;
+  gnmNormalStrength: number; // 実測法線の強さ (0=平坦, 1=実測のまま)
   measuredDepthGain: number; // 計測Depthの振幅倍率 (髪シェルの厚み推定に乗算)
 
   // --- GNM Head フィット ---
@@ -32,6 +47,19 @@ export interface Params {
   gnmWarpStrength: number;
   gnmHairLift: number; // 髪シェルをGNM表面手前へ持ち上げる量 (モデル空間)
   gnmHairRolloff: number; // 髪シェル縁を後方へ巻き込む量 (モデル空間)
+  gnmShowHair: boolean; // 髪シェルメッシュの表示切替 (offで頭部のみ)
+  // 実測法線から髪シェルの起伏 (毛束の凹凸) を作る強さ (0=Depthのみの滑らかな面)。
+  // Depthは絶対位置、法線は高周波と役割を分けて融合する
+  gnmHairRelief: number;
+  // 髪マスクをGuided Filterで写真エッジへ整合させた精細版を使う (offで生の256px)
+  gnmMaskRefine: boolean;
+  // 髪シェルのマスクに accessories (SelfieMulticlassクラス5 = 帽子・メガネ等) を含める。
+  // onで帽子が髪と同じシェル (実測Depth) に乗る。帽子が写っていなければ見た目は変わらない
+  gnmHairIncludeAccessories: boolean;
+  gnmShowMouthInterior: boolean; // 口腔内 (口腔壁・歯・歯茎・舌) の表示切替
+  // 舌の姿勢。0=GNMのneutral (口を閉じた姿勢なので舌は口蓋に張り付いている) /
+  // 1=公式デモGIFの舌スライダー姿勢そのまま (tongue_mean=0.7 / tongue_000=-1.7)
+  gnmTonguePose: number;
 
   // --- GNM 表情 ---
   gnmExprIntensity: number; // 感情表情の強さ (プリセット係数への乗数)
@@ -40,14 +68,15 @@ export interface Params {
   // プリセットはGNM公式ExpressionSampler由来
   gnmEmotion: GnmEmotion;
   // --- パーツ別スライダー (Emotion=MANUAL時に有効) ---
-  // 公式ExpressionSamplerのクラスを領域 (目成分/下顔面成分) で分離した強度
-  gnmMouthOpen: number; // SURPRISEの下顔面 (顎開き)
-  gnmSmile: number; // SMILE_WIDEの下顔面
-  gnmPucker: number; // PUCKERの下顔面 (口すぼめ)
-  gnmCornersDown: number; // CORNERS_DOWNの下顔面 (口角下げ)
-  gnmEyesClose: number; // WINK合成の目領域 (閉眼)
-  gnmEyesWide: number; // SURPRISEの目領域 (見開き)
-  gnmSquint: number; // SQUINTの目領域 (細目)
+  // 公式クラスの代表表情を領域 (目成分/下顔面成分) で分離して加算する。
+  // 領域分割そのものは公式に無い操作なのでMANUALモード限定
+  gnmMouthOpen: number; // surprise の下顔面 (顎開き)
+  gnmSmile: number; // smile_wide の下顔面
+  gnmPucker: number; // pucker の下顔面 (口すぼめ)
+  gnmCornersDown: number; // corners_down の下顔面 (口角下げ)
+  gnmEyesClose: number; // wink_left+wink_right の目領域 (閉眼)
+  gnmEyesWide: number; // surprise の目領域 (見開き)
+  gnmSquint: number; // squint の目領域 (細目)
 
   // --- アニメーション (Blink) ---
   blinkEnabled: boolean;
@@ -60,12 +89,20 @@ export interface Params {
   showWireframe: boolean;
   // 写真ランドマーク(色点)とGNM表面対応点からの残差(白線)の重畳表示
   showLandmarks: boolean;
+  // レイヤー分離画像 (headテクスチャ / 髪だけの画像) を画面隅に表示
+  showLayerImages: boolean;
+  layerImageScale: number; // レイヤー画像の表示倍率 (1=基準高さ160px)
 
   // --- カメラ ---
   cameraFovDeg: number;
   cameraDistanceRatio: number; // faceWidth比
 
+  // --- シーン ---
+  backgroundColor: string; // 3Dビューポートの背景色 (hex)
+
   // --- 髪シェルGrid解像度 ---
+  // DAViD depth (512px crop) の情報量を拾える密度が基準。
+  // ARPortraitDepth (192x256) しか無い環境では下げても見た目は変わらない
   hairGridCols: number;
   hairGridRows: number;
 }
@@ -74,8 +111,11 @@ export const DEFAULT_PARAMS: Params = {
   maxYawDeg: 15,
   maxPitchDeg: 12,
 
-  maskSource: 'MEASURED',
-  depthSource: 'MEASURED',
+  maskSource: 'SELFIE_MULTICLASS',
+  depthSource: 'DAVID',
+  normalSource: 'DAVID',
+  personSource: 'DAVID',
+  gnmNormalStrength: 1.0,
   measuredDepthGain: 1.0,
 
   gnmIdentityReg: 1.0,
@@ -83,6 +123,12 @@ export const DEFAULT_PARAMS: Params = {
   gnmWarpStrength: 1.0,
   gnmHairLift: 0.02,
   gnmHairRolloff: 0.08,
+  gnmShowHair: true,
+  gnmHairRelief: 1.0,
+  gnmMaskRefine: true,
+  gnmHairIncludeAccessories: true,
+  gnmShowMouthInterior: true,
+  gnmTonguePose: 1.0,
 
   gnmExprIntensity: 1.0,
   gnmEmotion: 'AUTO',
@@ -102,12 +148,16 @@ export const DEFAULT_PARAMS: Params = {
 
   showWireframe: false,
   showLandmarks: false,
+  showLayerImages: false,
+  layerImageScale: 1.0,
 
   cameraFovDeg: 30,
   cameraDistanceRatio: 3.4,
 
-  hairGridCols: 64,
-  hairGridRows: 80,
+  backgroundColor: '#14161a', // style.cssの--bgと同じ初期値 (透過時と見た目が変わらないように)
+
+  hairGridCols: 96,
+  hairGridRows: 120,
 };
 
 export function createParams(): Params {

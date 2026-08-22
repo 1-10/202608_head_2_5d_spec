@@ -10,7 +10,9 @@
 #   (Umeyama+TPS整列→GNM表面へ投影) も焼き込まれ、フィット精度が上がる
 #
 # 含まれるもの (見える表面だけに間引く):
-# - skin_exterior + eye_exteriors の頂点/三角形サブセット (歯・舌・口腔/眼窩内部を除外)
+# - skin + eye_exteriors の頂点/三角形サブセット (眼窩内部を除外)
+# - 口腔内 (mouth_sock/歯/歯茎/舌) を別の三角形セットとして同梱。
+#   写真投影を持たず実法線+ライティングで描くため、頭部表面とは別メッシュにする
 # - identity基底の上位K成分 (int16量子化。基底はPCAで分散降順・係数はz-scoreスケール)
 # - HEAD_SPARSE_68 ランドマークのbarycentric定義 (iBUG-68順)
 # - 耳の頂点グループ重み (髪との整合処理用)
@@ -25,11 +27,31 @@ from pathlib import Path
 
 import numpy as np
 
-IDENTITY_BASIS_COUNT = 64  # 上位K成分 (ノルム降順を確認済み。K以降は寄与が微小)
+# identity基底は表情基底と同じく領域ブロック構造で、identity_names は
+#   head_000..head_169 (170) / eyes_170..eyes_172 (3) / teeth_173..teeth_252 (80)
+# の順に並ぶ。先頭K成分を採ると head ブロックの上位Kだけになり、eyes と teeth の
+# ブロックは丸ごと落ちる (「全体でノルム降順」ではない)。
+#
+# それで問題ない理由: teeth_* は歯・歯茎以外の頂点を動かさず (実測: 他の頂点での
+# 最大変位 0.0004mm)、eyes_* は眼球以外を動かさない。フィットは顔表面の468点
+# 対応だけを見るので、これらの係数はデータから一切観測されず、正則化つき
+# 最小二乗では0になる = 落としても描画結果は同じ。
+# 逆に言うと歯の形は常にGNMの平均歯で、個人差は入らない (口を閉じた写真1枚からは
+# 元々復元できない情報)。
+IDENTITY_BASIS_COUNT = 64  # head ブロックの上位64成分
 
 # 表情基底は領域ごとにPCA順 (ノルム降順を確認済み)。ランダム表情デモ用に
-# 主要領域の上位成分だけ持つ (舌・瞳孔は正面写真デモでは効果が薄いため除外)
-EXPRESSION_PICKS = {'left_eye_region': 10, 'right_eye_region': 10, 'lower_face_region': 20}
+# 主要領域の上位成分だけ持つ (瞳孔は正面写真デモでは効果が薄いため除外)。
+# tongueの4成分 (tongue_mean + tongue_000..002) は公式デモGUI
+# (gnm/shape/demos/gnm_head_demo.ipynb) がスライダーとして露出しているのと同じ選び方。
+# GNM Headに顎ジョイントは無く (joint_names = neck/head/left_eye/right_eye)、
+# 舌の姿勢はこの表情成分だけが与える
+EXPRESSION_PICKS = {
+    'left_eye_region': 10,
+    'right_eye_region': 10,
+    'lower_face_region': 20,
+    'tongue': 4,
+}
 
 # MediaPipe FaceMesh 468点 → iBUG-68 の対応表 (src/gnmHead.ts と同一の定数)。
 # 密対応構築時の初期整列 (Umeyama+TPS) の制御点に使う
@@ -224,16 +246,31 @@ def main() -> None:
     def group(name: str) -> np.ndarray:
         return groups[group_names.index(name)]
 
-    # skin_exteriorではなくskin全体から口腔内(mouth_sock)だけ除外する。
-    # skin_exteriorは鼻孔内部を含まず、鼻孔がメッシュの穴 (黒い点) として見えるため
-    vertex_mask = ((group('skin') > 0.5) & (group('mouth_sock') < 0.5)) | (group('eye_exteriors') > 0.5)
+    # 口腔内 = 口腔壁 + 歯 + 歯茎 + 舌。開口時に実ジオメトリとして見せる。
+    # 頭部表面と同じ頂点配列・同じ基底に乗せる (顎の開閉は lower_face_region の
+    # 表情基底が歯茎・舌・口腔壁を動かし、上顎の歯だけ変位0 = 解剖学的に正しい)
+    mouth_interior = (
+        (group('mouth_sock') > 0.5)
+        | (group('teeth') > 0.5)
+        | (group('gums') > 0.5)
+        | (group('tongue') > 0.5)
+    )
+    # skin_exteriorではなくskin全体を使う。skin_exteriorは鼻孔内部を含まず、
+    # 鼻孔がメッシュの穴 (黒い点) として見えるため
+    vertex_mask = (group('skin') > 0.5) | (group('eye_exteriors') > 0.5) | mouth_interior
     old_to_new = np.full(len(vertex_mask), -1, dtype=np.int64)
     old_to_new[vertex_mask] = np.arange(vertex_mask.sum())
 
     positions = d['template_vertex_positions'][vertex_mask].astype(np.float32)  # (N,3) メートル
     tris_all = d['triangles']
     tri_keep = vertex_mask[tris_all].all(axis=1)
-    triangles = old_to_new[tris_all[tri_keep]].astype(np.uint32)  # (T,3)
+    tris_kept = tris_all[tri_keep]
+    # 三角形を2セットへ分ける: 口腔内頂点を1つでも含むものは口腔内メッシュ側。
+    # こうすると頭部表面側は「口腔壁を除いた従来の集合」と完全に一致し、
+    # 口の開口境界リング (computeMouthInteriorWeightsが使う唯一の境界辺) も保たれる
+    is_interior_tri = mouth_interior[tris_kept].any(axis=1)
+    triangles = old_to_new[tris_kept[~is_interior_tri]].astype(np.uint32)  # (T,3) 頭部表面
+    interior_triangles = old_to_new[tris_kept[is_interior_tri]].astype(np.uint32)  # (Ti,3) 口腔内
 
     basis_full = d['vertex_identity_basis'][:IDENTITY_BASIS_COUNT][:, vertex_mask, :]  # (K,N,3)
     scales = np.abs(basis_full).max(axis=(1, 2)).astype(np.float32)  # (K,)
@@ -256,9 +293,21 @@ def main() -> None:
     lm_pos = (d['template_vertex_positions'][lm_idx_old] * lm_w[..., None]).sum(axis=1)
     nose_tip = lm_pos[30]  # iBUG-68の30番 = 鼻先
     dist = np.linalg.norm(d['template_vertex_positions'] - nose_tip, axis=1)
-    nostril = interior & (dist < 0.03)
+    # 口腔壁もskin\skin_exteriorかつ鼻先3cm圏に入るため明示的に除く (塞ぐ対象は鼻孔だけ)
+    nostril = interior & (dist < 0.03) & ~mouth_interior
     nostril_weight = (nostril[vertex_mask] * 255).astype(np.uint8)
     print(f'鼻孔内壁: {int(nostril[vertex_mask].sum())} 頂点 / 眼球: {int((eye_weight >= 128).sum())} 頂点')
+
+    # 口腔内のパーツID (色分け用)。歯∩歯茎は歯を優先 (露出面が歯)
+    part = np.zeros(len(vertex_mask), dtype=np.uint8)
+    part[group('gums') > 0.5] = 3
+    part[group('teeth') > 0.5] = 2
+    part[group('tongue') > 0.5] = 4
+    part[group('mouth_sock') > 0.5] = 1
+    mouth_part_id = part[vertex_mask]
+    counts = {n: int((mouth_part_id == i).sum()) for i, n in enumerate(['-', '口腔壁', '歯', '歯茎', '舌'])}
+    print(f'口腔内: {int(mouth_interior[vertex_mask].sum())} 頂点 / {len(interior_triangles)} 三角形 '
+          f'({counts["口腔壁"]}/{counts["歯"]}/{counts["歯茎"]}/{counts["舌"]})')
 
     expr_names = [str(n) for n in d['expression_names']]
     expr_indices = []
@@ -292,6 +341,8 @@ def main() -> None:
         'earWeight': ear_weight,      # uint8 (N,)
         'eyeWeight': eye_weight,      # uint8 (N,) 眼球グループ重み
         'nostrilWeight': nostril_weight,  # uint8 (N,) 鼻孔内壁 (平滑化で塞ぐ対象)
+        'interiorTriangles': interior_triangles,  # uint32 (Ti,3) 口腔内メッシュ
+        'mouthPartId': mouth_part_id,  # uint8 (N,) 0=なし 1=口腔壁 2=歯 3=歯茎 4=舌
         'expressionBasisQ': expr_q,   # int16 (M,N,3)
     }
     if dense is not None:
@@ -313,6 +364,7 @@ def main() -> None:
         'source': 'google/GNM gnm_head.npz v3_0 (Apache-2.0)',
         'vertexCount': int(positions.shape[0]),
         'triangleCount': int(triangles.shape[0]),
+        'interiorTriangleCount': int(interior_triangles.shape[0]),
         'identityBasisCount': IDENTITY_BASIS_COUNT,
         'identityBasisScales': [float(s) for s in scales],
         'expressionBasisCount': len(expr_indices),

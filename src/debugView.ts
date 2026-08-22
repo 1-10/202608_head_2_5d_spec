@@ -6,9 +6,10 @@ import type { Params } from './params';
 import type { GnmHeadBuild } from './gnmHeadMesh';
 
 export interface DebugGuiOptions {
-  onSourceChanged: () => void; // Mask/Depthソース切替 (NEURALは遅延取得)
+  onSourceChanged: () => void; // Mask/Depth/Normal/Personソース切替 (DAViDは遅延取得)
   onGnmParamsChanged: () => void; // フィット/髪シェルパラメータ変更 (再構築)
   onCameraChanged: () => void;
+  onBackgroundChanged: () => void; // 背景色変更 (scene.backgroundへ反映)
   onYawRangeChanged: () => void;
   onPitchRangeChanged: () => void;
   getGnmHead: () => GnmHeadBuild | null;
@@ -21,22 +22,125 @@ export function applyDebugVisualization(gnmHead: GnmHeadBuild | null, params: Pa
   if (gnmHead.hairMesh) {
     (gnmHead.hairMesh.material as THREE.MeshStandardMaterial).wireframe = params.showWireframe;
   }
+  if (gnmHead.hairMesh) gnmHead.hairMesh.visible = params.gnmShowHair;
+  if (gnmHead.mouthInteriorMesh) gnmHead.mouthInteriorMesh.visible = params.gnmShowMouthInterior;
   gnmHead.landmarkOverlay.visible = params.showLandmarks;
+  // 表情が静止しているとtickExpressionが走らないので、onにした時点で引き直す
+  if (params.showLandmarks) gnmHead.refreshLandmarkOverlay();
+  updateLayerPreview(gnmHead, params.showLayerImages, params.layerImageScale);
+}
+
+const LAYER_PREVIEW_ID = 'gnm-layer-preview';
+const LAYER_PREVIEW_BASE_HEIGHT = 160; // サムネイル表示高さの基準 (px, scale=1)
+
+/**
+ * 加工工程のレイヤー画像を画面左下へ並べる (元写真 → 最終出力で使うテクスチャ)。
+ * 並びと中身は gnmHead.previewLayers が正本 — ここでは順に描くだけにして、
+ * 「表示側が工程を知っている」状態を作らない (工程が変わると黙って古くなるため)。
+ * パネルはbody直下のシングルトンで、再構築のたびに描き直す。
+ */
+function updateLayerPreview(gnmHead: GnmHeadBuild, visible: boolean, scale: number): void {
+  let panel = document.getElementById(LAYER_PREVIEW_ID);
+  if (!visible) {
+    if (panel) panel.style.display = 'none';
+    return;
+  }
+  if (!panel) {
+    panel = document.createElement('div');
+    panel.id = LAYER_PREVIEW_ID;
+    panel.style.cssText =
+      'position:fixed;left:12px;right:12px;bottom:40px;z-index:20;display:flex;gap:8px;' +
+      'flex-wrap:wrap;align-items:flex-end;pointer-events:none;font:11px sans-serif;color:#ddd;';
+    document.body.appendChild(panel);
+  }
+  panel.style.display = 'flex';
+  panel.replaceChildren();
+
+  // 頭部まわりだけをクロップして表示する (全身写真だと頭部が小さすぎるため)。
+  // photoAspect=falseのレイヤーは元写真と縦横比が違うのでクロップを掛けない
+  const crop = gnmHead.layerPreviewCrop;
+  const previewHeight = Math.max(32, Math.round(LAYER_PREVIEW_BASE_HEIGHT * scale));
+  for (const layer of gnmHead.previewLayers) {
+    const fig = document.createElement('div');
+    fig.style.cssText = 'display:flex;flex-direction:column;gap:2px;align-items:flex-start;';
+    const thumb = document.createElement('canvas');
+    const src = layer.canvas;
+    const box = layer.photoAspect
+      ? { x: crop.x * src.width, y: crop.y * src.height, w: crop.w * src.width, h: crop.h * src.height }
+      : { x: 0, y: 0, w: src.width, h: src.height };
+    thumb.width = Math.max(1, Math.round((box.w / box.h) * previewHeight));
+    thumb.height = previewHeight;
+    // 透明部分 (マスク外) が見えるようダークグレー下地を敷く
+    thumb.style.cssText = 'background:#2a2a2a;border:1px solid #555;border-radius:3px;';
+    const c = thumb.getContext('2d')!;
+    c.imageSmoothingEnabled = true;
+    c.imageSmoothingQuality = 'high';
+    c.drawImage(src, box.x, box.y, box.w, box.h, 0, 0, thumb.width, thumb.height);
+
+    const caption = document.createElement('span');
+    caption.textContent = layer.label;
+    caption.style.cssText = 'background:rgba(0,0,0,0.5);padding:1px 4px;border-radius:2px;';
+    fig.append(thumb, caption);
+    panel.appendChild(fig);
+  }
+}
+
+// Emotionの基本選択肢。公式クラスは表情サンプラーのロード後に
+// refreshEmotionOptions() で追加する (クラス名の正本はサンプラー側)
+const BASE_EMOTION_OPTIONS: Record<string, string> = {
+  'Auto (公式クラスを巡回)': 'AUTO',
+  'Random (公式randomize_expressions)': 'RANDOM',
+  Neutral: 'NEUTRAL',
+  'Manual (下のスライダー)': 'MANUAL',
+};
+
+/**
+ * Emotionの選択肢へ公式Expressionクラス20種を追加する。
+ * classNames は gnm_expression_decoder.bin 由来なので、公式側が増えても追従する。
+ */
+export function refreshEmotionOptions(gui: GUI, params: Params, classNames: string[]): void {
+  const ctrl = gui.controllersRecursive().find((c) => c.property === 'gnmEmotion');
+  if (!ctrl) return;
+  const opts: Record<string, string> = { ...BASE_EMOTION_OPTIONS };
+  for (const n of classNames) opts[`公式: ${n}`] = n;
+  ctrl.options(opts).name('Emotion');
+  params.gnmEmotion = params.gnmEmotion; // 現在値を保つ
 }
 
 export function setupDebugGui(container: HTMLElement, params: Params, options: DebugGuiOptions): GUI {
   const gui = new GUI({ container, title: 'Parameters' });
 
   const sourceFolder = gui.addFolder('Data Sources');
-  // MEASURED=Google公式モデル(商用クリーン) / NEURAL=BiRefNet・DepthAnythingV2(高品質・比較用) / NONE=不使用
+  // 選択肢は実モデル名 (すべて学習データまで商用クリーン)。DAViDはmulti-taskの同時出力
   sourceFolder
-    .add(params, 'maskSource', ['MEASURED', 'NEURAL', 'NONE'])
+    .add(params, 'maskSource', { SelfieMulticlass: 'SELFIE_MULTICLASS', None: 'NONE' })
     .name('Mask Source')
     .onChange(() => options.onSourceChanged());
+  // マスクの作り方 (精細化・帽子の扱い) はソース選択と一体なのでここに置く
   sourceFolder
-    .add(params, 'depthSource', ['MEASURED', 'NEURAL', 'NONE'])
+    .add(params, 'gnmMaskRefine')
+    .name('Mask Refine (GF)')
+    .onChange(() => options.onGnmParamsChanged());
+  sourceFolder
+    .add(params, 'gnmHairIncludeAccessories')
+    .name('髪に帽子を含む (class5)')
+    .onChange(() => options.onGnmParamsChanged());
+  sourceFolder
+    .add(params, 'depthSource', { 'DAViD': 'DAVID', 'ARPortraitDepth': 'ARPORTRAIT_DEPTH', 'None': 'NONE' })
     .name('Depth Source')
     .onChange(() => options.onSourceChanged());
+  sourceFolder
+    .add(params, 'normalSource', { 'DAViD': 'DAVID', 'None (平坦)': 'NONE' })
+    .name('Normal Source')
+    .onChange(() => options.onSourceChanged());
+  sourceFolder
+    .add(params, 'personSource', { 'DAViD': 'DAVID', 'SelfieMulticlass': 'SELFIE_MULTICLASS' })
+    .name('Person Source')
+    .onChange(() => options.onSourceChanged());
+  sourceFolder
+    .add(params, 'gnmNormalStrength', 0, 1, 0.05)
+    .name('Normal Strength')
+    .onFinishChange(() => options.onGnmParamsChanged());
   sourceFolder
     .add(params, 'measuredDepthGain', 0, 3, 0.05)
     .name('Depth Gain')
@@ -64,22 +168,27 @@ export function setupDebugGui(container: HTMLElement, params: Params, options: D
     .add(params, 'gnmHairRolloff', 0, 1, 0.01)
     .name('Hair Rolloff')
     .onFinishChange(() => options.onGnmParamsChanged());
+  fitFolder
+    .add(params, 'gnmHairRelief', 0, 2, 0.05)
+    .name('Hair Relief (法線)')
+    .onFinishChange(() => options.onGnmParamsChanged());
+  fitFolder
+    .add(params, 'gnmShowHair')
+    .name('Show Hair')
+    .onChange(() => applyDebugVisualization(options.getGnmHead(), params));
+  fitFolder
+    .add(params, 'gnmShowMouthInterior')
+    .name('Show Mouth (歯・舌)')
+    .onChange(() => applyDebugVisualization(options.getGnmHead(), params));
+  fitFolder
+    .add(params, 'gnmTonguePose', 0, 1, 0.05)
+    .name('Tongue Pose (公式)')
+    .onFinishChange(() => options.onGnmParamsChanged());
   fitFolder.open();
 
   // プリセットは公式ExpressionSampler由来 (gnmExpressions.ts)
   const exprFolder = gui.addFolder('Expression');
-  exprFolder
-    .add(params, 'gnmEmotion', {
-      'Auto (喜怒哀楽を巡回)': 'AUTO',
-      Neutral: 'NEUTRAL',
-      'Manual (下のスライダー)': 'MANUAL',
-      '喜 Happy': 'joy',
-      '楽 Smile': 'fun',
-      '哀 Sad': 'sad',
-      '怒 Snarl': 'anger',
-      '驚 Surprise': 'surprise',
-    })
-    .name('Emotion');
+  exprFolder.add(params, 'gnmEmotion', BASE_EMOTION_OPTIONS).name('Emotion');
   exprFolder.add(params, 'gnmExprIntensity', 0, 2, 0.05).name('Intensity');
   // パーツ別スライダー (Emotion=Manual時に有効。公式クラスを目/下顔面領域で分離)
   exprFolder.add(params, 'gnmMouthOpen', 0, 1.5, 0.05).name('Mouth Open');
@@ -91,12 +200,13 @@ export function setupDebugGui(container: HTMLElement, params: Params, options: D
   exprFolder.add(params, 'gnmSquint', 0, 1.5, 0.05).name('Squint');
 
   const cameraFolder = gui.addFolder('Camera / Rotation');
+  // 180まで上げると±180=一周でき、側面・背面の検分に使える
   cameraFolder
-    .add(params, 'maxYawDeg', 5, 45, 1)
+    .add(params, 'maxYawDeg', 5, 180, 1)
     .name('Max Yaw')
     .onChange(() => options.onYawRangeChanged());
   cameraFolder
-    .add(params, 'maxPitchDeg', 0, 45, 1)
+    .add(params, 'maxPitchDeg', 0, 180, 1)
     .name('Max Pitch')
     .onChange(() => options.onPitchRangeChanged());
   cameraFolder
@@ -107,6 +217,10 @@ export function setupDebugGui(container: HTMLElement, params: Params, options: D
     .add(params, 'cameraDistanceRatio', 1.5, 8, 0.1)
     .name('Camera Distance')
     .onChange(() => options.onCameraChanged());
+  cameraFolder
+    .addColor(params, 'backgroundColor')
+    .name('Background')
+    .onChange(() => options.onBackgroundChanged());
 
   const debugFolder = gui.addFolder('Debug View');
   debugFolder
@@ -116,6 +230,14 @@ export function setupDebugGui(container: HTMLElement, params: Params, options: D
   debugFolder
     .add(params, 'showLandmarks')
     .name('Show Landmarks')
+    .onChange(() => applyDebugVisualization(options.getGnmHead(), params));
+  debugFolder
+    .add(params, 'showLayerImages')
+    .name('Show Layer Images')
+    .onChange(() => applyDebugVisualization(options.getGnmHead(), params));
+  debugFolder
+    .add(params, 'layerImageScale', 0.5, 4, 0.1)
+    .name('Layer Image Scale')
     .onChange(() => applyDebugVisualization(options.getGnmHead(), params));
 
   return gui;
