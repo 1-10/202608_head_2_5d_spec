@@ -1,12 +1,13 @@
 // MediaPipe Image Segmenter (SelfieMulticlass 256x256) による実測セグメンテーション。
-// 楕円近似を置き換える「実シルエット・実髪マスク」の供給源。
+// GNMのテクスチャUVクランプと髪シェルが使う「実シルエット・実髪マスク」の供給源。
 // モデルはGoogle自社収集データで学習・Apache-2.0 (学習データまで商用クリーン)。
 // すべての処理はブラウザ内で完結し、画像を外部へ送信しない。
 
 import { FilesetResolver, ImageSegmenter } from '@mediapipe/tasks-vision';
 import { fullImageRect, type ScalarField } from './fields';
 import type { NormalizedFaceLandmark } from './faceTopology';
-import { FACE_KEY_INDICES } from './faceTopology';
+
+const CHIN_LANDMARK = 152; // MediaPipe FaceMeshの顎先index
 
 const WASM_BASE_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.17/wasm';
 const MULTICLASS_MODEL_URL =
@@ -78,7 +79,7 @@ export class PersonSegmenter {
     for (let i = 0; i < person.length; i++) person[i] = clamp01(1 - bg[i]);
 
     // 顎下端: landmark chin の v。少し下へ余裕を持たせ、そこから下のbodySkin(首)を頭部から除外する。
-    const chinV = landmarks[FACE_KEY_INDICES.chin].v;
+    const chinV = landmarks[CHIN_LANDMARK].v;
     const chinRow = (1 - chinV) * (height - 1); // row換算 (row 0=画像上端)
     const fadeRows = height * 0.04;
 

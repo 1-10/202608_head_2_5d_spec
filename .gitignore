@@ -7,3 +7,7 @@ sample/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# GNM作業ファイル (テスト画像等)。生成済みアセット gnm_head_lite.bin だけはコミットする
+public/gnm/*
+!public/gnm/gnm_head_lite.bin

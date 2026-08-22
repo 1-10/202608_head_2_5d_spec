@@ -3,13 +3,13 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>2.5D Face / Full Head 比較評価</title>
+    <title>GNM Head 疑似3Dアバター</title>
     <link rel="stylesheet" href="/src/style.css" />
   </head>
   <body>
     <div id="app">
       <header id="toolbar">
-        <h1>2.5D Avatar 比較評価</h1>
+        <h1>GNM Head 疑似3Dアバター</h1>
         <div class="toolbar-actions">
           <button id="btn-webcam">Webcam</button>
           <button id="btn-upload">Upload Image</button>
@@ -21,13 +21,9 @@
 
       <div id="content-row">
         <main id="viewport-row">
-          <section class="viewport-pane" id="pane-face-only">
-            <div class="pane-label">FACE ONLY</div>
-            <div class="pane-canvas" id="canvas-face-only"></div>
-          </section>
-          <section class="viewport-pane" id="pane-full-head">
-            <div class="pane-label">FULL HEAD</div>
-            <div class="pane-canvas" id="canvas-full-head"></div>
+          <section class="viewport-pane" id="pane-head">
+            <div class="pane-label">GNM HEAD</div>
+            <div class="pane-canvas" id="canvas-head"></div>
           </section>
         </main>
 
@@ -39,14 +35,6 @@
           <label>Yaw: <span id="readout-yaw">0.0</span>&deg;</label>
           <label>Pitch: <span id="readout-pitch">0.0</span>&deg;</label>
           <label><input id="toggle-blink" type="checkbox" checked /> Blink</label>
-          <label><input id="toggle-talk" type="checkbox" checked /> Talk</label>
-          <label>Full Head Mode:
-            <select id="select-head-mode">
-              <option value="HEAD_DEPTH_ONLY">HEAD DEPTH ONLY</option>
-              <option value="FACE_HEAD" selected>FACE + HEAD</option>
-              <option value="FACE_HEAD_HAIR">FACE + HEAD + HAIR VOLUME</option>
-            </select>
-          </label>
         </div>
       </footer>
     </div>

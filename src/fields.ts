@@ -1,6 +1,6 @@
 // 画像UV空間でサンプルできる2Dスカラー場。
 // セグメンテーションマスク・計測Depthなど「画像に張り付いたデータ」を
-// Head Grid頂点から参照するための共通表現。
+// メッシュ頂点から参照するための共通表現。
 
 export interface ScalarField {
   width: number;
