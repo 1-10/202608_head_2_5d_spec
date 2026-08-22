@@ -273,7 +273,22 @@ export function buildGnmHead(
     // ソフト縁 (確信度0.5〜0.9) は写真画素に背景 (壁など) が混ざっており、
     // マスク0.5で飽和する判定だけだと背景がそのまま頭皮に焼き付く
     const iw = mouthInteriorW[i];
-    photoW[i] = smoothstep(0.08, 0.4, nz) * (seg ? smoothstep(0.2, 0.5, maskAtUv) : 1) * (1 - iw);
+    const confW = seg ? smoothstep(0.55, 0.9, textureMask(u, v)) : 1;
+    // 頭皮帯 (額上端より上) で写真が信用できない面を均一髪色へ逃がす:
+    // - グレージング面 (nz小): 写真は頭頂の髪画素を縦に引き伸ばしたスメアにしかならず、
+    //   3x3平均のfallbackも同じ画素を見て頂点単位の斑になる
+    // - 後方面 (zが頭の後半): 正面写真に後頭部の画素は物理的に存在しない。
+    //   頭頂の稜線は法線が上向き (nz≈0〜0.3) のままzだけ後ろへ回り込むため、
+    //   法線判定だけだと減衰が中途半端に残る (pitch回転時のまだら模様の正体)
+    // 頬の側面 (y低) はyaw回転で普通に見える正しい写真なので頭皮帯に限定する
+    const z = fit.vertices[i * 3 + 2];
+    const scalpInvalid =
+      smoothstep(0.4, 0.55, y) * Math.max(1 - smoothstep(0.08, 0.35, nz), smoothstep(0.35, 0.55, -z));
+    photoW[i] =
+      smoothstep(0.08, 0.4, nz) *
+      (seg ? smoothstep(0.2, 0.5, maskAtUv) * confW : 1) *
+      (1 - iw) *
+      (1 - scalpInvalid);
 
     // fallback頂点色: クランプ済みUVの3x3平均 (sRGB→linear)
     const px = Math.min(img.width - 2, Math.max(1, Math.round(u * img.width)));
@@ -297,9 +312,34 @@ export function buildGnmHead(
     // 写真の頬色の方が均一色より自然なため
     if (uniformHairColor && uniformSkinColor && seg) {
       const walked = Math.hypot(u - uProjected, v - vProjected);
-      const invalidW = Math.max(1 - smoothstep(-0.25, -0.02, nz), smoothstep(0.08, 0.25, walked));
+      // 髪の近傍でグレージングにより写真が引けない頂点 (耳の上〜後ろの側頭部)。
+      // UVがもみあげ等の髪/肌境界を跨ぎ、3x3平均が頂点ごとに肌色/髪色へ交互に
+      // 振れて斑になる。photoWの法線係数と相補のカーブで均一色へ倒す
+      // (色は下のhsが髪マスクで滑らかに選ぶので、境界は実際の生え際の線として残る)。
+      // 「髪の近傍」判定は近傍5点の最大値 — 境界の肌側の頂点 (髪マスク≈0) も対象にする。
+      // 髪から離れた場所 (服・首の縁) は3x3平均が同質で斑にならないため対象外
+      const dHair = 0.02;
+      let hairNear = 0;
+      for (let oy = -1; oy <= 1; oy++) {
+        for (let ox = -1; ox <= 1; ox++) {
+          const hv = sampleField(seg.hair, u + ox * dHair, v + oy * dHair);
+          if (hv > hairNear) hairNear = hv;
+        }
+      }
+      const grazingNearHair = (1 - smoothstep(0.08, 0.4, nz)) * smoothstep(0.2, 0.5, hairNear);
+      // 1-confW: 背景混入画素は3x3平均 (fallback) も同じ画素を見ているため信用せず、
+      // 髪/肌の均一色へ逃がす (photoWの減衰とペアで効く)。scalpInvalidも同様
+      const invalidW = Math.max(
+        1 - smoothstep(-0.25, -0.02, nz),
+        smoothstep(0.08, 0.25, walked),
+        1 - confW,
+        scalpInvalid,
+        grazingNearHair,
+      );
       if (invalidW > 0) {
-        const hs = smoothstep(0.2, 0.6, sampleField(seg.hair, u, v));
+        // 頭皮の無効帯・髪際のグレージング帯は髪色へ固定する。hsを画素ごとの
+        // 髪マスクに任せると、生え際のランプで肌色/髪色が頂点ごとに振れて斑になる
+        const hs = Math.max(scalpInvalid, grazingNearHair, smoothstep(0.2, 0.6, sampleField(seg.hair, u, v)));
         const ur = uniformSkinColor.r + (uniformHairColor.r - uniformSkinColor.r) * hs;
         const ug = uniformSkinColor.g + (uniformHairColor.g - uniformSkinColor.g) * hs;
         const ub = uniformSkinColor.b + (uniformHairColor.b - uniformSkinColor.b) * hs;
