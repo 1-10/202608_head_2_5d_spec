@@ -102,6 +102,8 @@ const els = {
   btnWebcam: document.getElementById('btn-webcam') as HTMLButtonElement,
   btnUpload: document.getElementById('btn-upload') as HTMLButtonElement,
   btnReset: document.getElementById('btn-reset') as HTMLButtonElement,
+  btnExport: document.getElementById('btn-export') as HTMLButtonElement,
+  btnExportTemplate: document.getElementById('btn-export-template') as HTMLButtonElement,
   fileInput: document.getElementById('file-input') as HTMLInputElement,
   status: document.getElementById('status-message') as HTMLElement,
   paneHead: document.getElementById('canvas-head') as HTMLElement,
@@ -133,6 +135,14 @@ let blinkState: BlinkState = createBlinkState(performance.now(), params);
 let gnmExprNextChangeAt = 0; // 次回遷移時刻
 let gnmAutoTarget: number[] | null = null; // 現在の目標表情 (null=ニュートラル区間)
 let gnmLastEmotion = ''; // 直前の感情 (同じ感情の連続を避ける)
+
+// AUTO/RANDOM巡回のタイミング (Unityエクスポートのmeta.jsonにもこの値が入る)
+const GNM_AUTO_CYCLE = {
+  neutralMinMs: 800, // 感情の合間に挟むニュートラル区間
+  neutralRandMs: 1200,
+  holdMinMs: 2000, // 1つの感情を保持する時間
+  holdRandMs: 2500,
+};
 
 /** 公式クラス名 → クラス番号。サンプラーの classNames が正本 */
 function classIndex(name: string): number {
@@ -243,6 +253,17 @@ function disposeSceneState(): void {
   sceneState.gnmHead?.dispose();
   sceneState.texture.dispose();
   sceneState = null;
+  updateExportButton();
+}
+
+/**
+ * UnityエクスポートボタンはGNM頭部が表示できているときだけ有効。
+ * (Templateはモデル+サンプラーがあれば作れるが、両方とも初回構築時にロードされるので同条件でよい)
+ */
+function updateExportButton(): void {
+  const disabled = exportBusy || !sceneState?.gnmHead;
+  els.btnExport.disabled = disabled;
+  els.btnExportTemplate.disabled = disabled;
 }
 
 /**
@@ -376,6 +397,7 @@ async function rebuildGnmHead(): Promise<void> {
     }
     setStatus('GNM Headをフィットしています…');
     s.gnmHead?.dispose();
+    s.gnmHead = null; // 構築失敗時にdispose済みの旧buildが残らないように
 
     const normalized = normalizeFaceLandmarks(s.rawLandmarks, s.ctx.imageWidth, s.ctx.imageHeight);
     s.normalized = normalized;
@@ -405,6 +427,7 @@ async function rebuildGnmHead(): Promise<void> {
     setStatus('GNM Headの構築に失敗しました。', true);
   } finally {
     gnmBusy = false;
+    updateExportButton();
   }
 }
 
@@ -508,6 +531,60 @@ els.toggleBlink.addEventListener('change', () => {
   params.blinkEnabled = els.toggleBlink.checked;
 });
 
+// --- Unityエクスポート (本番構成: Guest=毎回 / Template=1回。docs/unity_integration.md参照) ---
+let exportBusy = false;
+
+/** blobをファイルとしてダウンロードし、完了メッセージを出す。 */
+function downloadBlob(blob: Blob, filename: string): void {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(a.href);
+  setStatus(`エクスポート完了: ${filename} (${(blob.size / 1024 / 1024).toFixed(1)}MB)`);
+}
+
+async function runExport(kind: 'guest' | 'template'): Promise<void> {
+  const s = sceneState;
+  if (exportBusy || !s?.gnmHead || !gnmModel) return;
+  exportBusy = true;
+  updateExportButton();
+  try {
+    setStatus('Unity向けパッケージを書き出しています…');
+    // GLTFExporterごと遅延ロードする (エクスポートしない起動では読まない)
+    const mod = await import('./unityExport');
+    if (kind === 'guest') {
+      const blob = await mod.exportUnityGuest({
+        model: gnmModel,
+        build: s.gnmHead,
+        ctx: s.ctx,
+        sourceCanvas: s.sourceCanvas,
+        params,
+      });
+      const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14); // YYYYMMDDhhmmss
+      downloadBlob(blob, `gnm_head_guest_${stamp}.zip`);
+    } else {
+      const blob = await mod.exportUnityTemplate({
+        model: gnmModel,
+        blinkVector: buildBlinkVector(gnmModel),
+        params,
+        autoCycle: GNM_AUTO_CYCLE,
+      });
+      // テンプレートはゲスト非依存なので固定名 (更新はGNMアセットを変えたときだけ)
+      downloadBlob(blob, 'gnm_unity_template.zip');
+    }
+  } catch (err) {
+    console.error('Unityエクスポートに失敗しました。', err);
+    setStatus('Unityエクスポートに失敗しました。', true);
+  } finally {
+    exportBusy = false;
+    updateExportButton();
+  }
+}
+
+els.btnExport.addEventListener('click', () => void runExport('guest'));
+els.btnExportTemplate.addEventListener('click', () => void runExport('template'));
+
 window.addEventListener('resize', () => viewport.resize());
 
 // --- GUIパラメータパネル ---
@@ -542,7 +619,7 @@ function animate(): void {
         if (gnmAutoTarget) {
           // 感情の保持が終わったら短いニュートラル区間を挟む
           gnmAutoTarget = null;
-          gnmExprNextChangeAt = now + 800 + Math.random() * 1200;
+          gnmExprNextChangeAt = now + GNM_AUTO_CYCLE.neutralMinMs + Math.random() * GNM_AUTO_CYCLE.neutralRandMs;
         } else {
           if (params.gnmEmotion === 'RANDOM') {
             // 公式 randomize_expressions: 2〜3クラスをランダムに選んで公式blendする
@@ -558,7 +635,7 @@ function animate(): void {
             const latent = exprSampler?.randomLatent(Math.random) ?? null;
             gnmAutoTarget = cls ? sampleClass(cls, latent) : null;
           }
-          gnmExprNextChangeAt = now + 2000 + Math.random() * 2500;
+          gnmExprNextChangeAt = now + GNM_AUTO_CYCLE.holdMinMs + Math.random() * GNM_AUTO_CYCLE.holdRandMs;
         }
       }
       preset = gnmAutoTarget;

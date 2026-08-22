@@ -16,6 +16,8 @@
 # - identity基底の上位K成分 (int16量子化。基底はPCAで分散降順・係数はz-scoreスケール)
 # - HEAD_SPARSE_68 ランドマークのbarycentric定義 (iBUG-68順)
 # - 耳の頂点グループ重み (髪との整合処理用)
+# - joints (neck/head/left_eye/right_eye) のskinning weightsとbind位置のidentity基底
+#   (公式 linear_blend_skinning / joint_positions_bind_pose 用。UnityのLBSに渡す)
 #
 # バイナリ形式: b'GNML' + uint32(jsonバイト長) + JSONヘッダ + ペイロード(4バイト境界)。
 # JSONヘッダに各セクションのオフセット/型を書くので、レイアウトはヘッダが正本。
@@ -309,6 +311,16 @@ def main() -> None:
     print(f'口腔内: {int(mouth_interior[vertex_mask].sum())} 頂点 / {len(interior_triangles)} 三角形 '
           f'({counts["口腔壁"]}/{counts["歯"]}/{counts["歯茎"]}/{counts["舌"]})')
 
+    # joints (neck/head/left_eye/right_eye)。公式 gnm_common.py の
+    # linear_blend_skinning / joint_positions_bind_pose に渡すデータをそのまま持つ:
+    # - skinWeights: (N,J) 頂点ごとの関節重み (公式は (J,V)。転置してサブセット)
+    # - jointIdentityBasis: (K,J,3) 関節bind位置のidentity基底 (identity基底と同じ上位K成分)
+    # - templateJointPositions / jointNames / jointParentIndices はヘッダJSONへ
+    skin_weights = d['skinning_weights'][:, vertex_mask].T.astype(np.float32)  # (N,J)
+    joint_identity_basis = d['joint_identity_basis'][:IDENTITY_BASIS_COUNT].astype(np.float32)  # (K,J,3)
+    joint_names = [str(n) for n in d['joint_names']]
+    print(f'joints: {joint_names} / 重み列和 {skin_weights.sum(axis=1).min():.4f}〜{skin_weights.sum(axis=1).max():.4f}')
+
     expr_names = [str(n) for n in d['expression_names']]
     expr_indices = []
     for prefix, count in EXPRESSION_PICKS.items():
@@ -344,6 +356,8 @@ def main() -> None:
         'interiorTriangles': interior_triangles,  # uint32 (Ti,3) 口腔内メッシュ
         'mouthPartId': mouth_part_id,  # uint8 (N,) 0=なし 1=口腔壁 2=歯 3=歯茎 4=舌
         'expressionBasisQ': expr_q,   # int16 (M,N,3)
+        'skinWeights': skin_weights,  # float32 (N,J) LBS頂点重み
+        'jointIdentityBasis': joint_identity_basis,  # float32 (K,J,3)
     }
     if dense is not None:
         sections['denseMpIndices'] = dense[0]      # uint16 (M,) MediaPipe landmark index
@@ -372,6 +386,9 @@ def main() -> None:
         'expressionNames': [expr_names[i] for i in expr_indices],
         'landmarkCount': int(lm_idx.shape[0]),
         'denseLandmarkCount': int(len(dense[0])) if dense is not None else 0,
+        'jointNames': joint_names,
+        'jointParentIndices': [int(p) for p in d['joint_parent_indices']],
+        'templateJointPositions': [[float(v) for v in row] for row in d['template_joint_positions']],
         'sections': section_meta,
     }
     header_bytes = json.dumps(header).encode('utf-8')

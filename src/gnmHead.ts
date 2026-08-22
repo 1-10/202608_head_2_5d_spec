@@ -36,6 +36,12 @@ export interface GnmModel {
   denseTriIndices: Uint32Array; // (M,3) GNM頂点index
   denseBaryWeights: Float32Array; // (M,3)
   denseFitWeights: Float32Array; // (M,) フィット重み (信頼度×領域重み)
+  // --- joints (neck/head/left_eye/right_eye)。公式LBS用。0要素 = 旧アセット ---
+  jointNames: string[]; // (J,)
+  jointParentIndices: number[]; // (J,) 根は-1
+  templateJointPositions: Float32Array; // (J,3) bind位置のテンプレート
+  jointIdentityBasis: Float32Array; // (K,J,3) bind位置のidentity基底 (係数はidentityと共通)
+  skinWeights: Float32Array; // (N,J) LBS頂点重み (行和=1)
 }
 
 /** MediaPipe FaceMesh 468点 → iBUG-68 の対応表 (顎17/眉10/鼻9/目12/口20)。 */
@@ -65,6 +71,9 @@ interface BinHeader {
   expressionNames?: string[];
   denseLandmarkCount?: number;
   landmarkCount: number;
+  jointNames?: string[];
+  jointParentIndices?: number[];
+  templateJointPositions?: number[][];
   sections: Record<string, { offset: number; byteLength: number; dtype: string }>;
 }
 
@@ -139,6 +148,11 @@ export async function loadGnmModel(url = 'gnm/gnm_head_lite.bin'): Promise<GnmMo
     denseTriIndices: header.sections['denseTriIndices'] ? u32('denseTriIndices') : new Uint32Array(0),
     denseBaryWeights: header.sections['denseBaryWeights'] ? f32('denseBaryWeights') : new Float32Array(0),
     denseFitWeights: header.sections['denseFitWeights'] ? f32('denseFitWeights') : new Float32Array(0),
+    jointNames: header.jointNames ?? [],
+    jointParentIndices: header.jointParentIndices ?? [],
+    templateJointPositions: new Float32Array((header.templateJointPositions ?? []).flat()),
+    jointIdentityBasis: header.sections['jointIdentityBasis'] ? f32('jointIdentityBasis') : new Float32Array(0),
+    skinWeights: header.sections['skinWeights'] ? f32('skinWeights') : new Float32Array(0),
   };
 }
 

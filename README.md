@@ -43,6 +43,10 @@
   - 周期的なBlink(目パチ)を表情へ合成 (左右ウインククラスの合成から目領域だけ使う)
 - ビューをドラッグするとYaw(±可変)/Pitch角に回転
 - GUI: フィット/髪シェルパラメータ、表情、Camera/Rotation、Wireframe表示
+- Unityエクスポート (本番構成の2段構え):
+  - Export Template: GNM Headの型 (44 blendshape+口腔内+サンプラー重み) — Unityに1回だけ常駐させる
+  - Export Guest: ゲスト固有データ (neutral頂点・写真・髪シェル・meta) — 毎回転送する
+  - Unity側の読み込み仕様は [docs/unity_integration.md](./docs/unity_integration.md)
 
 既知の制約: テクスチャは正面写真の焼き付きのため大表情では歪む。
 
@@ -126,6 +130,9 @@ src/
   interaction.ts   # ドラッグによるYaw/Pitch操作
   debugView.ts     # GUIパラメータパネル
   params.ts        # 調整パラメータの一元管理
+  unityExport.ts   # Unity向けzip (head.glb + meta.json) の書き出し
+docs/
+  unity_integration.md # Unity側の読み込み・再生ランタイム指示書
 ```
 
 ## 品質目標・評価対象外の範囲
