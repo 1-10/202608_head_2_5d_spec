@@ -75,6 +75,23 @@ python tools/export_gnm_sampler.py /tmp/GNM/gnm/shape/data/semantic_sampler/expr
 # .obj (MediaPipe canonical face model) を省略すると468点密対応が省かれ、フィットが68点フォールバックになる
 ```
 
+### DAViDモデルの配信
+
+DAViD (`src/david.ts`) のONNXモデル (fp16 691MB / int8 338MB) はリポジトリに含めず、
+Hugging Face Hubの公開モデルリポジトリ (`harry00902/202608_head_2_5d_spec`) から配信している。
+`public/david/` はGit管理外 (`.gitignore`) のため、Vercel等へGitベースでデプロイしても
+このファイルは含まれない — ブラウザがDAViD選択時に直接HF Hubへ`fetch`する構成なので、
+デプロイ先には何もアップロードしなくてよい。
+
+再生成・再アップロードする場合:
+
+```bash
+python tools/prepare_david_model.py
+# → public/david/david-multitask-vitl16-{fp16,int8}.onnx が生成される
+hf upload harry00902/202608_head_2_5d_spec public/david/david-multitask-vitl16-fp16.onnx david/david-multitask-vitl16-fp16.onnx --repo-type model
+hf upload harry00902/202608_head_2_5d_spec public/david/david-multitask-vitl16-int8.onnx david/david-multitask-vitl16-int8.onnx --repo-type model
+```
+
 ### その他コマンド
 
 ```bash

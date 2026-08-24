@@ -5,8 +5,9 @@
 // https://github.com/microsoft/DAViD
 //
 // 実行: onnxruntime-web。WebGPUが使えればfp16、無ければWASMでint8。
-// モデルは public/david/ から配信され初回選択時のみDLされる
-// (tools/prepare_david_model.py で生成)。
+// モデル本体 (fp16 691MB / int8 338MB) はリポジトリに含めず、Hugging Face Hub
+// (公開モデルリポジトリ、無料枠のCDN配信+CORS許可) から初回選択時のみDLされる
+// (tools/prepare_david_model.py で生成したファイルを `hf upload` でアップロード済み)。
 // すべての処理はブラウザ内で完結し、画像を外部へ送信しない。
 
 import { fullImageRect, sampleField, type ScalarField } from './fields';
@@ -16,8 +17,9 @@ const INPUT_SIZE = 512; // モデル入力 (batch, 3, 512, 512)
 const NORMAL_CANVAS_MAX_DIM = 1024; // 法線マップcanvas (画像全体空間) の解像度上限
 const PERSON_MERGE_MAX_DIM = 512; // 前景マスクの全体マージ解像度上限
 
-const MODEL_FP16_URL = '/david/david-multitask-vitl16-fp16.onnx';
-const MODEL_INT8_URL = '/david/david-multitask-vitl16-int8.onnx';
+const HF_MODEL_BASE = 'https://huggingface.co/harry00902/202608_head_2_5d_spec/resolve/main/david';
+const MODEL_FP16_URL = `${HF_MODEL_BASE}/david-multitask-vitl16-fp16.onnx`;
+const MODEL_INT8_URL = `${HF_MODEL_BASE}/david-multitask-vitl16-int8.onnx`;
 
 // DAViD出力はARPortraitDepthよりノイズが格段に少ないため、cleanupは弱く掛ける
 // (強いままだと鼻先・耳などレンジ端の実起伏までパーセンタイルclampで丸まる)
