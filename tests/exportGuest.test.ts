@@ -7,6 +7,8 @@
 // **写真は合成**（平均顔を相似変換で写した位置に、顔の肌・体の肌・髪の場を置いたもの）。実写での
 // 見た目はブラウザで確認する — ここで見るのは「段が繋がっていること」と「契約を満たす値が出ること」。
 
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { DepthNormalEstimator, FaceLandmarkDetector, PersonSegmenter } from '../src/application/ports';
 import { DEFAULT_SETTINGS } from '../src/application/settings';
@@ -214,23 +216,36 @@ class FakeDepthNormal implements DepthNormalEstimator {
   }
 }
 
+/** 合成入力で 6 段を通す（`tools/golden_export_guest.py` と同じ設定）。 */
+async function runPipeline(
+  asset: GnmHeadAsset,
+  stages: string[] = [],
+): Promise<Awaited<ReturnType<typeof exportGuest>>> {
+  const settings = {
+    ...DEFAULT_SETTINGS,
+    skinAtlasSize: 512,
+    eyeTextureSize: 128,
+    hairTextureSize: 512,
+  };
+  return exportGuest({
+    photo: syntheticPhoto(asset),
+    asset,
+    landmarkDetector: new FakeLandmarkDetector(asset),
+    segmenter: new FakeSegmenter(asset),
+    depthNormal: new FakeDepthNormal(),
+    atlasBaker: new CachingAtlasBaker(),
+    hairImageProcessor: new DomainHairImageProcessor(),
+    settings,
+    exporterVersion: '0.0.0-test',
+    onStage: (stage) => stages.push(stage),
+  });
+}
+
 describe('exportGuest', () => {
   it('6 段を通して契約を満たす成果物が出る', async () => {
     const asset = loadAsset();
-    const settings = { ...DEFAULT_SETTINGS, skinAtlasSize: 512, eyeTextureSize: 128, hairTextureSize: 512 };
     const stages: string[] = [];
-    const outcome = await exportGuest({
-      photo: syntheticPhoto(asset),
-      asset,
-      landmarkDetector: new FakeLandmarkDetector(asset),
-      segmenter: new FakeSegmenter(asset),
-      depthNormal: new FakeDepthNormal(),
-      atlasBaker: new CachingAtlasBaker(),
-      hairImageProcessor: new DomainHairImageProcessor(),
-      settings,
-      exporterVersion: '0.0.0-test',
-      onStage: (stage) => stages.push(stage),
-    });
+    const outcome = await runPipeline(asset, stages);
 
     // 段は宣言した順に走る。
     expect(stages).toEqual(['推論', 'フィット', '眼球', 'アトラス', '髪シェル', '組み立て']);
@@ -278,5 +293,174 @@ describe('exportGuest', () => {
     expect(outcome.eyeAlbedos.right.side).toBe('right');
     // 虹彩の大きさは公式へ揃えない（比が 1 に潰れていない、あるいは偶然 1 でも潰した結果ではない）。
     expect(outcome.eyeAlbedos.left.limbusRadiusPx).toBeGreaterThan(0);
+  }, 300_000);
+});
+
+/** 配列の要約（`tools/golden_export_guest.py` の `summary` と同じ形）。 */
+function summary(values: ArrayLike<number>): {
+  count: number;
+  sum: number;
+  min: number;
+  max: number;
+  mean: number;
+} {
+  let sum = 0;
+  let minimum = Infinity;
+  let maximum = -Infinity;
+  for (let index = 0; index < values.length; index++) {
+    const value = values[index];
+    sum += value;
+    if (value < minimum) minimum = value;
+    if (value > maximum) maximum = value;
+  }
+  return {
+    count: values.length,
+    sum,
+    min: values.length === 0 ? 0 : minimum,
+    max: values.length === 0 ? 0 : maximum,
+    mean: values.length === 0 ? 0 : sum / values.length,
+  };
+}
+
+describe('正本との突き合わせ', () => {
+  /**
+   * **正本の domain をそのまま動かして作った基準値**と、同じ合成入力での移植の結果を比べる。
+   *
+   * 基準値は `tools/golden_export_guest.py` が作る（あちらの `domain` は numpy 以外を import しない
+   * ので、そのまま呼べる）。**定数の一致はテキストで確かめられるが、アルゴリズムの一致は数値でしか
+   * 確かめられない。**
+   *
+   * 許容差は「同じ計算を別の順序でやったときに出る差」の桁に置く。**桁で外れたら移植が違う。**
+   */
+  it('identity・アトラス・眼球・髪シェルが基準値と一致する', async () => {
+    const golden = JSON.parse(
+      readFileSync(resolve(__dirname, 'golden', 'exportGuest.json'), 'utf-8'),
+    ) as Record<string, never>;
+    const asset = loadAsset();
+    const outcome = await runPipeline(asset);
+    const deltas: string[] = [];
+    const measured = new Map<string, number>();
+    const close = (name: string, actual: number, expected: number, tolerance: number): void => {
+      const difference = Math.abs(actual - expected);
+      const scale = Math.max(1, Math.abs(expected));
+      measured.set(name, difference / scale);
+      if (difference / scale > tolerance) {
+        deltas.push(`${name}: 移植 ${actual} / 正本 ${expected}（相対差 ${difference / scale}）`);
+      }
+    };
+    const closeSummary = (
+      name: string,
+      actual: ReturnType<typeof summary>,
+      expected: Record<string, number>,
+      tolerance: number,
+    ): void => {
+      expect(actual.count, `${name}.count`).toBe(expected['count']);
+      for (const key of ['sum', 'min', 'max', 'mean'] as const) {
+        close(`${name}.${key}`, actual[key], expected[key], tolerance);
+      }
+    };
+
+    // 密対応（`tools/export_gnm_assets.py` が作ったものと、あちらが npz から作るものの一致）。
+    const dense = golden['dense'] as unknown as Record<string, never>;
+    expect(asset.dense.pointCount).toBe(dense['point_count'] as unknown as number);
+    close('dense.edge_meters', asset.dense.edgeMeters, dense['edge_meters'] as unknown as number, 1e-9);
+    closeSummary(
+      'dense.residual_meters',
+      summary(asset.dense.residualMeters),
+      dense['residual_meters'] as unknown as Record<string, number>,
+      1e-6,
+    );
+
+    // identity 係数（フィットの唯一の成果物）。
+    //
+    // **ここだけ許容差が緩いのは int16 量子化のぶん**（`tools/export_gnm_assets.py`。web だから
+    // 増えた差分）。あちらは identity 基底を float32 のまま持つので、フィットの設計行列がわずかに
+    // 違う。あちらが量子化をやめたときに測った係数の差が 7e-4 で、実測はその内側に収まる。
+    // **桁で外れたら量子化ではなくアルゴリズムが違う。**
+    const IDENTITY_TOLERANCE = 1e-3;
+    closeSummary(
+      'identity',
+      summary(outcome.artifacts.manifest.identity),
+      golden['identity'] as unknown as Record<string, number>,
+      IDENTITY_TOLERANCE,
+    );
+    const head = golden['identity_head'] as unknown as number[];
+    head.forEach((expected, index) => {
+      close(
+        `identity[${index}]`,
+        outcome.artifacts.manifest.identity[index],
+        expected,
+        IDENTITY_TOLERANCE,
+      );
+    });
+
+    // 肌アトラスと眼球テクスチャ（sRGB uint8 なので、丸めで ±1 階調は動く）。
+    closeSummary(
+      'skin_albedo',
+      summary(outcome.artifacts.skinAlbedo),
+      golden['skin_albedo'] as unknown as Record<string, number>,
+      2e-3,
+    );
+    closeSummary(
+      'eye_albedo_left',
+      summary(outcome.artifacts.eyeAlbedos.left),
+      golden['eye_albedo_left'] as unknown as Record<string, number>,
+      2e-3,
+    );
+    closeSummary(
+      'eye_albedo_right',
+      summary(outcome.artifacts.eyeAlbedos.right),
+      golden['eye_albedo_right'] as unknown as Record<string, number>,
+      2e-3,
+    );
+    close(
+      'eye_left_limbus_px',
+      outcome.eyeAlbedos.left.limbusRadiusPx,
+      golden['eye_left_limbus_px'] as unknown as number,
+      1e-5,
+    );
+    close(
+      'eye_left_iris_px',
+      outcome.eyeAlbedos.left.irisRadiusPx,
+      golden['eye_left_iris_px'] as unknown as number,
+      1e-9,
+    );
+
+    // 髪シェル（格子・厚み・法線融合・三角形の採用がすべて効く）。
+    const hair = golden['hair'] as unknown as Record<string, never>;
+    expect(outcome.artifacts.hair).not.toBeNull();
+    const shell = outcome.artifacts.hair as NonNullable<typeof outcome.artifacts.hair>;
+    expect(shell.vertexCount, 'hair.vertex_count').toBe(hair['vertex_count'] as unknown as number);
+    expect(shell.triangleCount, 'hair.triangle_count').toBe(
+      hair['triangle_count'] as unknown as number,
+    );
+    closeSummary(
+      'hair.positions',
+      summary(shell.positions),
+      hair['positions'] as unknown as Record<string, number>,
+      1e-4,
+    );
+    closeSummary(
+      'hair.uvs',
+      summary(shell.uvs),
+      hair['uvs'] as unknown as Record<string, number>,
+      1e-5,
+    );
+    closeSummary(
+      'hair_alpha',
+      summary((outcome.artifacts.hairAlpha as NonNullable<typeof outcome.artifacts.hairAlpha>).data),
+      golden['hair_alpha'] as unknown as Record<string, number>,
+      5e-3,
+    );
+    closeSummary(
+      'hair_albedo',
+      summary(
+        (outcome.artifacts.hairAlbedo as NonNullable<typeof outcome.artifacts.hairAlbedo>).data,
+      ),
+      golden['hair_albedo'] as unknown as Record<string, number>,
+      5e-3,
+    );
+
+    if (deltas.length > 0) throw new Error('正本と差がある:\n' + deltas.join('\n'));
   }, 300_000);
 });

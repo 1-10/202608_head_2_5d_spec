@@ -15,6 +15,7 @@ import {
   selectModelPoints,
   solveSimilarity2d,
   solveSymmetricPositiveDefinite,
+  toFloat32Precision,
   xyOf,
 } from './fit';
 import { GnmHeadAsset, gatherBasisAtVertices } from './model';
@@ -212,7 +213,7 @@ export function refineEarNeckFit(input: {
   }
 
   return {
-    headFit: { identity, similarity, residualRmsPixels: residuals },
+    headFit: { identity: toFloat32Precision(identity), similarity, residualRmsPixels: residuals },
     observedPixels: finalObserved,
     fittedPixels: finalFitted,
     regions: finalRegions,

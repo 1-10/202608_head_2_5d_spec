@@ -817,7 +817,20 @@ export function fitHead(
   }
 
   if (similarity === null) throw new Error('相似変換が解けなかった');
-  return { identity, similarity, residualRmsPixels: residualRms };
+  return { identity: toFloat32Precision(identity), similarity, residualRmsPixels: residualRms };
+}
+
+/**
+ * identity 係数を float32 の精度へ丸める。
+ *
+ * **`identity` は guest.json に出る唯一の数値成果物**で、デスクトップ側は `HeadFit` に入れる時点で
+ * `astype(np.float32)` している。同じ写真から同じ数字が出るように、こちらも同じ位置で同じ精度へ
+ * 落とす（内部の計算は float64 のまま — 落とすのは**出す値だけ**）。
+ */
+export function toFloat32Precision(values: Float64Array): Float64Array {
+  const out = new Float64Array(values.length);
+  for (let index = 0; index < values.length; index++) out[index] = Math.fround(values[index]);
+  return out;
 }
 
 /**

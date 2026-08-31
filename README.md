@@ -69,8 +69,33 @@ hf upload harry00902/202608_head_2_5d_spec public/david/david-multitask-vitl16-i
 ```bash
 npm run build    # 型チェック + 本番ビルド
 npm run preview  # ビルド結果のプレビュー
-npm test         # domain / application の検査（実アセットを読む。86件）
+npm test         # domain / application の検査（実アセットを読む。87件）
 ```
+
+### 正本との突き合わせ
+
+**正本の `domain` は numpy 以外を import しない**ので、PySide6 / mediapipe / onnxruntime を入れずに
+そのまま動かせる。同じ合成入力で `export_guest` を通し、その結果と移植の結果を数値で比べる:
+
+```bash
+git clone https://github.com/1-10/2608_Obayashi_GNMHeadExporter ../gnm-exporter
+python tools/golden_export_guest.py ../gnm-exporter/src tests/golden/exportGuest.json
+npm test
+```
+
+**定数の一致はテキストで確かめられるが、アルゴリズムの一致は数値でしか確かめられない。** 基準値を
+作り直したときに差が桁で動いたら、移植のどこかが変わっている。
+
+現時点の実測（相対差）:
+
+| 突き合わせた値 | 差 |
+|:--|:--|
+| 密対応（`denseVertexIndices` / 重み / 残差 / 辺の中央値） | **完全一致** |
+| 眼球テクスチャ（左右）・`hair_alpha`・`hair_albedo` | **完全一致** |
+| 髪シェルの頂点数・三角形数 | **完全一致**（9,766 / 19,138） |
+| `skin_albedo` の総和 | 8.4e-8（786,432 テクセルのうち数個が 1 階調） |
+| 髪シェルの `positions` | 1.8e-5（float32 蓄積 vs float64） |
+| `identity` 係数 | 3.0e-4（**int16 量子化のぶん**。あちらが量子化をやめて測った差 7e-4 の内側） |
 
 ## パイプライン
 
@@ -154,6 +179,7 @@ npm test         # domain / application の検査（実アセットを読む。8
 |:--|:--|
 | JPEG のクロマサブサンプリング | canvas の `toBlob('image/jpeg', 0.9)` は 4:2:0 になり、指定できない（あちらは Pillow で 4:4:4）。**同じ写真から作った zip がバイト単位で一致しないのはこれが理由** |
 | 顔検出の解像度の階段 | あちらは長辺 256〜3840 を全段回して検出を束ねる。ブラウザでは 1 枚あたり数百 ms × 段数が体感に出るので、写真の解像度で 1 回だけ検出する。**主役の規則（得点 = 一辺 − 対象点からの距離）は共有している** |
+| 内部の蓄積精度 | numpy が float32 で足すところを JS は倍精度で足す（JS の数は倍精度しか無い）。**移植の方が精度が高い**側の差で、実測 1.8e-5。**guest.json に出る `identity` だけは float32 の精度へ丸める**（あちらが `astype(np.float32)` している位置と同じ） |
 
 ## 消費側へ渡すもの
 
@@ -175,9 +201,10 @@ npm test         # domain / application の検査（実アセットを読む。8
 ```text
 index.html
 tools/
-  fetch_gnm_assets.py     # 公式 npz / 68 点定義 / canonical の取得（URL とハッシュを固定）
-  export_gnm_assets.py    # npz → ブラウザ用 GNMB アセット
-  prepare_david_model.py  # DAViD の fp16 / int8 変換
+  fetch_gnm_assets.py       # 公式 npz / 68 点定義 / canonical の取得（URL とハッシュを固定）
+  export_gnm_assets.py      # npz → ブラウザ用 GNMB アセット
+  prepare_david_model.py    # DAViD の fp16 / int8 変換
+  golden_export_guest.py    # 正本の domain を動かして突き合わせ基準を作る
 src/
   domain/          # 純粋計算（contract / field / photo / ramp / normal / faceSubject / inspection /
                    #   debugScene / gnm / atlas / eyes / hair）
@@ -188,6 +215,7 @@ src/
   presentation/    # 入口（main / viewer / gui / inspectionView / input / parameterStore /
                    #   style.css）
 tests/             # domain / application の検査（実アセットを読む。推論は偽の Port）
+  golden/          # 正本の domain を動かして作った突き合わせ基準
 ```
 
 ## 技術スタック
