@@ -136,12 +136,20 @@ npm test
 | 投影 | 透視 FOV 20° / 距離 1.3m / 注視点 y=0.297m | `Scenes/Viewer.unity` の `MainCamera` |
 | 背景 | `#26292e` | 同 `MainCamera` の `m_BackGroundColor` |
 | 光 | 平行光 1 灯（上・前・被写体の右から）+ 環境光 | 同 `DirectionalLight` |
-| 法線 | **+Z 固定**（立体感は写真に焼き込まれている） | `MT_GnmHeadOpaque` が `SG_Lit` を引く条件 |
+| 法線 | 肌・眼球・髪は **+Z 固定**（立体感は写真に焼き込まれている）、**口腔内は実法線** | `GnmHeadInstance.FlattenNormals` |
 | 髪 | alpha clip 0.3 | `MT_GnmHairTransparent` の `_Cutoff` |
 | 領域 | 7 つ・先勝ち（`MouthSock` → `Skin` → `Teeth` → `Gums` → `Tongue` → `EyeLeft` → `EyeRight`） | `Editor/GnmHeadAssetBuilder` の `regions` |
 | 除外 | 角膜（`eye_exteriors`）は描かない | 同 `excludedSelector` |
 | 可動域 | 首 yaw ±15° / pitch ±12° / 視線 ±10°、首へ 30%・頭へ 70% | `Viewer/GnmHeadPoseController` |
 | 表情 | 20 プリセット・同時に 1 本・立ち上がり 0.35s / 保持 0.8s | `Viewer/GnmExpressionPlayer` |
+
+**口腔内は実法線で描く。** 写真を持たない単色なので二重に掛かる影が無く、+Z 固定だと開口時に歯・
+歯茎・舌が真っ平らな切り絵に見える。ただし口腔壁は `skin` の部分集合で肌と頂点を共有するため、
+**共有頂点（唇の内縁）は肌側を優先して +Z へ落とす** — そこだけ実法線が残ると開口時に筋状の陰影が
+出る。法線は内角重み（Thürmer & Wüthrich。面積重みは寸法依存でゼロ法線を作る）で、変形後の頂点から
+毎フレーム作り直してスキニングへ通す（首を回すと陰影が動く）。**実法線を計算するのは口腔内に触れる
+三角形だけ** — +Z へ落とす頂点の分は捨てるので回す理由が無い（35,324 → 8,232 三角形。結果は同一で、
+テストが突き合わせている）。
 
 **口腔内は写真の色を読まない。** 歯 `(190,164,164)` / 歯茎・舌 `(114,53,53)` / 口腔壁 `(80,37,37)` の
 固定色で塗る（正本は `MT_GnmTeeth` / `MT_GnmGums` / `MT_GnmTongue` / `MT_GnmMouthSock` の `_BaseColor`）。

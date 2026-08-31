@@ -15,13 +15,15 @@
 // 髪シェルだけは自分の配列を持ち、`head` ジョイントの剛体変換で追従する（髪は変形しない）。
 
 import { AlphaImage, HairShell, RgbImage } from '../contract';
+import { NormalPlan, planNormals } from './normals';
 import { EyeSide } from '../eyes/layout';
-import { GnmHeadMesh } from '../gnm/model';
+import { GnmHeadMesh, unsplitVertexCount } from '../gnm/model';
 import {
   GnmPreviewAsset,
   LAYER_HAIR,
   LAYER_ORDER,
   PreviewRegion,
+  RegionClassification,
   classifyTriangles,
 } from './asset';
 
@@ -62,6 +64,13 @@ export function isTransparent(mesh: PreviewMesh): boolean {
 /** 3D ビューへ渡すシーン。 */
 export interface PreviewScene {
   readonly meshes: readonly PreviewMesh[];
+  /**
+   * 法線をどう作るか（どの頂点が実法線か・どの三角形を回すか）。
+   *
+   * **シーンが持つのは領域分けの結果だから。** ビューアー側で領域名から作り直すと、領域の定義が
+   * 変わったときに黙ってズレる。
+   */
+  readonly normalPlan: NormalPlan;
   /** どの領域にも入らなかった三角形の数。0 でないなら領域設定かアセットが変わっている。 */
   readonly unassignedTriangleCount: number;
   /** 3 頂点すべてが角膜だった三角形の数（メッシュから外した分）。 */
@@ -95,10 +104,10 @@ export function drawPasses(
 // 境界からフレーミングを決める関数は持たない。**あちらと同じ絵にすることが目的**なので、
 // こちらで勝手に枠へ合わせると「web では入っていたが Unity では切れる」が起きる。
 
-/** split 頂点配列から、このメッシュの頂点だけを `out` へ集める。 */
-export function gatherPositions(
+/** split 頂点配列から、このメッシュの頂点だけを `out` へ集める（位置でも法線でも使う）。 */
+export function gatherVertexVectors(
   mesh: PreviewMesh,
-  vertices: Float64Array,
+  values: Float64Array | Float32Array,
   out: Float32Array,
 ): void {
   const source = mesh.sourceVertices;
@@ -108,10 +117,38 @@ export function gatherPositions(
   }
   for (let vertex = 0; vertex < source.length; vertex++) {
     const from = source[vertex] * 3;
-    out[vertex * 3] = vertices[from];
-    out[vertex * 3 + 1] = vertices[from + 1];
-    out[vertex * 3 + 2] = vertices[from + 2];
+    out[vertex * 3] = values[from];
+    out[vertex * 3 + 1] = values[from + 1];
+    out[vertex * 3 + 2] = values[from + 2];
   }
+}
+
+/**
+ * 実法線を残す頂点を返す（1 = 実法線 / 0 = +Z 固定）。
+ *
+ * **順序が判断そのもの。** まず `flat_color` の領域（口腔内）の頂点を全部 1 にし、**その後で**
+ * 写真を貼る領域の頂点を 0 に落とす。口腔壁は `skin` の部分集合で肌と頂点を共有するので、共有頂点は
+ * 肌側が勝って +Z になる — 唇の内縁だけ実法線が残ると、開口時にそこへ筋状の陰影が出る。
+ */
+export function keepRealNormalMask(
+  vertexCount: number,
+  triangles: Uint32Array,
+  classification: RegionClassification,
+): Uint8Array {
+  const keepReal = new Uint8Array(vertexCount);
+  const mark = (flatColor: boolean, value: number): void => {
+    classification.regions.forEach((region, index) => {
+      if ((region.kind === 'flat_color') !== flatColor) return;
+      for (const triangle of classification.perRegion[index]) {
+        for (let corner = 0; corner < 3; corner++) {
+          keepReal[triangles[triangle * 3 + corner]] = value;
+        }
+      }
+    });
+  };
+  mark(true, 1);
+  mark(false, 0);
+  return keepReal;
 }
 
 /** bind 姿勢のフィット結果から確認用シーンを作る（形と対応だけ。位置は毎フレーム更新する）。 */
@@ -151,6 +188,11 @@ export function buildPreviewScene(input: {
   if (meshes.length === 0) throw new Error('確認用シーンにメッシュが無い');
   return {
     meshes,
+    normalPlan: planNormals(
+      headMesh.triangles,
+      keepRealNormalMask(headMesh.vertexCount, headMesh.triangles, classification),
+      unsplitVertexCount(headMesh),
+    ),
     unassignedTriangleCount:
       classification.regions.length > 0 &&
       classification.regions[classification.regions.length - 1].name === 'Unassigned'

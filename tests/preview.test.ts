@@ -43,8 +43,22 @@ import {
   jointSkinMatrices,
   skinVertices,
 } from '../src/domain/preview/pose';
-import { buildPreviewScene } from '../src/domain/preview/scene';
-import { verticesOf } from '../src/domain/gnm/model';
+import {
+  buildPreviewScene,
+  keepRealNormalMask,
+} from '../src/domain/preview/scene';
+import {
+  flattenNormals,
+  planNormals,
+  recalculateNormals,
+  skinNormals,
+} from '../src/domain/preview/normals';
+import { unsplitVertexCount, verticesOf } from '../src/domain/gnm/model';
+
+/** 全頂点で実法線を求める plan（絞り込み前の答え合わせ用）。 */
+function allReal(vertexCount: number): Uint8Array {
+  return new Uint8Array(vertexCount).fill(1);
+}
 
 function countMask(mask: Uint8Array): number {
   let total = 0;
@@ -418,5 +432,221 @@ describe('selector の構文', () => {
 
   it('知らない group 名は落とす', () => {
     expect(() => evaluateSelector(preview(), ['eyebrows'])).toThrow(/eyebrows/);
+  });
+});
+
+// 正本は Unity 側 `GnmHeadInstance.FlattenNormals`。あちらのセッション（ccdesk 868eacc0）に確認した
+// 切り分けと同じであることを実アセットで測る:
+//
+// | 部位 | リアル表示の法線 |
+// |:--|:--|
+// | 肌・眼球・髪 | +Z 固定 |
+// | 歯・歯茎・舌 | 実法線 |
+// | 口腔壁の奥 | 実法線 |
+// | 口腔壁のうち肌と共有する頂点（唇の内縁） | **+Z 固定** |
+describe('法線の切り分け', () => {
+  function masks(): {
+    keepReal: Uint8Array;
+    vertexOf: (name: string) => Set<number>;
+  } {
+    const { asset, preview } = loadBundle();
+    const classification = classifyTriangles(
+      preview,
+      asset.mesh.triangles,
+      asset.mesh.triangleCount,
+    );
+    const keepReal = keepRealNormalMask(
+      asset.mesh.vertexCount,
+      asset.mesh.triangles,
+      classification,
+    );
+    const vertexOf = (name: string): Set<number> => {
+      const index = classification.regions.findIndex((region) => region.name === name);
+      if (index < 0) throw new Error(`領域 ${name} が無い`);
+      const set = new Set<number>();
+      for (const triangle of classification.perRegion[index]) {
+        for (let corner = 0; corner < 3; corner++) {
+          set.add(asset.mesh.triangles[triangle * 3 + corner]);
+        }
+      }
+      return set;
+    };
+    return { keepReal, vertexOf };
+  }
+
+  it('歯・歯茎・舌は全頂点が実法線', () => {
+    const { keepReal, vertexOf } = masks();
+    for (const name of ['Teeth', 'Gums', 'Tongue']) {
+      for (const vertex of vertexOf(name)) {
+        expect(keepReal[vertex], `${name} の頂点 ${vertex}`).toBe(1);
+      }
+    }
+  });
+
+  it('肌・眼球は全頂点が +Z 固定', () => {
+    const { keepReal, vertexOf } = masks();
+    for (const name of ['Skin', 'EyeLeft', 'EyeRight']) {
+      for (const vertex of vertexOf(name)) {
+        expect(keepReal[vertex], `${name} の頂点 ${vertex}`).toBe(0);
+      }
+    }
+  });
+
+  it('口腔壁は奥が実法線・唇の内縁だけ +Z 固定（肌と共有する頂点が後勝ちで落ちる）', () => {
+    const { keepReal, vertexOf } = masks();
+    const sock = [...vertexOf('MouthSock')];
+    const real = sock.filter((vertex) => keepReal[vertex] === 1);
+    const flat = sock.filter((vertex) => keepReal[vertex] === 0);
+    // 両方が非空でなければ「二段マーク」が効いていない。
+    expect(real.length).toBeGreaterThan(0);
+    expect(flat.length).toBeGreaterThan(0);
+    // 落ちるのは境界の一周ぶんなので、奥の方が多い。
+    expect(real.length).toBeGreaterThan(flat.length);
+  });
+
+  it('実法線は外向き（巻き順が合っている）', () => {
+    const { asset, preview } = loadBundle();
+    const identity = new Float64Array(asset.vertexIdentityBasis.componentCount);
+    const vertices = verticesOf(asset, identity);
+    const normals = new Float32Array(vertices.length);
+    const undetermined = recalculateNormals(
+      vertices,
+      asset.mesh.triangles,
+      asset.mesh.uvSplitSource,
+      planNormals(asset.mesh.triangles, allReal(asset.mesh.vertexCount), unsplitVertexCount(asset.mesh)),
+      normals,
+    );
+    expect(undetermined).toBe(0);
+    // 単位長であること（面積重みだとここが 1e-5 まで落ちて潰れる）。
+    for (let vertex = 0; vertex < preview.vertexCount; vertex++) {
+      const length = Math.hypot(
+        normals[vertex * 3],
+        normals[vertex * 3 + 1],
+        normals[vertex * 3 + 2],
+      );
+      expect(length, `頂点 ${vertex}`).toBeCloseTo(1, 4);
+    }
+    // 最も前（+Z）の頂点は前を向く。裏返っていたら符号が反転する。
+    let front = 0;
+    let back = 0;
+    for (let vertex = 1; vertex < preview.vertexCount; vertex++) {
+      if (vertices[vertex * 3 + 2] > vertices[front * 3 + 2]) front = vertex;
+      if (vertices[vertex * 3 + 2] < vertices[back * 3 + 2]) back = vertex;
+    }
+    expect(normals[front * 3 + 2]).toBeGreaterThan(0.5);
+    expect(normals[back * 3 + 2]).toBeLessThan(-0.5);
+  });
+
+  it('+Z へ落とした後も口腔内だけは実法線が残る', () => {
+    const { asset, preview } = loadBundle();
+    const identity = new Float64Array(asset.vertexIdentityBasis.componentCount);
+    const vertices = verticesOf(asset, identity);
+    const keepReal = keepRealNormalMask(
+      asset.mesh.vertexCount,
+      asset.mesh.triangles,
+      classifyTriangles(preview, asset.mesh.triangles, asset.mesh.triangleCount),
+    );
+    // 本番と同じ順序: +Z で埋めてから、plan が挙げた頂点だけ実法線で上書きし、最後に落とす。
+    const normals = new Float32Array(vertices.length);
+    for (let vertex = 0; vertex < preview.vertexCount; vertex++) normals[vertex * 3 + 2] = 1;
+    recalculateNormals(
+      vertices,
+      asset.mesh.triangles,
+      asset.mesh.uvSplitSource,
+      planNormals(asset.mesh.triangles, keepReal, unsplitVertexCount(asset.mesh)),
+      normals,
+    );
+    flattenNormals(normals, keepReal);
+    let flatCount = 0;
+    let tilted = 0;
+    for (let vertex = 0; vertex < preview.vertexCount; vertex++) {
+      const isFlat =
+        normals[vertex * 3] === 0 && normals[vertex * 3 + 1] === 0 && normals[vertex * 3 + 2] === 1;
+      if (keepReal[vertex] === 0) {
+        expect(isFlat, `頂点 ${vertex} は +Z のはず`).toBe(true);
+        flatCount++;
+      } else if (!isFlat) {
+        tilted++;
+      }
+    }
+    expect(flatCount).toBeGreaterThan(0);
+    // 口腔内の大半は +Z を向いていない（向いていたら実法線を残す意味が無い）。
+    expect(tilted).toBeGreaterThan(0);
+  });
+
+  it('法線もスキニングで回る（首を回すと陰影が動く）', () => {
+    const { asset, preview } = loadBundle();
+    const identity = new Float64Array(asset.vertexIdentityBasis.componentCount);
+    const vertices = verticesOf(asset, identity);
+    const normals = new Float32Array(vertices.length);
+    recalculateNormals(
+      vertices,
+      asset.mesh.triangles,
+      asset.mesh.uvSplitSource,
+      planNormals(asset.mesh.triangles, allReal(asset.mesh.vertexCount), unsplitVertexCount(asset.mesh)),
+      normals,
+    );
+    const rest = jointRestPositions(preview, identity);
+    const out = new Float32Array(vertices.length);
+    skinNormals(
+      preview,
+      normals,
+      jointSkinMatrices(
+        preview,
+        rest,
+        jointLocalRotations(preview, {
+          headYawDegrees: YAW_LIMIT_DEGREES,
+          headPitchDegrees: 0,
+          gazeYawDegrees: 0,
+          gazePitchDegrees: 0,
+        }),
+      ),
+      out,
+    );
+    let moved = 0;
+    let maximumLengthError = 0;
+    for (let vertex = 0; vertex < preview.vertexCount; vertex++) {
+      const length = Math.hypot(out[vertex * 3], out[vertex * 3 + 1], out[vertex * 3 + 2]);
+      maximumLengthError = Math.max(maximumLengthError, Math.abs(length - 1));
+      if (Math.abs(out[vertex * 3] - normals[vertex * 3]) > 1e-3) moved++;
+    }
+    expect(moved).toBeGreaterThan(preview.vertexCount / 2);
+    // 重みで混ぜた回転は直交にならないので、掛けた後に正規化し直している。
+    expect(maximumLengthError).toBeLessThan(1e-5);
+  });
+});
+
+describe('法線の計算を口腔内へ絞る', () => {
+  it('絞っても結果が変わらない（+Z へ落とす頂点は上書きされるので計算しない）', () => {
+    const { asset, preview } = loadBundle();
+    const identity = new Float64Array(asset.vertexIdentityBasis.componentCount);
+    const vertices = verticesOf(asset, identity);
+    const welded = unsplitVertexCount(asset.mesh);
+    const keepReal = keepRealNormalMask(
+      asset.mesh.vertexCount,
+      asset.mesh.triangles,
+      classifyTriangles(preview, asset.mesh.triangles, asset.mesh.triangleCount),
+    );
+
+    const full = new Float32Array(vertices.length);
+    recalculateNormals(
+      vertices,
+      asset.mesh.triangles,
+      asset.mesh.uvSplitSource,
+      planNormals(asset.mesh.triangles, allReal(asset.mesh.vertexCount), welded),
+      full,
+    );
+    flattenNormals(full, keepReal);
+
+    const plan = planNormals(asset.mesh.triangles, keepReal, welded);
+    const narrow = new Float32Array(vertices.length);
+    for (let vertex = 0; vertex < preview.vertexCount; vertex++) narrow[vertex * 3 + 2] = 1;
+    recalculateNormals(vertices, asset.mesh.triangles, asset.mesh.uvSplitSource, plan, narrow);
+    flattenNormals(narrow, keepReal);
+
+    expect(narrow).toEqual(full);
+    // 絞れていなければ速くならない。口腔内とその周りは全体の一部（実測で 4 分の 1 弱）。
+    expect(plan.triangles.length).toBeLessThan(asset.mesh.triangleCount / 3);
+    expect(plan.triangles.length).toBeGreaterThan(0);
   });
 });

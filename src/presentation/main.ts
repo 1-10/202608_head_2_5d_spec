@@ -181,6 +181,8 @@ async function runExport(): Promise<void> {
       preview: bundle.preview,
       restVertices: source.vertices,
       identity: result.headFit.identity,
+      triangles: source.asset.mesh.triangles,
+      uvSplitSource: source.asset.mesh.uvSplitSource,
     });
     // シーンを差し替えると表示状態と姿勢が初期化されるので、パネルを合わせ直す。
     for (const layer of LAYER_ORDER) {

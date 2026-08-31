@@ -9,11 +9,16 @@
 // | 投影 | 透視 FOV 20° / 距離 1.3m / 注視点 y=0.297m | `Scenes/Viewer.unity` の `MainCamera` |
 // | 光 | 平行光 1 灯 + 環境光 | 同 `DirectionalLight` |
 // | 背景 | `#26292e` | 同 `MainCamera` の `m_BackGroundColor` |
-// | 法線 | **+Z 固定**（立体感は写真に焼き込まれている） | `MT_GnmHeadOpaque` が `SG_Lit` を引く条件 |
+// | 法線 | 写真を貼る領域は **+Z 固定**、口腔内は**実法線** | `GnmHeadInstance.FlattenNormals` |
 // | 髪 | alpha clip 0.3 | `MT_GnmHairTransparent` の `_Cutoff` |
 //
-// **法線を実法線にしない。** 写真の陰影と URP の陰影が二重に掛かる。Unity 側でこれを実法線に替えて
-// よいのはトゥーン表示（`SH_Toon`）だけで、そちらは web に持ってきていない。
+// **肌・眼球・髪の法線を実法線にしない。** 写真の陰影と陰影が二重に掛かる。逆に**口腔内は実法線**で
+// 描く — 写真を持たない単色なので二重に掛かる影が無く、+Z 固定だと開口時に歯・歯茎・舌が真っ平らな
+// 切り絵に見える。切り分けの正本は `domain/preview/normals` と Unity 側 `FlattenNormals`。
+//
+// 法線はメッシュ空間で作って**位置と同じ LBS の回転を掛ける**。シェーダ側で +Z の定数に置き換える形は
+// 使えない（首を回しても陰影が動かなくなる）。視点への変換は three.js の `normalMatrix` に任せる —
+// 自分で Euler の逆回転を組むと、yaw と pitch が同時に入ったときに合成の順序を間違える。
 //
 // 旧 web 版から残したもの: 首と視線のドラッグ操作（0.25°/px）・自動まばたき・ワイヤーフレーム・
 // 背景色・FOV と距離の調整。Unity 側に無いが、写真 1 枚から起こした頭を確認するのに効く。
@@ -55,10 +60,16 @@ import {
   skinVertices,
 } from '../domain/preview/pose';
 import {
+  flattenNormals,
+  recalculateNormals,
+  rotateNormals,
+  skinNormals,
+} from '../domain/preview/normals';
+import {
   PreviewMesh,
   PreviewScene,
   drawPasses,
-  gatherPositions,
+  gatherVertexVectors,
   isTransparent,
   sceneLayerNames,
 } from '../domain/preview/scene';
@@ -146,15 +157,13 @@ export const RESET_KEY = 'KeyR';
 export const WIREFRAME_KEY = 'KeyW';
 
 const VERTEX_SHADER = `
-uniform mat4 uNormalRotation;
 varying vec2 vUv;
 varying vec3 vNormal;
 
-// 法線は +Z 固定。テクスチャに焼き込まれた陰影の上へ幾何法線の影を重ねない。
-const vec3 SURFACE_NORMAL = vec3(0.0, 0.0, 1.0);
-
 void main() {
-  vNormal = mat3(uNormalRotation) * SURFACE_NORMAL;
+  // normalMatrix は three.js が modelViewMatrix から作る（逆転置）。光を画面座標に固定してあるので、
+  // 法線をここで視点座標へ移す。
+  vNormal = normalMatrix * normal;
   vUv = uv;
   gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
 }
@@ -224,6 +233,9 @@ export interface PreviewAnimation {
   readonly restVertices: Float64Array;
   /** フィットで求めた identity 係数（ジョイント位置を作り直すのに要る）。 */
   readonly identity: Float64Array;
+  /** 法線を作り直すのに要るトポロジ（頭部メッシュのもの）。 */
+  readonly triangles: Uint32Array;
+  readonly uvSplitSource: Uint32Array;
 }
 
 interface GpuMesh {
@@ -234,6 +246,7 @@ interface GpuMesh {
   readonly material: THREE.ShaderMaterial;
   readonly texture: THREE.DataTexture | null;
   readonly positionAttribute: THREE.BufferAttribute;
+  readonly normalAttribute: THREE.BufferAttribute;
   /** 三角形ごとの重心（半透明の並べ替えに使う）。 */
   readonly centroids: Float32Array;
 }
@@ -251,6 +264,14 @@ export class Viewer {
   /** 髪シェルの bind 姿勢の位置（剛体変換の元）。 */
   private hairRest: Float32Array | null = null;
   private workingVertices: Float64Array | null = null;
+  /** メッシュ空間の法線（実法線 → 写真領域を +Z へ落としたもの）。 */
+  private restNormals: Float32Array | null = null;
+  /** LBS を掛けた後の法線。 */
+  private skinnedNormals: Float32Array | null = null;
+  /** 内角重みの集約に使う作業領域（複製前の頂点数ぶん）。 */
+  private normalScratch: Float64Array | null = null;
+  /** 髪シェルのメッシュ空間の法線。 */
+  private hairRestNormals: Float32Array | null = null;
   private expressionWeights: Float64Array | null = null;
   /**
    * 前のフレームで当てた重み。
@@ -272,6 +293,8 @@ export class Viewer {
   private pointerY = 0;
   private lastFrameMs: number | null = null;
   private poseDirty = true;
+  /** 同じ数を何度も console へ出さないための直近値。 */
+  private reportedUndeterminedNormals = 0;
 
   /** カメラ周回の角度（ラジアン）。頭の向き（`headPose`）とは別。 */
   orbitYaw = 0;
@@ -332,6 +355,13 @@ export class Viewer {
     this.animation = animation;
     this.jointRest = jointRestPositions(animation.preview, animation.identity);
     this.workingVertices = new Float64Array(animation.restVertices.length);
+    this.restNormals = new Float32Array(animation.restVertices.length);
+    this.skinnedNormals = new Float32Array(animation.restVertices.length);
+    this.normalScratch = new Float64Array(scene.normalPlan.weldedCount * 3);
+    // +Z 固定の頂点は `recalculateNormals` が触れないので、ここで一度だけ埋める。
+    for (let vertex = 0; vertex < animation.preview.vertexCount; vertex++) {
+      this.restNormals[vertex * 3 + 2] = 1;
+    }
     this.expressionWeights = new Float64Array(animation.preview.presetCount);
     this.appliedWeights = new Float64Array(animation.preview.presetCount);
     this.manualWeights = new Float64Array(animation.preview.presetCount);
@@ -346,7 +376,14 @@ export class Viewer {
     this.resetView();
 
     for (const mesh of scene.meshes) {
-      if (mesh.sourceVertices === null) this.hairRest = Float32Array.from(mesh.restPositions);
+      if (mesh.sourceVertices === null) {
+        this.hairRest = Float32Array.from(mesh.restPositions);
+        // 髪は写真を貼るので +Z 固定（Unity 側もリアル表示では髪を平坦にする）。
+        this.hairRestNormals = new Float32Array(mesh.restPositions.length);
+        for (let vertex = 0; vertex < mesh.restPositions.length / 3; vertex++) {
+          this.hairRestNormals[vertex * 3 + 2] = 1;
+        }
+      }
       const geometry = new THREE.BufferGeometry();
       const positionAttribute = new THREE.BufferAttribute(
         Float32Array.from(mesh.restPositions),
@@ -354,6 +391,12 @@ export class Viewer {
       );
       positionAttribute.setUsage(THREE.DynamicDrawUsage);
       geometry.setAttribute('position', positionAttribute);
+      const normalAttribute = new THREE.BufferAttribute(
+        new Float32Array(mesh.restPositions.length),
+        3,
+      );
+      normalAttribute.setUsage(THREE.DynamicDrawUsage);
+      geometry.setAttribute('normal', normalAttribute);
       geometry.setAttribute('uv', new THREE.BufferAttribute(mesh.uvs, 2));
       geometry.setIndex(new THREE.BufferAttribute(Uint32Array.from(mesh.triangles), 1));
       const transparent = isTransparent(mesh);
@@ -362,7 +405,6 @@ export class Viewer {
         vertexShader: VERTEX_SHADER,
         fragmentShader: FRAGMENT_SHADER,
         uniforms: {
-          uNormalRotation: { value: new THREE.Matrix4() },
           uTexture: { value: texture },
           uUseTexture: { value: texture !== null },
           uAlphaTest: { value: transparent },
@@ -413,6 +455,7 @@ export class Viewer {
         material,
         texture,
         positionAttribute,
+        normalAttribute,
         centroids: transparent ? new Float32Array((mesh.triangles.length / 3) * 3) : EMPTY_CENTROIDS,
       });
     }
@@ -577,9 +620,7 @@ export class Viewer {
     }
     this.advanceAnimation(deltaSeconds);
     this.placeCamera();
-    const rotation = this.normalRotation();
     for (const gpu of this.meshes) {
-      gpu.material.uniforms.uNormalRotation.value = rotation;
       if (gpu.object.visible && isTransparent(gpu.source)) this.sortBackToFront(gpu);
     }
     this.renderer.render(this.scene, this.camera);
@@ -643,11 +684,14 @@ export class Viewer {
     this.updateGeometry();
   }
 
-  /** identity + 表情 + LBS を当てて GPU の位置バッファを書き換える。 */
+  /** identity + 表情 + LBS を当てて GPU の位置と法線を書き換える。 */
   private updateGeometry(): void {
     if (
       this.animation === null ||
+      this.previewScene === null ||
       this.workingVertices === null ||
+      this.restNormals === null ||
+      this.skinnedNormals === null ||
       this.expressionWeights === null ||
       this.jointRest === null
     ) {
@@ -656,22 +700,43 @@ export class Viewer {
     const preview = this.animation.preview;
     this.workingVertices.set(this.animation.restVertices);
     addExpression(preview, this.workingVertices, this.expressionWeights);
+
+    // 法線は**スキニングの前**のメッシュ空間で作る（Unity 側も Mesh に焼いて skinning へ通す）。
+    const undetermined = recalculateNormals(
+      this.workingVertices,
+      this.animation.triangles,
+      this.animation.uvSplitSource,
+      this.previewScene.normalPlan,
+      this.restNormals,
+      this.normalScratch ?? undefined,
+    );
+    if (undetermined > 0 && undetermined !== this.reportedUndeterminedNormals) {
+      this.reportedUndeterminedNormals = undetermined;
+      console.warn(`面が打ち消して法線を決められない頂点が ${undetermined} 個あった`);
+    }
+    flattenNormals(this.restNormals, this.previewScene.normalPlan.keepReal);
+
     const skinMatrices = jointSkinMatrices(
       preview,
       this.jointRest,
       jointLocalRotations(preview, this.headPose, this.neckShare),
     );
     const skinned = skinVertices(preview, this.workingVertices, skinMatrices);
+    skinNormals(preview, this.restNormals, skinMatrices, this.skinnedNormals);
     const hairTransform = rigidTransformFor(preview, skinMatrices, 'head');
 
     for (const gpu of this.meshes) {
       const target = gpu.positionAttribute.array as Float32Array;
+      const normalTarget = gpu.normalAttribute.array as Float32Array;
       if (gpu.source.sourceVertices !== null) {
-        gatherPositions(gpu.source, skinned, target);
-      } else if (this.hairRest !== null) {
+        gatherVertexVectors(gpu.source, skinned, target);
+        gatherVertexVectors(gpu.source, this.skinnedNormals, normalTarget);
+      } else if (this.hairRest !== null && this.hairRestNormals !== null) {
         target.set(applyRigidTransform(this.hairRest, hairTransform));
+        normalTarget.set(rotateNormals(this.hairRestNormals, hairTransform));
       }
       gpu.positionAttribute.needsUpdate = true;
+      gpu.normalAttribute.needsUpdate = true;
       // 重心は**半透明の並べ替えにしか使わない**。不透明まで毎フレーム計算すると、頭部の
       // 35,324 三角形ぶんが丸ごと無駄になる。
       if (!isTransparent(gpu.source)) continue;
@@ -712,18 +777,6 @@ export class Viewer {
     this.camera.up.copy(up);
     this.camera.lookAt(target);
     this.camera.updateMatrixWorld();
-  }
-
-  /**
-   * 法線に掛ける回転。
-   *
-   * 法線は +Z 固定なので、これは「今カメラから見て面がどちらを向いているか」を作るだけ。光は画面
-   * 座標に固定してあるので、カメラの周回の逆回転を法線へ掛ける。
-   */
-  private normalRotation(): THREE.Matrix4 {
-    return new THREE.Matrix4().makeRotationFromEuler(
-      new THREE.Euler(-this.orbitPitch, -this.orbitYaw, 0, 'YXZ'),
-    );
   }
 
   /**
@@ -843,6 +896,10 @@ export class Viewer {
     this.jointRest = null;
     this.hairRest = null;
     this.workingVertices = null;
+    this.restNormals = null;
+    this.skinnedNormals = null;
+    this.normalScratch = null;
+    this.hairRestNormals = null;
     this.expressionWeights = null;
     this.appliedWeights = null;
     this.manualWeights = null;
