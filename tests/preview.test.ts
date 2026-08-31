@@ -51,6 +51,7 @@ import {
 import {
   buildPreviewScene,
   keepRealNormalMask,
+  previewTarget,
 } from '../src/domain/preview/scene';
 import {
   flattenNormals,
@@ -469,6 +470,52 @@ describe('確認用シーン', () => {
       expect(mesh.sourceVertices).not.toBeNull();
       expect(mesh.sourceVertices?.length).toBe(mesh.restPositions.length / 3);
     }
+  });
+
+  it('注視点は頭部の外接箱の中心（髪シェルに引っ張られない）', () => {
+    const { asset, preview } = loadBundle();
+    const identity = new Float64Array(asset.vertexIdentityBasis.componentCount);
+    const vertices = verticesOf(asset, identity);
+    const texture = { data: new Uint8Array(4 * 4 * 3), width: 4, height: 4 };
+    const build = (hair: boolean) =>
+      buildPreviewScene({
+        vertices,
+        headMesh: asset.mesh,
+        preview,
+        skinAlbedo: texture,
+        eyeAlbedos: { left: texture, right: texture },
+        hair: hair
+          ? {
+              // 肩の高さまで垂れた髪（イヤリングや肩紐が混ざる想定）。
+              positions: Float32Array.from([0, -0.2, 0, 0.1, -0.2, 0, 0, -0.1, 0]),
+              uvs: Float32Array.from([0, 0, 1, 0, 0, 1]),
+              triangles: Uint32Array.from([0, 1, 2]),
+              vertexCount: 3,
+              triangleCount: 1,
+            }
+          : null,
+        hairAlbedo: hair ? texture : null,
+        hairAlpha: hair ? { data: new Uint8Array(16), width: 4, height: 4 } : null,
+      });
+
+    const withoutHair = previewTarget(build(false));
+    const withHair = previewTarget(build(true));
+    // 髪を足しても注視点は動かない。
+    expect(withHair).toEqual(withoutHair);
+
+    // 頭部の外接箱の中心と一致する。
+    let low = Infinity;
+    let high = -Infinity;
+    for (let vertex = 0; vertex < preview.vertexCount; vertex++) {
+      const y = vertices[vertex * 3 + 1];
+      if (y < low) low = y;
+      if (y > high) high = y;
+    }
+    // 角膜は描かないので、頭部メッシュの箱は全頂点の箱より狭いか等しい。
+    expect(withoutHair[1]).toBeGreaterThan(low);
+    expect(withoutHair[1]).toBeLessThan(high);
+    // **Unity の固定値（眼の高さ 0.297）より低い。** 固定値のままだと頭が枠の下へずれる。
+    expect(withoutHair[1]).toBeLessThan(0.297);
   });
 
   it('角膜は描かない（Unity 側と同じ除外設定）', () => {

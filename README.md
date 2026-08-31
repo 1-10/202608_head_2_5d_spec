@@ -133,7 +133,8 @@ npm test
 
 | | 値 | 正本 |
 |:--|:--|:--|
-| 投影 | 透視 FOV 20° / 距離 1.3m / 注視点 y=0.297m | `Scenes/Viewer.unity` の `MainCamera` |
+| 投影 | 透視 FOV 20° / 距離 1.3m | `Scenes/Viewer.unity` の `MainCamera` |
+| 注視点 | **頭部の外接箱の中心**（あちらは眼の高さ y=0.297m 固定） | ここだけ違える。あちらは体に載せた状態で使う前提のリグで、頭だけを見るこちらでは頭が枠の中心へ来る方が確認しやすい（旧 web 版も頭の中心を見ていた）。固定値のままだと頭が枠の 27% ぶん下へずれる |
 | 背景 | `#26292e` | 同 `MainCamera` の `m_BackGroundColor` |
 | 光 | 平行光 1 灯（上・前・被写体の右から）**ワールド固定** + 環境光 0.65 | 同 `DirectionalLight`。環境光の量だけ旧 web 版の `AmbientLight` に合わせた |
 | 法線 | 肌・眼球・髪は **+Z 固定**（立体感は写真に焼き込まれている）、**口腔内は実法線** | `GnmHeadInstance.FlattenNormals` |

@@ -100,9 +100,38 @@ export function drawPasses(
   };
 }
 
-// カメラは Unity 側の固定値（FOV 20° / 距離 1.3m / 注視点 y=0.297m）で置くので、シーンの
-// 境界からフレーミングを決める関数は持たない。**あちらと同じ絵にすることが目的**なので、
-// こちらで勝手に枠へ合わせると「web では入っていたが Unity では切れる」が起きる。
+/**
+ * 注視点（GNM 頭部の外接箱の中心・bind 姿勢）を返す。
+ *
+ * **髪シェルを含めない。** 髪はイヤリングや肩紐の先端が少し混ざるので、含めると guest ごとに
+ * 注視点が下へ引っ張られて量が読めない。頭部だけなら首の切り口から頭頂までで安定する。
+ *
+ * **bind 姿勢で決める**（首を振るたびに画角が動かない）。
+ *
+ * Unity 側はカメラを固定値（注視点 y=0.297m = 眼の高さ）で置くが、あれは体に載せた状態で使う
+ * 前提のリグ。頭だけを見るこちらでは頭が枠の中心へ来る方が確認しやすいので、**ここだけあちらと
+ * 違えている**（旧 web 版も頭の中心を見ていた）。
+ */
+export function previewTarget(scene: PreviewScene): [number, number, number] {
+  const low = [Infinity, Infinity, Infinity];
+  const high = [-Infinity, -Infinity, -Infinity];
+  for (const mesh of scene.meshes) {
+    if (mesh.sourceVertices === null) continue; // 髪シェル
+    for (let vertex = 0; vertex < mesh.restPositions.length / 3; vertex++) {
+      for (let axis = 0; axis < 3; axis++) {
+        const value = mesh.restPositions[vertex * 3 + axis];
+        if (value < low[axis]) low[axis] = value;
+        if (value > high[axis]) high[axis] = value;
+      }
+    }
+  }
+  if (!Number.isFinite(low[1])) throw new Error('頭部メッシュが 1 つも無い');
+  return [
+    0.5 * (low[0] + high[0]),
+    0.5 * (low[1] + high[1]),
+    0.5 * (low[2] + high[2]),
+  ];
+}
 
 /** split 頂点配列から、このメッシュの頂点だけを `out` へ集める（位置でも法線でも使う）。 */
 export function gatherVertexVectors(

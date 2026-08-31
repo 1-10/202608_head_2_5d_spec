@@ -75,6 +75,7 @@ import {
   drawPasses,
   gatherVertexVectors,
   isTransparent,
+  previewTarget,
   sceneLayerNames,
 } from '../domain/preview/scene';
 
@@ -88,7 +89,13 @@ export const DEFAULT_DISTANCE_METERS = 1.3;
 export const MINIMUM_DISTANCE_METERS = 0.35;
 export const MAXIMUM_DISTANCE_METERS = 3;
 
-/** 注視点の高さ（メートル）。正本は同カメラの y（GNM の眼の高さ）。 */
+/**
+ * 注視点の高さ（メートル）。シーンが無いときの既定。
+ *
+ * Unity 側 `MainCamera` の y（GNM の眼の高さ）。**シーンがあるときは頭部の外接箱の中心を使う** —
+ * あちらのカメラは体に載せた状態で使う前提のリグで、頭だけを見るこちらでは頭が枠の中心へ来る方が
+ * 確認しやすい（旧 web 版も頭の中心を見ていた）。判断は `domain/preview/scene.previewTarget`。
+ */
 export const TARGET_HEIGHT_METERS = 0.297;
 
 /** near / far。正本は同カメラ。 */
@@ -280,6 +287,8 @@ export class Viewer {
   private normalScratch: Float64Array | null = null;
   /** 髪シェルのメッシュ空間の法線。 */
   private hairRestNormals: Float32Array | null = null;
+  /** 注視点（頭部の外接箱の中心）。シーンごとに 1 回決める。 */
+  private target: [number, number, number] = [0, TARGET_HEIGHT_METERS, 0];
   private expressionWeights: Float64Array | null = null;
   /**
    * 前のフレームで当てた重み。
@@ -366,6 +375,7 @@ export class Viewer {
     this.dispose();
     this.previewScene = scene;
     this.animation = animation;
+    this.target = previewTarget(scene);
     this.jointRest = jointRestPositions(animation.preview, animation.identity);
     this.workingVertices = new Float64Array(animation.restVertices.length);
     this.restNormals = new Float32Array(animation.restVertices.length);
@@ -797,7 +807,7 @@ export class Viewer {
     // pan は画面内の平行移動。拡大したまま端を見るのに要る（拡大は中心のまま効くので、平行移動が
     // 無いと目・口の端が枠外に出て検査できない）。
     const halfHeight = distance * Math.tan((this.camera.fov * Math.PI) / 360);
-    const target = new THREE.Vector3(0, TARGET_HEIGHT_METERS, 0);
+    const target = new THREE.Vector3(...this.target);
     target.addScaledVector(right, -this.pan[0] * halfHeight * this.camera.aspect);
     target.addScaledVector(up, -this.pan[1] * halfHeight);
     this.camera.position.copy(target).addScaledVector(forward, distance);
@@ -927,6 +937,7 @@ export class Viewer {
     this.skinnedNormals = null;
     this.normalScratch = null;
     this.hairRestNormals = null;
+    this.target = [0, TARGET_HEIGHT_METERS, 0];
     this.expressionWeights = null;
     this.appliedWeights = null;
     this.manualWeights = null;
