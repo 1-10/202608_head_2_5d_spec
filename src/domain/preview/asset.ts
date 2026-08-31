@@ -36,6 +36,16 @@ export interface GnmPreviewAsset {
   readonly expressionPresetBasisQ: Int16Array;
   /** プリセットごとの量子化スケール。 */
   readonly expressionPresetScales: Float64Array;
+  /**
+   * (頂点数, 3) まばたきの変位（int16）。値 = q * `blinkScale` / 32767 メートル。
+   *
+   * **表情プリセットの 1 本として持たない。** まばたきは他の表情へ加算するのではなく、目領域だけ
+   * 置き換える（正本は旧 web 版 `gnmHeadMesh` のクロスフェード）。
+   */
+  readonly blinkBasisQ: Int16Array;
+  readonly blinkScale: number;
+  /** まばたきが動かす頂点の vertex group 名（クロスフェードをこの範囲へ閉じる）。 */
+  readonly eyeExpressionGroups: readonly string[];
   readonly vertexCount: number;
   readonly jointCount: number;
   readonly presetCount: number;

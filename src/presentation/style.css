@@ -99,6 +99,7 @@ button:disabled {
 }
 
 #viewport-row {
+  position: relative;
   display: flex;
   flex-direction: column;
   flex: 1 1 auto;
@@ -170,53 +171,73 @@ button:disabled {
 }
 
 /*
- * 下段は**タブ 1 枚ぶんの高さ**しか取らない。検査画像と内訳を同時に出すと 3D ビューが潰れるし、
- * どちらも「今の書き出しの結果」なので、並べて見比べる必要が無い。
+ * 検査画像と内訳は 3D ビューへ重ねる。**常に場所を取らせない。**
+ *
+ * 見るのは「書き出した直後に一度」で、その間 3D ビューを触る必要が無い。下段に置くと見ていない
+ * 時間もずっと画面を取る。
  */
-#bottom-panel {
+#overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
   display: flex;
   flex-direction: column;
-  flex: 0 0 auto;
-  max-height: 34vh;
-  border-top: 1px solid var(--line);
+  background: rgba(12, 13, 16, 0.94);
 }
 
-.tab-bar {
+#overlay[hidden] {
+  display: none;
+}
+
+.overlay-bar {
   display: flex;
+  align-items: center;
   gap: 2px;
   flex: 0 0 auto;
   padding: 0 8px;
+  border-bottom: 1px solid var(--line);
   background: var(--panel);
 }
 
-.tab {
-  padding: 7px 14px;
+.overlay-close {
+  margin-left: auto;
+  padding: 4px 10px;
   border: 0;
-  border-bottom: 2px solid transparent;
-  border-radius: 0;
   background: none;
+  font-size: 18px;
+  line-height: 1;
+  color: var(--muted);
+}
+
+.overlay-close:hover {
+  color: var(--text);
+}
+
+#overlay-title {
+  padding: 7px 6px;
   font-size: 12px;
   color: var(--muted);
 }
 
-.tab:hover:not([aria-selected='true']) {
-  color: var(--text);
-}
-
-.tab[aria-selected='true'] {
-  color: var(--text);
-  border-bottom-color: var(--accent);
-}
-
-.tab-body {
+.overlay-body {
   flex: 1 1 auto;
   min-height: 0;
   overflow: auto;
 }
 
-/* `#inspection` の display: flex が UA の [hidden] を上書きするので、明示的に消す。 */
-.tab-pane[hidden] {
+/*
+ * `#inspection` の `display: flex` は ID 指定なので、クラスの `[hidden]` では消せない
+ * （詳細度が負ける）。**同じ ID 指定で書く。**
+ */
+#inspection[hidden],
+#report[hidden] {
   display: none;
+}
+
+/* 押している間だけ色を付ける（オーバーレイが出ているかがツールバーで分かる）。 */
+button[aria-pressed='true'] {
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
 #inspection {
@@ -224,6 +245,12 @@ button:disabled {
   flex-wrap: wrap;
   gap: 14px;
   padding: 12px 16px;
+}
+
+#inspection:empty::after {
+  content: '写真を書き出すと、各段の出力がここへ並びます。';
+  font-size: 12px;
+  color: var(--muted);
 }
 
 .inspection-item {

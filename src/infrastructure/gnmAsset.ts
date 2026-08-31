@@ -242,6 +242,14 @@ function parsePreview(
   const skinJointIndices = requireArray(container, 'skinJointIndices', Uint8Array);
   const skinJointWeights = requireArray(container, 'skinJointWeights', Float32Array);
   const expressionPresetBasisQ = requireArray(container, 'expressionPresetBasisQ', Int16Array);
+  const blinkBasisQ = requireArray(container, 'blinkBasisQ', Int16Array);
+  const blinkScale = requireNumber(header, 'blink_scale');
+  const eyeExpressionGroups = requireStringArray(header, 'eye_expression_groups');
+  for (const name of eyeExpressionGroups) {
+    if (!vertexGroupNames.includes(name)) {
+      throw new Error(`eye_expression_groups の '${name}' が vertex_group_names に無い`);
+    }
+  }
 
   const jointCount = jointNames.length;
   const presetCount = expressionPresetNames.length;
@@ -253,6 +261,7 @@ function parsePreview(
     ['skinJointIndices', skinJointIndices.length, vertexCount * 2],
     ['skinJointWeights', skinJointWeights.length, vertexCount * 2],
     ['expressionPresetBasisQ', expressionPresetBasisQ.length, presetCount * vertexCount * 3],
+    ['blinkBasisQ', blinkBasisQ.length, vertexCount * 3],
   ] as const) {
     if (actual !== expected) {
       throw new Error(`${name} の要素数が ${actual}（期待 ${expected}）`);
@@ -281,6 +290,9 @@ function parsePreview(
     expressionPresetNames,
     expressionPresetBasisQ,
     expressionPresetScales,
+    blinkBasisQ,
+    blinkScale,
+    eyeExpressionGroups,
     vertexCount,
     jointCount,
     presetCount,

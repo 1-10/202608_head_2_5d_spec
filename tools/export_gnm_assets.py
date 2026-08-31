@@ -36,6 +36,7 @@ identity 基底だけ int16 に量子化する
 from __future__ import annotations
 
 import json
+import re
 import struct
 import sys
 from pathlib import Path
@@ -121,6 +122,15 @@ EXPECTED_JOINT_NAMES: tuple[str, ...] = ("neck", "head", "left_eye", "right_eye"
 SKIN_INFLUENCE_LIMIT = 2
 """1 頂点が受けるボーンの本数。v3_0 / head では実測で 2 本。超えたら落とす。"""
 
+EYE_EXPRESSION_COMPONENT = re.compile(r"^(left|right)_eye")
+"""まばたきに使う成分の名前（正本は旧 web 版 ``main.buildBlinkVector``）。"""
+
+BLINK_PRESET_CLASSES = ("wink_left", "wink_right")
+"""まばたき = 公式 ExpressionSampler の WINK_LEFT + WINK_RIGHT を目領域の成分だけ残したもの。"""
+
+EYE_EXPRESSION_GROUPS = ("expression_basis_left_eye", "expression_basis_right_eye")
+"""目領域の成分が動かす頂点。実測でこの外側の変位は厳密に 0（クロスフェードをこの範囲へ閉じられる）。"""
+
 DEGENERATE_EDGE_RATIO = 0.25
 REVERSAL_COSINE = -0.5
 MIN_REVERSED_EDGES = 2
@@ -143,7 +153,7 @@ NPZ_KEYS: dict[str, str] = {
     "template_joint_positions": "読む: 同上",
     "pose_correctives_regressor": "読む: 全要素ゼロであることの確認にだけ使う",
     "bone_aligned_template_joint_orientations": "読む: 単位行列であることの確認にだけ使う",
-    "expression_names": "読まない: 成分名は領域ごとの統計方向で、表情として意味を持たない",
+    "expression_names": "読む: まばたきに使う目領域の成分を名前で選ぶ",
     "identity_names": "読まない: 係数は index で送る",
     "joint_regressor": "読まない: 位置は template_joint_positions + joint_identity_basis で作る",
     "mirror_indices": "読まない: 左右対称で色を複製する段を持たない",
@@ -637,6 +647,47 @@ def build_preview_arrays(
         ).max()
     )
 
+    # --- まばたき ---------------------------------------------------------
+    # 旧 web 版と同じ作り方: WINK_LEFT + WINK_RIGHT の係数を**目領域の成分だけ**残して基底へ当てる。
+    # 表情プリセットの 1 本として持たない — まばたきは他の表情へ加算するのではなく、目領域だけ
+    # **置き換える**（加算だと surprise のような開瞼系と打ち消し合い、閉じ切らずに眼球が瞼を貫く）。
+    expression_names = names_of(npz["expression_names"])
+    eye_components = [
+        index
+        for index, name in enumerate(expression_names)
+        if EYE_EXPRESSION_COMPONENT.match(name)
+    ]
+    if not eye_components:
+        raise SystemExit(
+            f"目領域の成分が 1 つも無い（成分名の付け方が変わっている: {expression_names[:4]}）"
+        )
+    missing = [name for name in BLINK_PRESET_CLASSES if name not in preset_names]
+    if missing:
+        raise SystemExit(f"まばたきに使うプリセット {missing} が表情プリセット npz に無い")
+    blink_coefficients = np.zeros(coefficients.shape[1])
+    for name in BLINK_PRESET_CLASSES:
+        row = coefficients[preset_names.index(name)]
+        blink_coefficients[eye_components] += row[eye_components]
+    blink = (blink_coefficients @ flat).reshape(expression_basis.shape[1], 3)[source]
+
+    eye_region = np.zeros(npz["vertex_groups"].shape[1], dtype=bool)
+    for name in EYE_EXPRESSION_GROUPS:
+        if name not in vertex_group_names:
+            raise SystemExit(f"vertex group '{name}' が npz に無い")
+        eye_region |= npz["vertex_groups"][vertex_group_names.index(name)] > GROUP_THRESHOLD
+    blink_scale = float(np.abs(blink).max()) or 1.0
+    # **判定は int16 の 1 目盛りで行う。** 目領域の境目は重み 1e-4 で切っているので、外側にも基底の
+    # ごく小さな値が残る。1 目盛り未満なら量子化で 0 に落ちる = 送る値としては存在しない。
+    outside = float(np.abs(blink[~eye_region[source]]).max())
+    step = blink_scale / 32767.0
+    if outside > step:
+        raise SystemExit(
+            f"まばたきの変位が目領域の外へ {outside * 1e6:.3f} um 出ている"
+            f"（int16 の 1 目盛り {step * 1e6:.3f} um より大きい）。"
+            "クロスフェードを目領域へ閉じられないので、範囲の決め方を見直すこと"
+        )
+    blink_q = np.rint(blink / blink_scale * 32767.0).astype(np.int16)
+
     joint_identity = np.ascontiguousarray(npz["joint_identity_basis"], dtype=np.float32)
     arrays: dict[str, np.ndarray] = {
         "vertexGroups": groups,
@@ -646,6 +697,7 @@ def build_preview_arrays(
         "skinJointIndices": skin_indices,
         "skinJointWeights": skin_weights,
         "expressionPresetBasisQ": np.ascontiguousarray(preset_q),
+        "blinkBasisQ": np.ascontiguousarray(blink_q),
     }
     metadata: dict[str, Any] = {
         "vertex_group_names": list(vertex_group_names),
@@ -653,6 +705,13 @@ def build_preview_arrays(
         "joint_names": list(joint_names),
         "expression_preset_names": list(preset_names),
         "expression_preset_scales": [float(value) for value in preset_scales],
+        "blink_scale": blink_scale,
+        "blink_source": (
+            "WINK_LEFT + WINK_RIGHT の係数を "
+            + "/".join(EYE_EXPRESSION_COMPONENT.pattern.split("|"))
+            + " の成分だけ残したもの（正本は旧 web 版 main.buildBlinkVector）"
+        ),
+        "eye_expression_groups": list(EYE_EXPRESSION_GROUPS),
         "expression_presets_source": (
             "1-10/2607_Obayashi_Avatar_Mockup_3DGS"
             " Assets/Sandbox/Ooba/GNM/Tools/export_expression_presets.py"
@@ -665,6 +724,9 @@ def build_preview_arrays(
         "preset_max_displacement": float(np.abs(displacement).max()),
         "preset_error": preset_error,
         "joint_identity_max": float(np.abs(joint_identity).max()),
+        "blink_max_displacement": float(np.linalg.norm(blink, axis=1).max()),
+        "blink_outside_micrometers": outside * 1e6,
+        "eye_region_vertices": float(eye_region[source].sum()),
     }
     return arrays, metadata, report
 
@@ -817,6 +879,8 @@ def main() -> None:
         f" 表情プリセット {int(preview_report['preset_count'])} 本"
         f"（最大変位 {preview_report['preset_max_displacement'] * 1000:.1f} mm /"
         f" int16 量子化の最大誤差 {preview_report['preset_error'] * 1e6:.1f} um）\n"
+        f"  まばたき: 最大変位 {preview_report['blink_max_displacement'] * 1000:.2f} mm /"
+        f" 目領域 {int(preview_report['eye_region_vertices']):,} 頂点\n"
         f"  {output_path.stat().st_size / 1e6:.1f} MB"
     )
 

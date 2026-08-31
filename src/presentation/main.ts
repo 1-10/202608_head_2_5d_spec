@@ -40,29 +40,58 @@ const elements = {
   guiExport: requireElement<HTMLElement>('gui-export'),
   guiView: requireElement<HTMLElement>('gui-view'),
   inspection: requireElement<HTMLElement>('inspection'),
-  bottomPanel: requireElement<HTMLElement>('bottom-panel'),
+  overlay: requireElement<HTMLElement>('overlay'),
+  overlayTitle: requireElement<HTMLElement>('overlay-title'),
+  buttonInspection: requireElement<HTMLButtonElement>('btn-inspection'),
+  buttonReport: requireElement<HTMLButtonElement>('btn-report'),
+  buttonOverlayClose: requireElement<HTMLButtonElement>('btn-overlay-close'),
 };
 
+/** オーバーレイに出せるもの。切り替えはツールバーのボタンなので、中にタブは持たない。 */
+const OVERLAY_PANES = {
+  inspection: { element: () => elements.inspection, title: '検査画像（各段の出力そのもの）' },
+  report: { element: () => elements.report, title: '内訳' },
+} as const;
+
+type OverlayPane = keyof typeof OVERLAY_PANES;
+
 /**
- * 下段のタブ（検査画像 / 内訳）。
+ * 検査画像と内訳のオーバーレイ。
  *
- * `aria-selected` を状態の正本にして、pane の `hidden` をそこから作る。**別の変数で状態を持たない**
- * （二重管理になり、片方だけ更新した状態が画面に残る）。
+ * **状態は DOM が正本**（`#overlay` の `hidden` と各 pane の `hidden`）。別の変数で持つと二重管理に
+ * なり、片方だけ更新した状態が画面に残る。
  */
-function setupTabs(panel: HTMLElement): void {
-  const tabs = [...panel.querySelectorAll<HTMLButtonElement>('.tab')];
-  const select = (name: string): void => {
-    for (const tab of tabs) {
-      const selected = tab.dataset.pane === name;
-      tab.setAttribute('aria-selected', String(selected));
-      const pane = document.getElementById(tab.dataset.pane ?? '');
-      if (pane !== null) pane.hidden = !selected;
+const overlay = {
+  /** 出すものを選ぶ。同じものが既に出ていれば閉じる（ツールバーのボタンがトグルになる）。 */
+  toggle(name: OverlayPane): void {
+    if (!elements.overlay.hidden && overlay.current() === name) {
+      overlay.close();
+      return;
     }
-  };
-  for (const tab of tabs) {
-    tab.addEventListener('click', () => select(tab.dataset.pane ?? ''));
-  }
-}
+    elements.overlay.hidden = false;
+    for (const [key, pane] of Object.entries(OVERLAY_PANES)) {
+      pane.element().hidden = key !== name;
+    }
+    elements.overlayTitle.textContent = OVERLAY_PANES[name].title;
+    overlay.syncButtons();
+  },
+
+  close(): void {
+    elements.overlay.hidden = true;
+    overlay.syncButtons();
+  },
+
+  current(): OverlayPane | null {
+    const keys = Object.keys(OVERLAY_PANES) as OverlayPane[];
+    return keys.find((key) => !OVERLAY_PANES[key].element().hidden) ?? null;
+  },
+
+  syncButtons(): void {
+    const open = elements.overlay.hidden ? null : overlay.current();
+    elements.buttonInspection.setAttribute('aria-pressed', String(open === 'inspection'));
+    elements.buttonReport.setAttribute('aria-pressed', String(open === 'report'));
+  },
+};
 
 function requireElement<T extends HTMLElement>(id: string): T {
   const element = document.getElementById(id);
@@ -127,6 +156,11 @@ viewer.onViewChanged = (): void => {
 // 拾わない。
 window.addEventListener('keydown', (event) => {
   if (event.metaKey || event.ctrlKey || event.altKey) return;
+  if (event.code === 'Escape' && !elements.overlay.hidden) {
+    overlay.close();
+    event.preventDefault();
+    return;
+  }
   const target = event.target as HTMLElement | null;
   if (target !== null && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)) return;
   if (viewer.handleKey(event.code)) event.preventDefault();
@@ -328,6 +362,7 @@ elements.buttonReset.addEventListener('click', () => {
   viewer.dispose();
   elements.inspection.replaceChildren();
   elements.report.textContent = '';
+  overlay.close();
   updateButtons();
   setStatus('');
 });
@@ -344,7 +379,10 @@ function animate(): void {
   viewer.render();
 }
 
-setupTabs(elements.bottomPanel);
+elements.buttonInspection.addEventListener('click', () => overlay.toggle('inspection'));
+elements.buttonReport.addEventListener('click', () => overlay.toggle('report'));
+elements.buttonOverlayClose.addEventListener('click', () => overlay.close());
+overlay.syncButtons();
 updateViewReadout();
 updateButtons();
 animate();

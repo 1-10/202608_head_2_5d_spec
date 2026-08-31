@@ -36,7 +36,6 @@ import * as THREE from 'three';
 import { AlphaImage, RgbImage } from '../domain/contract';
 import { GnmPreviewAsset, LAYER_ORDER } from '../domain/preview/asset';
 import {
-  BLINK_PRESET_NAMES,
   BlinkState,
   ExpressionPlayMode,
   ExpressionPlayback,
@@ -46,6 +45,8 @@ import {
   addExpression,
   advanceBlink,
   advancePlayback,
+  blendBlink,
+  eyeExpressionMask,
   startBlink,
 } from '../domain/preview/expression';
 import {
@@ -288,7 +289,12 @@ export class Viewer {
    */
   private appliedWeights: Float64Array | null = null;
   private manualWeights: Float64Array | null = null;
-  private blinkPresetIndices: number[] = [];
+  /** まばたきが動かす頂点（クロスフェードをこの範囲へ閉じる）。 */
+  private eyeMask: Uint8Array | null = null;
+  /** 今フレームのまばたき量。0（開眼）〜1（閉眼）。 */
+  private blinkAmount = 0;
+  /** 前のフレームで当てたまばたき量（変わったかの判定用）。 */
+  private appliedBlinkAmount = 0;
 
   private hidden = new Set<string>();
   /** テクスチャを**外している**層。`hidden` と同じ「除外集合」の持ち方に揃える。 */
@@ -372,9 +378,9 @@ export class Viewer {
     this.expressionWeights = new Float64Array(animation.preview.presetCount);
     this.appliedWeights = new Float64Array(animation.preview.presetCount);
     this.manualWeights = new Float64Array(animation.preview.presetCount);
-    this.blinkPresetIndices = BLINK_PRESET_NAMES.map((name) =>
-      animation.preview.expressionPresetNames.indexOf(name),
-    ).filter((index) => index >= 0);
+    this.eyeMask = eyeExpressionMask(animation.preview);
+    this.blinkAmount = 0;
+    this.appliedBlinkAmount = 0;
     this.hidden = new Set();
     this.untextured = new Set();
     this.playback = IDLE_PLAYBACK;
@@ -671,12 +677,15 @@ export class Viewer {
       }
     }
 
-    if (this.blinkEnabled && this.blinkPresetIndices.length > 0) {
+    if (this.blinkEnabled) {
       const step = advanceBlink(this.blink, deltaSeconds);
       this.blink = step.state;
-      for (const index of this.blinkPresetIndices) weights[index] += step.weight;
+      this.blinkAmount = step.weight;
+    } else {
+      this.blinkAmount = 0;
     }
 
+    if (this.blinkAmount !== this.appliedBlinkAmount) this.poseDirty = true;
     if (this.appliedWeights !== null) {
       for (let preset = 0; preset < weights.length; preset++) {
         if (weights[preset] !== this.appliedWeights[preset]) {
@@ -688,6 +697,7 @@ export class Viewer {
     if (!this.poseDirty) return;
     this.poseDirty = false;
     this.appliedWeights?.set(weights);
+    this.appliedBlinkAmount = this.blinkAmount;
     this.updateGeometry();
   }
 
@@ -707,6 +717,16 @@ export class Viewer {
     const preview = this.animation.preview;
     this.workingVertices.set(this.animation.restVertices);
     addExpression(preview, this.workingVertices, this.expressionWeights);
+    // まばたきは**加算ではなく目領域の置き換え**。表情を当てた後に掛ける。
+    if (this.eyeMask !== null) {
+      blendBlink(
+        preview,
+        this.workingVertices,
+        this.animation.restVertices,
+        this.blinkAmount,
+        this.eyeMask,
+      );
+    }
 
     // 法線は**スキニングの前**のメッシュ空間で作る（Unity 側も Mesh に焼いて skinning へ通す）。
     const undetermined = recalculateNormals(
@@ -910,5 +930,6 @@ export class Viewer {
     this.expressionWeights = null;
     this.appliedWeights = null;
     this.manualWeights = null;
+    this.eyeMask = null;
   }
 }

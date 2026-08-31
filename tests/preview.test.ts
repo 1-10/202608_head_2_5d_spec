@@ -21,13 +21,18 @@ import {
   evaluateSelector,
 } from '../src/domain/preview/asset';
 import {
-  BLINK_PRESET_NAMES,
+  BLINK_DURATION_MAX_MS,
+  BLINK_DURATION_MIN_MS,
+  BLINK_PERIOD_MAX_SECONDS,
+  BLINK_PERIOD_MIN_SECONDS,
   FADE_SECONDS,
   HOLD_SECONDS,
   addExpression,
   advanceBlink,
   advancePlayback,
+  blendBlink,
   envelope,
+  eyeExpressionMask,
   startBlink,
   weightsFor,
 } from '../src/domain/preview/expression';
@@ -274,12 +279,9 @@ describe('スキニングとジョイント', () => {
 });
 
 describe('表情プリセット', () => {
-  it('Unity 側と同じ 20 本で、まばたきに使う名前がある', () => {
+  it('Unity 側と同じ 20 本', () => {
     const preview = loadPreview();
     expect(preview.presetCount).toBe(20);
-    for (const name of BLINK_PRESET_NAMES) {
-      expect(preview.expressionPresetNames).toContain(name);
-    }
   });
 
   it('重みを立てると顔が動き、0 に戻すと元へ戻る', () => {
@@ -359,6 +361,80 @@ describe('表情プリセット', () => {
     expect(closed).toBeGreaterThan(0);
     expect(peak).toBeGreaterThan(0.9);
     expect(peak).toBeLessThanOrEqual(1);
+  });
+
+  // 正本は旧 web 版 `blink.ts`。周期・継続・波形をそのまま持つ。
+  it('周期と継続は旧 web 版と同じ範囲', () => {
+    expect([BLINK_PERIOD_MIN_SECONDS, BLINK_PERIOD_MAX_SECONDS]).toEqual([3, 5]);
+    expect([BLINK_DURATION_MIN_MS, BLINK_DURATION_MAX_MS]).toEqual([150, 250]);
+    // 乱数 0 なら下限、1 なら上限を引く。
+    expect(startBlink(() => 0).waitSeconds).toBeCloseTo(BLINK_PERIOD_MIN_SECONDS, 10);
+    expect(startBlink(() => 1).waitSeconds).toBeCloseTo(BLINK_PERIOD_MAX_SECONDS, 10);
+  });
+
+  it('波形は sin(pi t)（旧 web 版 updateBlink と同じ）', () => {
+    // 待ちを飛ばして、まばたき 1 回を刻みながら理論値と突き合わせる。
+    const duration = BLINK_DURATION_MIN_MS / 1000;
+    const steps = 20;
+    const delta = duration / steps;
+    let state = { waitSeconds: 0, remainingSeconds: duration, durationSeconds: duration };
+    for (let step = 1; step < steps; step++) {
+      const result = advanceBlink(state, delta, () => 0);
+      state = result.state;
+      const expected = Math.sin(Math.PI * (step / steps));
+      expect(result.weight, `${step}/${steps}`).toBeCloseTo(expected, 6);
+    }
+  });
+
+  it('まばたきは目領域だけを置き換える（加算しない）', () => {
+    const { asset, preview } = loadBundle();
+    const identity = new Float64Array(asset.vertexIdentityBasis.componentCount);
+    const rest = verticesOf(asset, identity);
+    const eyeMask = eyeExpressionMask(preview);
+    expect(countMask(eyeMask)).toBeGreaterThan(0);
+
+    // 開瞼系（surprise）を全開で立てた上にまばたきを掛ける。
+    const surprised = Float64Array.from(rest);
+    addExpression(preview, surprised, weightsFor(preview, [['surprise', 1]]));
+    const blinked = Float64Array.from(surprised);
+    blendBlink(preview, blinked, rest, 1, eyeMask);
+
+    // 完全閉眼（amount=1）なら、目領域は surprise の変位が消えてまばたきだけになる。
+    const blinkOnly = Float64Array.from(rest);
+    blendBlink(preview, blinkOnly, rest, 1, eyeMask);
+    let insideDifference = 0;
+    let outsideDifference = 0;
+    for (let vertex = 0; vertex < preview.vertexCount; vertex++) {
+      for (let axis = 0; axis < 3; axis++) {
+        const index = vertex * 3 + axis;
+        const difference = Math.abs(blinked[index] - blinkOnly[index]);
+        if (eyeMask[vertex] !== 0) insideDifference = Math.max(insideDifference, difference);
+        else outsideDifference = Math.max(outsideDifference, Math.abs(blinked[index] - surprised[index]));
+      }
+    }
+    // 目領域は surprise の影響がゼロになる（= 加算ではなく置き換え）。
+    expect(insideDifference).toBeLessThan(1e-12);
+    // 目領域の外は触らない（口や頬の表情はそのまま残る）。
+    expect(outsideDifference).toBeLessThan(1e-12);
+
+    // amount=0 では何も変わらない。
+    const untouched = Float64Array.from(surprised);
+    blendBlink(preview, untouched, rest, 0, eyeMask);
+    expect(untouched).toEqual(surprised);
+  });
+
+  it('まばたきの変位は目領域の外へ出ない（アセット生成時の検査の裏取り）', () => {
+    const preview = loadPreview();
+    const eyeMask = eyeExpressionMask(preview);
+    const step = preview.blinkScale / 32767;
+    let outside = 0;
+    for (let vertex = 0; vertex < preview.vertexCount; vertex++) {
+      if (eyeMask[vertex] !== 0) continue;
+      for (let axis = 0; axis < 3; axis++) {
+        outside = Math.max(outside, Math.abs(preview.blinkBasisQ[vertex * 3 + axis]) * step);
+      }
+    }
+    expect(outside).toBeLessThanOrEqual(step);
   });
 });
 

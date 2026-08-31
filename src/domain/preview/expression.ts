@@ -8,9 +8,19 @@
 // 焼いた 20 本だけを持つ方が Unity と同じ絵になる。
 //
 // **加算変位なので同時に立てるのは 1 本だけ。** 重ねると顔が壊れるうえ、確認用途では「今どれか」が
-// 分かる方が役に立つ。まばたきだけは例外で、独立した層として上に足す（旧 web 版から残した機能）。
+// 分かる方が役に立つ。
+//
+// ## まばたきは加算ではなく「目領域だけ置き換え」
+//
+// 正本は旧 web 版（`blink.ts` の波形と `gnmHeadMesh` のクロスフェード）。**加算にすると surprise の
+// ような開瞼系と打ち消し合い、まばたき中も瞼が閉じ切らずに眼球が瞼を貫いて見える。**
+//
+// 旧 web 版は公式 383 成分のうち名前が `left_eye*` / `right_eye*` の成分を置き換えていた。こちらは
+// 焼いた 20 本しか持たないので成分では切れないが、**目領域の成分の変位は
+// `expression_basis_{left,right}_eye` の外で厳密に 0**（アセット生成時に毎回検査している）なので、
+// その頂点範囲でのクロスフェードが同じ結果になる。
 
-import { GnmPreviewAsset } from './asset';
+import { GnmPreviewAsset, evaluateSelector } from './asset';
 
 /** 自動再生のしかた。 */
 export type ExpressionPlayMode = 'off' | 'sequence' | 'random';
@@ -29,8 +39,10 @@ export const BLINK_PERIOD_MAX_SECONDS = 5;
 export const BLINK_DURATION_MIN_MS = 150;
 export const BLINK_DURATION_MAX_MS = 250;
 
-/** 両目を閉じるために立てるプリセット。片目ずつのウインクを両方立てる。 */
-export const BLINK_PRESET_NAMES: readonly string[] = ['wink_left', 'wink_right'];
+/** まばたきが動かす頂点。`blendBlink` のクロスフェードをこの範囲へ閉じる。 */
+export function eyeExpressionMask(preview: GnmPreviewAsset): Uint8Array {
+  return evaluateSelector(preview, preview.eyeExpressionGroups);
+}
 
 /** 台形エンベロープ。0 → 1 → 1 → 0 で、両端は smoothstep で丸める。 */
 export function envelope(elapsedSeconds: number, fadeSeconds = FADE_SECONDS, holdSeconds = HOLD_SECONDS): number {
@@ -142,10 +154,12 @@ export function advanceBlink(
         weight: 0,
       };
     }
-    // 閉じ切りで留めない。半分で最大、両端で 0 の三角波を smoothstep で丸める。
+    // 波形は `sin(pi t)`（旧 web 版 `updateBlink` と同じ）。閉じ切りで留めない。
     const progress = 1 - remaining / state.durationSeconds;
-    const shape = smoothStep(1 - Math.abs(progress * 2 - 1));
-    return { state: { ...state, remainingSeconds: remaining }, weight: shape };
+    return {
+      state: { ...state, remainingSeconds: remaining },
+      weight: Math.sin(Math.PI * progress),
+    };
   }
   const wait = state.waitSeconds - deltaSeconds;
   if (wait > 0) return { state: { ...state, waitSeconds: wait }, weight: 0 };
@@ -181,6 +195,38 @@ export function addExpression(
     const base = preset * stride;
     for (let index = 0; index < stride; index++) {
       vertices[index] += preview.expressionPresetBasisQ[base + index] * factor;
+    }
+  }
+}
+
+/**
+ * まばたきを当てる（`vertices` を破壊的に更新）。
+ *
+ * 目領域だけ「プリセット由来の変位」と「まばたきの変位」をクロスフェードする。**加算しない** —
+ * 開瞼系の表情と打ち消し合って瞼が閉じ切らなくなる。
+ *
+ * @param vertices `addExpression` まで済んだ頂点
+ * @param restVertices 無表情の頂点（変位を取り出すのに要る）
+ * @param amount 0（開眼）〜1（閉眼）
+ */
+export function blendBlink(
+  preview: GnmPreviewAsset,
+  vertices: Float64Array,
+  restVertices: Float64Array,
+  amount: number,
+  eyeMask: Uint8Array,
+): void {
+  if (amount <= 0) return;
+  const blend = Math.min(1, amount);
+  const factor = preview.blinkScale / 32767;
+  for (let vertex = 0; vertex < preview.vertexCount; vertex++) {
+    if (eyeMask[vertex] === 0) continue;
+    for (let axis = 0; axis < 3; axis++) {
+      const index = vertex * 3 + axis;
+      const rest = restVertices[index];
+      const expression = vertices[index] - rest;
+      const blink = preview.blinkBasisQ[index] * factor;
+      vertices[index] = rest + expression * (1 - blend) + blink * blend;
     }
   }
 }
