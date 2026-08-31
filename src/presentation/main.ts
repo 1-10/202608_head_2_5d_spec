@@ -40,7 +40,29 @@ const elements = {
   guiExport: requireElement<HTMLElement>('gui-export'),
   guiView: requireElement<HTMLElement>('gui-view'),
   inspection: requireElement<HTMLElement>('inspection'),
+  bottomPanel: requireElement<HTMLElement>('bottom-panel'),
 };
+
+/**
+ * 下段のタブ（検査画像 / 内訳）。
+ *
+ * `aria-selected` を状態の正本にして、pane の `hidden` をそこから作る。**別の変数で状態を持たない**
+ * （二重管理になり、片方だけ更新した状態が画面に残る）。
+ */
+function setupTabs(panel: HTMLElement): void {
+  const tabs = [...panel.querySelectorAll<HTMLButtonElement>('.tab')];
+  const select = (name: string): void => {
+    for (const tab of tabs) {
+      const selected = tab.dataset.pane === name;
+      tab.setAttribute('aria-selected', String(selected));
+      const pane = document.getElementById(tab.dataset.pane ?? '');
+      if (pane !== null) pane.hidden = !selected;
+    }
+  };
+  for (const tab of tabs) {
+    tab.addEventListener('click', () => select(tab.dataset.pane ?? ''));
+  }
+}
 
 function requireElement<T extends HTMLElement>(id: string): T {
   const element = document.getElementById(id);
@@ -322,6 +344,7 @@ function animate(): void {
   viewer.render();
 }
 
+setupTabs(elements.bottomPanel);
 updateViewReadout();
 updateButtons();
 animate();

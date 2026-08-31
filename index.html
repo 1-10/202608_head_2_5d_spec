@@ -32,15 +32,22 @@
             </div>
             <div class="pane-canvas" id="canvas-head"></div>
           </section>
-          <pre id="report"></pre>
         </main>
 
         <div class="gui-column" id="gui-view"></div>
       </div>
 
-      <section id="inspection-panel">
-        <h2>検査画像（各段の出力そのもの）</h2>
-        <div id="inspection"></div>
+      <section id="bottom-panel">
+        <div class="tab-bar" role="tablist">
+          <button class="tab" role="tab" data-pane="inspection" aria-selected="true">
+            検査画像（各段の出力そのもの）
+          </button>
+          <button class="tab" role="tab" data-pane="report" aria-selected="false">内訳</button>
+        </div>
+        <div class="tab-body">
+          <div id="inspection" class="tab-pane" role="tabpanel"></div>
+          <pre id="report" class="tab-pane" role="tabpanel" hidden></pre>
+        </div>
       </section>
     </div>
 
