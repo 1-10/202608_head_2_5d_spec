@@ -252,6 +252,13 @@ export class Viewer {
   private hairRest: Float32Array | null = null;
   private workingVertices: Float64Array | null = null;
   private expressionWeights: Float64Array | null = null;
+  /**
+   * 前のフレームで当てた重み。
+   *
+   * **「変わったか」は重みの前後比較で決める。** 立てたときだけ dirty にすると、まばたきや
+   * 自動再生が 0 へ戻るフレームで作り直しが走らず、目が半分閉じたまま固まる。
+   */
+  private appliedWeights: Float64Array | null = null;
   private manualWeights: Float64Array | null = null;
   private blinkPresetIndices: number[] = [];
 
@@ -326,6 +333,7 @@ export class Viewer {
     this.jointRest = jointRestPositions(animation.preview, animation.identity);
     this.workingVertices = new Float64Array(animation.restVertices.length);
     this.expressionWeights = new Float64Array(animation.preview.presetCount);
+    this.appliedWeights = new Float64Array(animation.preview.presetCount);
     this.manualWeights = new Float64Array(animation.preview.presetCount);
     this.blinkPresetIndices = BLINK_PRESET_NAMES.map((name) =>
       animation.preview.expressionPresetNames.indexOf(name),
@@ -597,6 +605,7 @@ export class Viewer {
       }
       this.currentExpression = null;
     } else {
+      // 自動再生中は手のスライダーを無視する。
       // **同時に立てるのは 1 本だけ**（加算変位なので重ねると顔が壊れる）。Unity 側と同じ扱い。
       const step = advancePlayback(
         this.playback,
@@ -612,20 +621,25 @@ export class Viewer {
         weights[step.index] = step.weight * this.expressionIntensity;
         this.currentExpression = preview.expressionPresetNames[step.index];
       }
-      this.poseDirty = true;
     }
 
     if (this.blinkEnabled && this.blinkPresetIndices.length > 0) {
       const step = advanceBlink(this.blink, deltaSeconds);
       this.blink = step.state;
-      if (step.weight > 0) {
-        for (const index of this.blinkPresetIndices) weights[index] += step.weight;
-        this.poseDirty = true;
-      }
+      for (const index of this.blinkPresetIndices) weights[index] += step.weight;
     }
 
+    if (this.appliedWeights !== null) {
+      for (let preset = 0; preset < weights.length; preset++) {
+        if (weights[preset] !== this.appliedWeights[preset]) {
+          this.poseDirty = true;
+          break;
+        }
+      }
+    }
     if (!this.poseDirty) return;
     this.poseDirty = false;
+    this.appliedWeights?.set(weights);
     this.updateGeometry();
   }
 
@@ -830,6 +844,7 @@ export class Viewer {
     this.hairRest = null;
     this.workingVertices = null;
     this.expressionWeights = null;
+    this.appliedWeights = null;
     this.manualWeights = null;
   }
 }
