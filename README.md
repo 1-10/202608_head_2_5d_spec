@@ -136,13 +136,18 @@ npm test
 | 投影 | 透視 FOV 20° / 距離 1.3m | `Scenes/Viewer.unity` の `MainCamera` |
 | 注視点 | **頭部の外接箱の中心**（あちらは眼の高さ y=0.297m 固定） | ここだけ違える。あちらは体に載せた状態で使う前提のリグで、頭だけを見るこちらでは頭が枠の中心へ来る方が確認しやすい（旧 web 版も頭の中心を見ていた）。固定値のままだと頭が枠の 27% ぶん下へずれる |
 | 背景 | `#26292e` | 同 `MainCamera` の `m_BackGroundColor` |
-| 光 | 平行光 1 灯（上・前・被写体の右から）**ワールド固定** + 環境光 0.65 | 同 `DirectionalLight`。環境光の量だけ旧 web 版の `AmbientLight` に合わせた |
+| 光 | 平行光 1 灯（上・前・被写体の右から）**ワールド固定**・色 `#ffffff`・強さ 1.0 | 同 `DirectionalLight` の `m_Color` / `m_Intensity` |
+| 環境光 | 量 0.65・色 `#ffffff` | 量は旧 web 版の `AmbientLight`。あちらは skybox の SH なので単色では合わせられない |
 | 法線 | 肌・眼球・髪は **+Z 固定**（立体感は写真に焼き込まれている）、**口腔内は実法線** | `GnmHeadInstance.FlattenNormals` |
 | 髪 | alpha clip 0.3 | `MT_GnmHairTransparent` の `_Cutoff` |
 | 領域 | 7 つ・先勝ち（`MouthSock` → `Skin` → `Teeth` → `Gums` → `Tongue` → `EyeLeft` → `EyeRight`） | `Editor/GnmHeadAssetBuilder` の `regions` |
 | 除外 | 角膜（`eye_exteriors`）は描かない | 同 `excludedSelector` |
 | 可動域 | 首 yaw ±15° / pitch ±12° / 視線 ±10°、首へ 30%・頭へ 70% | `Viewer/GnmHeadPoseController` |
 | 表情 | 20 プリセット・同時に 1 本・立ち上がり 0.35s / 保持 0.8s | `Viewer/GnmExpressionPlayer` |
+
+光は右パネルの「ライト」で色と強さを触れる。**既定では環境光と拡散の和が 1**（シェーダは
+`環境光 + 強さ × (1 - 環境光) × NdotL`）なので、正面を向いた面が写真の明るさそのままで出る。
+色は sRGB の表記で受けて線形へ直してから掛ける（テクスチャが sRGB なので、掛け算は線形の側）。
 
 **口腔内は実法線で描く。** 写真を持たない単色なので二重に掛かる影が無く、+Z 固定だと開口時に歯・
 歯茎・舌が真っ平らな切り絵に見える。ただし口腔壁は `skin` の部分集合で肌と頂点を共有するため、

@@ -106,13 +106,31 @@ export const MAXIMUM_ZOOM = 5.0;
 export const MINIMUM_ZOOM = 0.3;
 
 /**
- * 環境光の量。
+ * 環境光の量（既定）。
  *
  * Unity 側は skybox の SH を固定方向で引くので解析的には合わせられない。旧 web 版の
  * `AmbientLight 0.65` に合わせてある（下げると影側が締まるが、写真に焼き込まれた陰影の上へさらに
  * 陰影が乗るので、**写真をそのまま見たいならここは高い方が正しい**）。
  */
 export const AMBIENT_LIGHT = 0.65;
+
+/** 平行光の色（既定）。正本は Unity 側 `DirectionalLight` の `m_Color`。 */
+export const DEFAULT_LIGHT_COLOR = '#ffffff';
+
+/** 平行光の強さ（既定）。正本は同 `m_Intensity`。 */
+export const DEFAULT_LIGHT_INTENSITY = 1;
+
+/**
+ * 環境光の色（既定）。
+ *
+ * Unity 側は skybox の SH なので単色ではない。**こちらは白**で、量（`AMBIENT_LIGHT`）だけで効かせる。
+ */
+export const DEFAULT_AMBIENT_COLOR = '#ffffff';
+
+export const MINIMUM_LIGHT_INTENSITY = 0;
+export const MAXIMUM_LIGHT_INTENSITY = 3;
+export const MINIMUM_AMBIENT = 0;
+export const MAXIMUM_AMBIENT = 1;
 
 /**
  * 光の向き（**GNM 空間**・光源へ向かうベクトル）。
@@ -189,11 +207,14 @@ uniform sampler2D uTexture;
 uniform bool uUseTexture;
 uniform bool uAlphaTest;
 uniform vec4 uBaseColor;
+uniform vec3 uLightColor;
+uniform float uLightIntensity;
+uniform vec3 uAmbientColor;
+uniform float uAmbient;
 varying vec2 vUv;
 varying vec3 vNormal;
 
 const vec3 LIGHT_DIRECTION = normalize(vec3(${LIGHT_DIRECTION[0]}, ${LIGHT_DIRECTION[1]}, ${LIGHT_DIRECTION[2]}));
-const float AMBIENT = ${AMBIENT_LIGHT};
 const float ALPHA_CUTOFF = ${HAIR_ALPHA_CUTOFF};
 
 void main() {
@@ -202,8 +223,11 @@ void main() {
   if (uAlphaTest && albedo.a < ALPHA_CUTOFF) discard;
   // 裏面は法線が逆を向く。反転しないと環境光だけの黒になり、穴と見分けが付かない。
   vec3 normal = gl_FrontFacing ? normalize(vNormal) : -normalize(vNormal);
-  float light = AMBIENT + (1.0 - AMBIENT) * max(dot(normal, LIGHT_DIRECTION), 0.0);
-  gl_FragColor = vec4(albedo.rgb * light, albedo.a);
+  // 平行光の重みは (1 - 環境光の量)。強さ 1 でこの重みそのままになるので、**既定では
+  // 「環境光 + 拡散」の和が 1** に収まる（写真の明るさをそのまま出す）。
+  vec3 diffuse =
+    uLightColor * uLightIntensity * (1.0 - uAmbient) * max(dot(normal, LIGHT_DIRECTION), 0.0);
+  gl_FragColor = vec4(albedo.rgb * (uAmbientColor * uAmbient + diffuse), albedo.a);
 }
 `;
 
@@ -326,6 +350,15 @@ export class Viewer {
   fovDegrees = DEFAULT_FOV_DEGREES;
   distanceMeters = DEFAULT_DISTANCE_METERS;
 
+  /** 平行光の色（CSS の色表記）。既定は Unity 側 `DirectionalLight` の `m_Color`。 */
+  lightColor = DEFAULT_LIGHT_COLOR;
+  /** 平行光の強さ。既定は同 `m_Intensity`。 */
+  lightIntensity = DEFAULT_LIGHT_INTENSITY;
+  /** 環境光の色。 */
+  ambientColor = DEFAULT_AMBIENT_COLOR;
+  /** 環境光の量。 */
+  ambient = AMBIENT_LIGHT;
+
   /** 首と視線（度）。可動域は `domain/preview/pose` が持つ。 */
   headPose: HeadPose = NEUTRAL_POSE;
   /** マウス位置で首と視線を動かす。 */
@@ -428,6 +461,10 @@ export class Viewer {
         vertexShader: VERTEX_SHADER,
         fragmentShader: FRAGMENT_SHADER,
         uniforms: {
+          uLightColor: { value: new THREE.Color(DEFAULT_LIGHT_COLOR).convertSRGBToLinear() },
+          uLightIntensity: { value: DEFAULT_LIGHT_INTENSITY },
+          uAmbientColor: { value: new THREE.Color(DEFAULT_AMBIENT_COLOR).convertSRGBToLinear() },
+          uAmbient: { value: AMBIENT_LIGHT },
           uTexture: { value: texture },
           uUseTexture: { value: texture !== null },
           uAlphaTest: { value: transparent },
@@ -483,7 +520,43 @@ export class Viewer {
       });
     }
     this.applyVisibility();
+    this.applyLighting();
     this.updateGeometry();
+  }
+
+  /**
+   * ライトの値をマテリアルへ移す。
+   *
+   * 色は**sRGB の表記で受けて線形へ直す**。テクスチャは sRGB として読み込み、出力も sRGB なので、
+   * 掛け算をするのは線形の側（three.js の標準マテリアルと同じ扱い）。
+   */
+  private applyLighting(): void {
+    for (const gpu of this.meshes) {
+      const uniforms = gpu.material.uniforms;
+      (uniforms.uLightColor.value as THREE.Color).setStyle(this.lightColor).convertSRGBToLinear();
+      uniforms.uLightIntensity.value = this.lightIntensity;
+      (uniforms.uAmbientColor.value as THREE.Color)
+        .setStyle(this.ambientColor)
+        .convertSRGBToLinear();
+      uniforms.uAmbient.value = this.ambient;
+    }
+  }
+
+  /** ライトの値を差し替える（CSS の色表記と 0 以上の数）。 */
+  setLighting(input: {
+    lightColor: string;
+    lightIntensity: number;
+    ambientColor: string;
+    ambient: number;
+  }): void {
+    this.lightColor = input.lightColor;
+    this.lightIntensity = Math.max(
+      MINIMUM_LIGHT_INTENSITY,
+      Math.min(MAXIMUM_LIGHT_INTENSITY, input.lightIntensity),
+    );
+    this.ambientColor = input.ambientColor;
+    this.ambient = Math.max(MINIMUM_AMBIENT, Math.min(MAXIMUM_AMBIENT, input.ambient));
+    this.applyLighting();
   }
 
   /** 正面・等倍・無表情に戻す。 */
@@ -494,6 +567,11 @@ export class Viewer {
     this.pan = [0, 0];
     this.fovDegrees = DEFAULT_FOV_DEGREES;
     this.distanceMeters = DEFAULT_DISTANCE_METERS;
+    this.lightColor = DEFAULT_LIGHT_COLOR;
+    this.lightIntensity = DEFAULT_LIGHT_INTENSITY;
+    this.ambientColor = DEFAULT_AMBIENT_COLOR;
+    this.ambient = AMBIENT_LIGHT;
+    this.applyLighting();
     this.neckShare = NECK_SHARE;
     this.headPose = NEUTRAL_POSE;
     this.followPointer = false;

@@ -24,9 +24,13 @@ import {
 } from '../src/domain/preview/pose';
 import { FADE_SECONDS, HOLD_SECONDS } from '../src/domain/preview/expression';
 import {
+  AMBIENT_LIGHT,
+  DEFAULT_AMBIENT_COLOR,
   DEFAULT_BACKGROUND,
   DEFAULT_DISTANCE_METERS,
   DEFAULT_FOV_DEGREES,
+  DEFAULT_LIGHT_COLOR,
+  DEFAULT_LIGHT_INTENSITY,
   TARGET_HEIGHT_METERS,
 } from '../src/presentation/viewer';
 
@@ -74,6 +78,13 @@ describe('README の 3D ビューの表', () => {
       `| 投影 | 透視 FOV ${DEFAULT_FOV_DEGREES}° / 距離 ${DEFAULT_DISTANCE_METERS}m |`,
     );
     expect(README).toContain(`| 背景 | \`${DEFAULT_BACKGROUND}\` |`);
+  });
+
+  it('ライトと環境光（Unity 側 DirectionalLight の写し）', () => {
+    expect(README).toContain(
+      `・色 \`${DEFAULT_LIGHT_COLOR}\`・強さ ${DEFAULT_LIGHT_INTENSITY.toFixed(1)} |`,
+    );
+    expect(README).toContain(`| 環境光 | 量 ${AMBIENT_LIGHT}・色 \`${DEFAULT_AMBIENT_COLOR}\` |`);
   });
 
   it('注視点は頭部の中心（Unity の固定値と違えている理由まで書く）', () => {

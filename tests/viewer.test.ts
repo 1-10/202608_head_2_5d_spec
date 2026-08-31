@@ -10,6 +10,9 @@ import { describe, expect, it } from 'vitest';
 import {
   ALL_TEXTURES_KEY,
   AMBIENT_LIGHT,
+  DEFAULT_AMBIENT_COLOR,
+  DEFAULT_LIGHT_COLOR,
+  DEFAULT_LIGHT_INTENSITY,
   DEFAULT_BACKGROUND,
   DEFAULT_DISTANCE_METERS,
   DEFAULT_FOV_DEGREES,
@@ -43,8 +46,19 @@ describe('Unity 側から写したカメラと光', () => {
     expect(Math.hypot(x, y, z)).toBeCloseTo(1, 3);
   });
 
-  it('環境光は旧 web 版と同じ 0.65（写真の陰影の上へ影を重ねすぎない）', () => {
+  it('平行光の色と強さは Unity の DirectionalLight と同じ', () => {
+    expect(DEFAULT_LIGHT_COLOR).toBe('#ffffff');
+    expect(DEFAULT_LIGHT_INTENSITY).toBe(1);
+  });
+
+  it('環境光は旧 web 版と同じ 0.65・色は白（skybox の SH は単色で合わせられない）', () => {
     expect(AMBIENT_LIGHT).toBeCloseTo(0.65, 10);
+    expect(DEFAULT_AMBIENT_COLOR).toBe('#ffffff');
+  });
+
+  it('既定では環境光と拡散の和が 1（写真の明るさをそのまま出す）', () => {
+    // シェーダは ambient + intensity * (1 - ambient) * NdotL。NdotL = 1 の面で 1 になる。
+    expect(AMBIENT_LIGHT + DEFAULT_LIGHT_INTENSITY * (1 - AMBIENT_LIGHT)).toBeCloseTo(1, 10);
   });
 
   it('拡大率の範囲は 0.3〜5.0', () => {
@@ -76,6 +90,13 @@ describe('3D ビューの既定値', () => {
     expect(DEFAULT_VIEW_SETTINGS.fovDegrees).toBe(DEFAULT_FOV_DEGREES);
     expect(DEFAULT_VIEW_SETTINGS.distanceMeters).toBe(DEFAULT_DISTANCE_METERS);
     expect(DEFAULT_VIEW_SETTINGS.background).toBe(DEFAULT_BACKGROUND);
+  });
+
+  it('ライトの既定はビューアーの定数そのまま', () => {
+    expect(DEFAULT_VIEW_SETTINGS.lightColor).toBe(DEFAULT_LIGHT_COLOR);
+    expect(DEFAULT_VIEW_SETTINGS.lightIntensity).toBe(DEFAULT_LIGHT_INTENSITY);
+    expect(DEFAULT_VIEW_SETTINGS.ambientColor).toBe(DEFAULT_AMBIENT_COLOR);
+    expect(DEFAULT_VIEW_SETTINGS.ambient).toBe(AMBIENT_LIGHT);
   });
 
   it('起動時は無表情・正面・自動再生なし（まばたきだけ動く）', () => {

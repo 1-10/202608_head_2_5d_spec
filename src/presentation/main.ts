@@ -117,6 +117,12 @@ function applyViewSettings(view: ViewSettings): void {
   viewer.fovDegrees = view.fovDegrees;
   viewer.distanceMeters = view.distanceMeters;
   viewer.setBackground(view.background);
+  viewer.setLighting({
+    lightColor: view.lightColor,
+    lightIntensity: view.lightIntensity,
+    ambientColor: view.ambientColor,
+    ambient: view.ambient,
+  });
   viewer.setWireframe(view.showWireframe);
   viewer.neckShare = view.neckShare;
   viewer.followPointer = view.followPointer;

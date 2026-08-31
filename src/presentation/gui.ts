@@ -47,10 +47,14 @@ import {
 import {
   ALL_TEXTURES_KEY,
   LAYER_KEYS,
+  MAXIMUM_AMBIENT,
   MAXIMUM_DISTANCE_METERS,
   MAXIMUM_FOV_DEGREES,
+  MAXIMUM_LIGHT_INTENSITY,
+  MINIMUM_AMBIENT,
   MINIMUM_DISTANCE_METERS,
   MINIMUM_FOV_DEGREES,
+  MINIMUM_LIGHT_INTENSITY,
   RESET_KEY,
   TEXTURE_KEYS,
   WIREFRAME_KEY,
@@ -97,6 +101,10 @@ export interface PanelState {
     fovDegrees: number;
     distanceMeters: number;
     background: string;
+    lightColor: string;
+    lightIntensity: number;
+    ambientColor: string;
+    ambient: number;
     showWireframe: boolean;
     headYawDegrees: number;
     headPitchDegrees: number;
@@ -290,6 +298,26 @@ export function setupGui(
     .name('距離 (m)')
     .onChange(pushView);
   camera.addColor(state.view, 'background').name('背景色').onChange(pushView);
+
+  // 既定は Unity 側 `DirectionalLight` の `m_Color` / `m_Intensity`。環境光の量は旧 web 版の
+  // `AmbientLight` に合わせてある（あちらは skybox の SH なので単色では合わせられない）。
+  const light = view.addFolder('ライト');
+  light.addColor(state.view, 'lightColor').name('平行光の色').onChange(pushView);
+  light
+    .add(
+      state.view,
+      'lightIntensity',
+      MINIMUM_LIGHT_INTENSITY,
+      MAXIMUM_LIGHT_INTENSITY,
+      0.05,
+    )
+    .name('平行光の強さ')
+    .onChange(pushView);
+  light.addColor(state.view, 'ambientColor').name('環境光の色').onChange(pushView);
+  light
+    .add(state.view, 'ambient', MINIMUM_AMBIENT, MAXIMUM_AMBIENT, 0.01)
+    .name('環境光の量')
+    .onChange(pushView);
   const wireframeController = camera
     .add(state.view, 'showWireframe')
     .name(`ワイヤーフレーム   [${keyLabel(WIREFRAME_KEY)}]`)

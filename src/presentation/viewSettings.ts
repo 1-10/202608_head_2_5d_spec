@@ -14,9 +14,13 @@ import {
 } from '../domain/preview/expression';
 import { NECK_SHARE } from '../domain/preview/pose';
 import {
+  AMBIENT_LIGHT,
+  DEFAULT_AMBIENT_COLOR,
   DEFAULT_BACKGROUND,
   DEFAULT_DISTANCE_METERS,
   DEFAULT_FOV_DEGREES,
+  DEFAULT_LIGHT_COLOR,
+  DEFAULT_LIGHT_INTENSITY,
 } from './viewer';
 
 export const MINIMUM_FADE_SECONDS = 0;
@@ -41,6 +45,11 @@ export interface ViewSettings {
   readonly fovDegrees: number;
   readonly distanceMeters: number;
   readonly background: string;
+  /** 平行光の色（CSS の色表記）。 */
+  readonly lightColor: string;
+  readonly lightIntensity: number;
+  readonly ambientColor: string;
+  readonly ambient: number;
   readonly showWireframe: boolean;
   readonly headYawDegrees: number;
   readonly headPitchDegrees: number;
@@ -59,6 +68,10 @@ export const DEFAULT_VIEW_SETTINGS: ViewSettings = {
   fovDegrees: DEFAULT_FOV_DEGREES,
   distanceMeters: DEFAULT_DISTANCE_METERS,
   background: DEFAULT_BACKGROUND,
+  lightColor: DEFAULT_LIGHT_COLOR,
+  lightIntensity: DEFAULT_LIGHT_INTENSITY,
+  ambientColor: DEFAULT_AMBIENT_COLOR,
+  ambient: AMBIENT_LIGHT,
   showWireframe: false,
   headYawDegrees: 0,
   headPitchDegrees: 0,
