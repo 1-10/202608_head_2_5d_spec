@@ -6,18 +6,26 @@
 
 import './style.css';
 import { bakeReport } from '../domain/atlas/bake';
-import { LAYER_ORDER, buildDebugScene } from '../domain/debugScene';
+import { LAYER_ORDER } from '../domain/preview/asset';
+import { buildPreviewScene } from '../domain/preview/scene';
 import { irisToLimbusRatio } from '../domain/eyes/bake';
 import { EYE_SIDES } from '../domain/eyes/layout';
 import { depthCoverage } from '../domain/hair/shell';
 import { PhotoRgb } from '../domain/photo';
 import { ExportOutcome, describeFailure, isPipelineError } from '../application/exportGuest';
-import { Exporter, buildGuestZip } from '../composition';
-import { GuiHandle, createPanelState, setupGui, toExportSettings } from './gui';
+import { Exporter, GnmAssetBundle, buildGuestZip } from '../composition';
+import {
+  GuiHandle,
+  createPanelState,
+  setupGui,
+  toExportSettings,
+  toViewSettings,
+} from './gui';
 import { InputManager } from './input';
 import { renderInspection } from './inspectionView';
 import { LocalStorageParameterStore } from './parameterStore';
 import { Viewer } from './viewer';
+import { ViewSettings } from './viewSettings';
 
 const elements = {
   buttonWebcam: requireElement<HTMLButtonElement>('btn-webcam'),
@@ -41,24 +49,49 @@ function requireElement<T extends HTMLElement>(id: string): T {
 }
 
 const parameterStore = new LocalStorageParameterStore();
-// 保存されたパラメータがあれば復元する。壊れていれば application 側の既定へ戻る。
-const panelState = createPanelState(parameterStore.load() ?? undefined);
+// 保存されたパラメータがあれば復元する。壊れていれば既定へ戻る（書き出しは捨てて既定、ビューは丸める）。
+const panelState = createPanelState(parameterStore.load() ?? undefined, parameterStore.loadView());
 const exporter = new Exporter();
 const inputManager = new InputManager(elements.video);
 const viewer = new Viewer(elements.viewport);
 
 let photo: PhotoRgb | null = null;
 let outcome: ExportOutcome | null = null;
+let bundle: GnmAssetBundle | null = null;
 let busy = false;
+
+/** ビューの値をまとめてビューアーへ移す。**片方だけ適用する経路を作らない。** */
+function applyViewSettings(view: ViewSettings): void {
+  viewer.fovDegrees = view.fovDegrees;
+  viewer.distanceMeters = view.distanceMeters;
+  viewer.setBackground(view.background);
+  viewer.setWireframe(view.showWireframe);
+  viewer.neckShare = view.neckShare;
+  viewer.followPointer = view.followPointer;
+  viewer.setHeadPose({
+    headYawDegrees: view.headYawDegrees,
+    headPitchDegrees: view.headPitchDegrees,
+    gazeYawDegrees: view.gazeYawDegrees,
+    gazePitchDegrees: view.gazePitchDegrees,
+  });
+  viewer.playMode = view.playMode;
+  viewer.fadeSeconds = view.fadeSeconds;
+  viewer.holdSeconds = view.holdSeconds;
+  viewer.expressionIntensity = view.expressionIntensity;
+  viewer.blinkEnabled = view.blinkEnabled;
+}
 
 const gui: GuiHandle = setupGui(elements.guiContainer, panelState, {
   onLayerVisibilityChanged: (layer, visible) => viewer.setLayerVisible(layer, visible),
   onLayerTextureChanged: (layer, enabled) => viewer.setLayerTextureEnabled(layer, enabled),
   onAllTexturesToggled: () => viewer.toggleAllTextures(),
   onResetView: () => viewer.resetView(),
+  onViewSettingsChanged: (view) => applyViewSettings(view),
+  onExpressionChanged: (name, weight) => viewer.setManualExpression(name, weight),
   onSaveParameters: () => {
     try {
       parameterStore.save(toExportSettings(panelState));
+      parameterStore.saveView(toViewSettings(panelState));
       setStatus('パラメーターを保存しました。次回起動時に復元します');
     } catch (error) {
       setStatus(`パラメーターを保存できませんでした: ${describeFailure(error).cause}`, true);
@@ -69,6 +102,7 @@ const gui: GuiHandle = setupGui(elements.guiContainer, panelState, {
 viewer.onViewChanged = (): void => {
   updateViewReadout();
   gui.syncViewControls(viewer.layerStates(), viewer.textureStates());
+  gui.syncHeadPose(viewer.headPose);
 };
 
 // キー操作は 3Dビューが持つ（層・テクスチャ・視点のリセット）。入力欄にフォーカスがあるときは
@@ -87,9 +121,13 @@ function setStatus(message: string, isError = false): void {
 
 function updateViewReadout(): void {
   const degrees = (radians: number): string => ((radians * 180) / Math.PI).toFixed(1);
+  const pose = viewer.headPose;
+  const expression = viewer.currentExpression === null ? '' : ` / 表情 ${viewer.currentExpression}`;
   elements.viewReadout.textContent =
-    `Yaw ${degrees(viewer.yaw)}° / Pitch ${degrees(viewer.pitch)}° /` +
-    ` Zoom ${viewer.zoom.toFixed(2)}x`;
+    `カメラ Yaw ${degrees(viewer.orbitYaw)}° / Pitch ${degrees(viewer.orbitPitch)}° /` +
+    ` Zoom ${viewer.zoom.toFixed(2)}x` +
+    ` — 首 ${pose.headYawDegrees.toFixed(1)}° / ${pose.headPitchDegrees.toFixed(1)}° /` +
+    ` 視線 ${pose.gazeYawDegrees.toFixed(1)}° / ${pose.gazePitchDegrees.toFixed(1)}°${expression}`;
 }
 
 function updateButtons(): void {
@@ -106,37 +144,53 @@ async function runExport(): Promise<void> {
       setStatus(`段「${stage}」を実行しています…`),
     );
     outcome = result;
-    const source = result.debugSceneSource;
-    viewer.setScene(
-      buildDebugScene({
-        vertices: source.vertices,
-        headMesh: source.asset.mesh,
-        skinAlbedo: {
-          data: source.skinAlbedo,
-          width: source.atlasSize,
-          height: source.atlasSize,
+    if (bundle === null) throw new Error('アセットが読めていない');
+    const source = result.previewSceneSource;
+    const scene = buildPreviewScene({
+      vertices: source.vertices,
+      headMesh: source.asset.mesh,
+      preview: bundle.preview,
+      skinAlbedo: {
+        data: source.skinAlbedo,
+        width: source.atlasSize,
+        height: source.atlasSize,
+      },
+      eyeAlbedos: {
+        left: {
+          data: source.eyeAlbedos.left,
+          width: source.eyeTextureSize,
+          height: source.eyeTextureSize,
         },
-        eyeAlbedos: {
-          left: {
-            data: source.eyeAlbedos.left,
-            width: source.eyeTextureSize,
-            height: source.eyeTextureSize,
-          },
-          right: {
-            data: source.eyeAlbedos.right,
-            width: source.eyeTextureSize,
-            height: source.eyeTextureSize,
-          },
+        right: {
+          data: source.eyeAlbedos.right,
+          width: source.eyeTextureSize,
+          height: source.eyeTextureSize,
         },
-        hair: source.hair,
-        hairAlbedo: source.hairAlbedo,
-        hairAlpha: source.hairAlpha,
-      }),
-    );
-    // シーンを差し替えると表示状態が初期化されるので、パネルを合わせ直す。
+      },
+      hair: source.hair,
+      hairAlbedo: source.hairAlbedo,
+      hairAlpha: source.hairAlpha,
+    });
+    if (scene.unassignedTriangleCount > 0) {
+      console.warn(
+        `どの領域にも入らない三角形が ${scene.unassignedTriangleCount} 個ある` +
+          '（3D ビューでマゼンタに出る）。領域の設定かアセットが変わっている',
+      );
+    }
+    viewer.setScene(scene, {
+      preview: bundle.preview,
+      restVertices: source.vertices,
+      identity: result.headFit.identity,
+    });
+    // シーンを差し替えると表示状態と姿勢が初期化されるので、パネルを合わせ直す。
     for (const layer of LAYER_ORDER) {
       viewer.setLayerVisible(layer, panelState.visibleLayers[layer]);
       viewer.setLayerTextureEnabled(layer, panelState.texturedLayers[layer]);
+    }
+    applyViewSettings(toViewSettings(panelState));
+    gui.setExpressionPresets(viewer.expressionNames());
+    for (const [name, weight] of Object.entries(panelState.expressions)) {
+      viewer.setManualExpression(name, weight);
     }
     renderInspection(elements.inspection, result.inspection);
     elements.report.textContent = buildReport(result);
@@ -274,8 +328,12 @@ updateViewReadout();
 updateButtons();
 animate();
 
-// GNM アセットは 29MB あるので、写真を待たずに落とし始める（初回の書き出しの待ちを短くする）。
+// GNM アセットは 32MB あるので、写真を待たずに落とし始める（初回の書き出しの待ちを短くする）。
 void exporter
   .loadAsset()
-  .then(() => setStatus('写真を選んでください（ファイル / Webcam）。'))
+  .then((loaded) => {
+    bundle = loaded;
+    gui.setExpressionPresets(loaded.preview.expressionPresetNames);
+    setStatus('写真を選んでください（ファイル / Webcam）。');
+  })
   .catch((error) => setStatus(describeFailure(error).cause, true));

@@ -15,6 +15,20 @@ import {
   MINIMUM_IDENTITY_CLIP,
   TEXTURE_SIZE_CHOICES,
 } from '../src/application/settings';
+import { PREVIEW_REGIONS } from '../src/domain/preview/asset';
+import {
+  GAZE_LIMIT_DEGREES,
+  NECK_SHARE,
+  PITCH_LIMIT_DEGREES,
+  YAW_LIMIT_DEGREES,
+} from '../src/domain/preview/pose';
+import { FADE_SECONDS, HOLD_SECONDS } from '../src/domain/preview/expression';
+import {
+  DEFAULT_BACKGROUND,
+  DEFAULT_DISTANCE_METERS,
+  DEFAULT_FOV_DEGREES,
+  TARGET_HEIGHT_METERS,
+} from '../src/presentation/viewer';
 
 const README = readFileSync(resolve(__dirname, '..', 'README.md'), 'utf-8');
 
@@ -50,6 +64,45 @@ describe('README の調整パラメータの表', () => {
     expect(DEFAULT_SETTINGS.identityClip).toBeNull();
     expect(README).toContain(
       `| identity 係数の上限 | 上限なし（置くなら ${MINIMUM_IDENTITY_CLIP}〜${MAXIMUM_IDENTITY_CLIP}） |`,
+    );
+  });
+});
+
+describe('README の 3D ビューの表', () => {
+  it('カメラ（Unity 側 MainCamera の写し）', () => {
+    expect(README).toContain(
+      `| 投影 | 透視 FOV ${DEFAULT_FOV_DEGREES}° / 距離 ${DEFAULT_DISTANCE_METERS}m` +
+        ` / 注視点 y=${TARGET_HEIGHT_METERS}m |`,
+    );
+    expect(README).toContain(`| 背景 | \`${DEFAULT_BACKGROUND}\` |`);
+  });
+
+  it('領域の並び（先勝ちなので順序そのものが仕様）', () => {
+    expect(README).toContain(
+      `（${PREVIEW_REGIONS.map((region) => `\`${region.name}\``).join(' → ')}）`,
+    );
+  });
+
+  it('口腔内の固定色（Unity 側 Material の写し）', () => {
+    const colorOf = (name: string): string => {
+      const region = PREVIEW_REGIONS.find((item) => item.name === name);
+      if (region === undefined) throw new Error(`領域 ${name} が無い`);
+      return `(${region.color.join(',')})`;
+    };
+    expect(colorOf('Gums')).toBe(colorOf('Tongue'));
+    expect(README).toContain(
+      `歯 \`${colorOf('Teeth')}\` / 歯茎・舌 \`${colorOf('Gums')}\`` +
+        ` / 口腔壁 \`${colorOf('MouthSock')}\``,
+    );
+  });
+
+  it('可動域と表情（Unity 側 Viewer の写し）', () => {
+    expect(README).toContain(
+      `| 可動域 | 首 yaw ±${YAW_LIMIT_DEGREES}° / pitch ±${PITCH_LIMIT_DEGREES}°` +
+        ` / 視線 ±${GAZE_LIMIT_DEGREES}°、首へ ${NECK_SHARE * 100}%・頭へ ${(1 - NECK_SHARE) * 100}% |`,
+    );
+    expect(README).toContain(
+      `立ち上がり ${FADE_SECONDS}s / 保持 ${HOLD_SECONDS}s |`,
     );
   });
 });

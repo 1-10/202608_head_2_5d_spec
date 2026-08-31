@@ -48,6 +48,7 @@ DEFAULT_NPZ = REPOSITORY_ROOT / "assets" / "gnm" / "gnm_head.npz"
 DEFAULT_SPARSE_68 = REPOSITORY_ROOT / "assets" / "gnm" / "head_sparse_68.txt"
 DEFAULT_CANONICAL = REPOSITORY_ROOT / "assets" / "mediapipe" / "canonical_face_model.obj"
 DEFAULT_OUTPUT = REPOSITORY_ROOT / "public" / "gnm" / "gnm_head.gnmb"
+DEFAULT_EXPRESSION_PRESETS = REPOSITORY_ROOT / "tools" / "GnmExpressionPresets_v3_0.npz"
 
 MAGIC = b"GNMB"
 GNMB_FORMAT = "GNMB"
@@ -107,6 +108,19 @@ IBUG68_CHAINS: tuple[tuple[str, tuple[int, ...], bool], ...] = (
     ("唇外周", tuple(range(48, 60)), True),
     ("唇内周", tuple(range(60, 68)), True),
 )
+# --- 3D ビューだけが使う値 ---------------------------------------------------
+# **書き出しの契約には入らない。** guest が Unity（1-10/2607_Obayashi_Avatar_Mockup_3DGS の
+# ``Assets/Sandbox/Ooba/GNM``）でどう出るかを web でも同じ形で見るために持つ。
+# 正本は Unity 側の ``Editor/GnmHeadAssetBuilder`` と ``Scripts/GnmHeadInstance``。
+
+GROUP_THRESHOLD = 1e-4
+"""vertex group の重みをブール化する閾値（正本は Unity の ``GnmHeadAssetBuilder.GroupThreshold``）。"""
+
+EXPECTED_JOINT_NAMES: tuple[str, ...] = ("neck", "head", "left_eye", "right_eye")
+
+SKIN_INFLUENCE_LIMIT = 2
+"""1 頂点が受けるボーンの本数。v3_0 / head では実測で 2 本。超えたら落とす。"""
+
 DEGENERATE_EDGE_RATIO = 0.25
 REVERSAL_COSINE = -0.5
 MIN_REVERSED_EDGES = 2
@@ -121,17 +135,17 @@ NPZ_KEYS: dict[str, str] = {
     "vertex_groups": "読む",
     "vertex_group_names": "読む",
     "mesh_component_names": "読む",
-    "pose_correctives_regressor": "読まない: v3_0 / head では全要素ゼロ",
-    "expression_basis": "読まない: Exporter は identity だけを求める",
-    "expression_names": "読まない: 同上",
+    "expression_basis": "読む: 3D ビューの表情プリセットへ焼く（書き出しには入らない）",
+    "skinning_weights": "読む: 3D ビューで首と視線を回す（同上）",
+    "joint_names": "読む: 同上",
+    "joint_parent_indices": "読む: 同上",
+    "joint_identity_basis": "読む: 同上",
+    "template_joint_positions": "読む: 同上",
+    "pose_correctives_regressor": "読む: 全要素ゼロであることの確認にだけ使う",
+    "bone_aligned_template_joint_orientations": "読む: 単位行列であることの確認にだけ使う",
+    "expression_names": "読まない: 成分名は領域ごとの統計方向で、表情として意味を持たない",
     "identity_names": "読まない: 係数は index で送る",
-    "skinning_weights": "読まない: Exporter は姿勢を持たない",
-    "joint_regressor": "読まない: 同上",
-    "joint_names": "読まない: 同上",
-    "joint_parent_indices": "読まない: 同上",
-    "joint_identity_basis": "読まない: 同上",
-    "template_joint_positions": "読まない: 同上",
-    "bone_aligned_template_joint_orientations": "読まない: 同上",
+    "joint_regressor": "読まない: 位置は template_joint_positions + joint_identity_basis で作る",
     "mirror_indices": "読まない: 左右対称で色を複製する段を持たない",
     "quads": "読まない: 三角形の側を使う",
     "quad_uvs": "読まない: 同上",
@@ -548,6 +562,113 @@ def build_gnmb_container_bytes(
     return b"".join([MAGIC, struct.pack("<I", len(header_bytes)), header_bytes, *chunks])
 
 
+def build_preview_arrays(
+    npz: Any,
+    source: np.ndarray,
+    vertex_group_names: list[str],
+    presets_path: Path,
+) -> tuple[dict[str, np.ndarray], dict[str, Any], dict[str, float]]:
+    """3D ビューが使う領域・姿勢・表情の配列を作る。
+
+    **書き出しの契約には 1 つも入らない。** ``export_guest`` はここで作る配列を読まない。
+    guest が Unity でどう組み立てられるかを web でも同じ形で確認するために持つ。
+
+    Unity 側が v3_0 / head の実データで確認した前提を毎回検査して、崩れたら落とす:
+    bind pose に回転が無い / ``pose_correctives_regressor`` が全ゼロ / 重み和がちょうど 1 /
+    影響ボーンが 2 本以下。近似で通すと「Unity と同じ絵」を名乗れなくなる。
+    """
+    joint_names = names_of(npz["joint_names"])
+    if tuple(joint_names) != EXPECTED_JOINT_NAMES:
+        raise SystemExit(
+            f"ジョイント構成が変わっている: {joint_names}（期待 {list(EXPECTED_JOINT_NAMES)}）"
+        )
+    if not np.allclose(npz["bone_aligned_template_joint_orientations"], np.eye(3), atol=1e-6):
+        raise SystemExit(
+            "bind pose に回転がある。bindpose を平行移動の逆だけでは表せないので、"
+            "回転を持つ bind pose を実装してから進めること"
+        )
+    if not np.allclose(npz["pose_correctives_regressor"], 0.0):
+        raise SystemExit(
+            "pose_correctives_regressor が非ゼロ。LBS だけでは公式の出力と一致しないので、"
+            "補正を実装してから進めること"
+        )
+
+    weights = npz["skinning_weights"]
+    sums = weights.sum(axis=0)
+    if not np.allclose(sums, 1.0, atol=1e-5):
+        raise SystemExit(
+            f"skinning_weights の重み和が 1 でない（{float(sums.min())}〜{float(sums.max())}）"
+        )
+    influences = int((weights > 0.0).sum(axis=0).max())
+    if influences > SKIN_INFLUENCE_LIMIT:
+        raise SystemExit(f"1 頂点の影響ボーンが {influences} 本（上限 {SKIN_INFLUENCE_LIMIT}）")
+
+    order = np.argsort(-weights, axis=0)[:SKIN_INFLUENCE_LIMIT]
+    skin_indices = np.ascontiguousarray(order.T[source].astype(np.uint8))
+    picked = np.take_along_axis(weights, order, axis=0).T[source].astype(np.float32)
+    skin_weights = np.ascontiguousarray(picked / picked.sum(axis=1, keepdims=True))
+
+    groups = np.ascontiguousarray(
+        (npz["vertex_groups"] > GROUP_THRESHOLD)[:, source].astype(np.uint8)
+    )
+
+    with np.load(presets_path, allow_pickle=False) as preset_npz:
+        preset_keys = set(preset_npz.files)
+        if preset_keys != {"expression_presets", "class_names"}:
+            raise SystemExit(f"表情プリセット npz のキーが想定と違う: {sorted(preset_keys)}")
+        coefficients = preset_npz["expression_presets"].astype(np.float64)
+        preset_names = names_of(preset_npz["class_names"])
+
+    expression_basis = npz["expression_basis"]
+    if coefficients.shape[1] != expression_basis.shape[0]:
+        raise SystemExit(
+            f"表情プリセットの成分数 {coefficients.shape[1]} が npz の"
+            f" expression_basis {expression_basis.shape[0]} と合わない"
+        )
+    flat = expression_basis.reshape(expression_basis.shape[0], -1).astype(np.float64)
+    displacement = (coefficients @ flat).reshape(-1, expression_basis.shape[1], 3)[:, source]
+
+    preset_scales = np.abs(displacement).max(axis=(1, 2))
+    preset_scales[preset_scales == 0.0] = 1.0
+    preset_q = np.rint(displacement / preset_scales[:, None, None] * 32767.0).astype(np.int16)
+    preset_error = float(
+        np.abs(
+            preset_q.astype(np.float64) * preset_scales[:, None, None] / 32767.0 - displacement
+        ).max()
+    )
+
+    joint_identity = np.ascontiguousarray(npz["joint_identity_basis"], dtype=np.float32)
+    arrays: dict[str, np.ndarray] = {
+        "vertexGroups": groups,
+        "jointParentIndices": npz["joint_parent_indices"].astype(np.int32),
+        "templateJointPositions": npz["template_joint_positions"].astype(np.float32),
+        "jointIdentityBasis": joint_identity,
+        "skinJointIndices": skin_indices,
+        "skinJointWeights": skin_weights,
+        "expressionPresetBasisQ": np.ascontiguousarray(preset_q),
+    }
+    metadata: dict[str, Any] = {
+        "vertex_group_names": list(vertex_group_names),
+        "vertex_group_threshold": GROUP_THRESHOLD,
+        "joint_names": list(joint_names),
+        "expression_preset_names": list(preset_names),
+        "expression_preset_scales": [float(value) for value in preset_scales],
+        "expression_presets_source": (
+            "1-10/2607_Obayashi_Avatar_Mockup_3DGS"
+            " Assets/Sandbox/Ooba/GNM/Tools/export_expression_presets.py"
+            "（公式 CVAE デコーダの latent 0 = クラス条件付き平均）"
+        ),
+    }
+    report: dict[str, float] = {
+        "group_count": float(groups.shape[0]),
+        "preset_count": float(len(preset_names)),
+        "preset_max_displacement": float(np.abs(displacement).max()),
+        "preset_error": preset_error,
+        "joint_identity_max": float(np.abs(joint_identity).max()),
+    }
+    return arrays, metadata, report
+
+
 # ---------------------------------------------------------------------------
 def main() -> None:
     arguments = sys.argv[1:]
@@ -555,11 +676,15 @@ def main() -> None:
     sparse_path = Path(arguments[1]) if len(arguments) > 1 else DEFAULT_SPARSE_68
     canonical_path = Path(arguments[2]) if len(arguments) > 2 else DEFAULT_CANONICAL
     output_path = Path(arguments[3]) if len(arguments) > 3 else DEFAULT_OUTPUT
+    presets_path = (
+        Path(arguments[4]) if len(arguments) > 4 else DEFAULT_EXPRESSION_PRESETS
+    )
 
     for label, path in (
         ("gnm_head.npz", npz_path),
         ("head_sparse_68.txt", sparse_path),
         ("canonical_face_model.obj", canonical_path),
+        ("GnmExpressionPresets_v3_0.npz", presets_path),
     ):
         if not path.is_file():
             raise SystemExit(
@@ -601,6 +726,9 @@ def main() -> None:
         rim = mouth_rim_region(npz, vertex_group_names)[source]
         identity_basis = np.ascontiguousarray(
             npz["vertex_identity_basis"][:, source], dtype=np.float32
+        )
+        preview_arrays, preview_metadata, preview_report = build_preview_arrays(
+            npz, source, vertex_group_names, presets_path
         )
 
     sparse68_indices, sparse68_weights = load_sparse_68(sparse_path)
@@ -653,6 +781,7 @@ def main() -> None:
         "denseVertexIndices": dense_vertices.astype(np.int32),
         "denseWeights": dense_weights.astype(np.float32),
         "denseResidualMeters": dense_residuals.astype(np.float32),
+        **preview_arrays,
     }
     metadata: dict[str, Any] = {
         "source": (
@@ -664,6 +793,7 @@ def main() -> None:
         "component_names": list(mesh_component_names),
         "identity_basis_scales": [float(value) for value in scales],
         "dense_edge_meters": dense_edge,
+        **preview_metadata,
     }
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -681,6 +811,12 @@ def main() -> None:
         f"  口腔縁 {int((rim > 0).sum()):,} 頂点 /"
         f" 写真専用領域 {int(photo_only.sum()):,} 頂点 /"
         f" 耳 {int(ear_region.sum()):,} 頂点\n"
+        f"  3D ビュー用: vertex group {int(preview_report['group_count'])} 本 /"
+        f" ジョイント {len(EXPECTED_JOINT_NAMES)} 本"
+        f"（identity で最大 {preview_report['joint_identity_max'] * 1000:.1f} mm 動く）/"
+        f" 表情プリセット {int(preview_report['preset_count'])} 本"
+        f"（最大変位 {preview_report['preset_max_displacement'] * 1000:.1f} mm /"
+        f" int16 量子化の最大誤差 {preview_report['preset_error'] * 1e6:.1f} um）\n"
         f"  {output_path.stat().st_size / 1e6:.1f} MB"
     )
 

@@ -7,14 +7,15 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { GnmHeadAsset } from '../src/domain/gnm/model';
-import { parseGnmHeadAsset } from '../src/infrastructure/gnmAsset';
+import { GnmPreviewAsset } from '../src/domain/preview/asset';
+import { GnmAssetBundle, parseGnmAssetBundle } from '../src/infrastructure/gnmAsset';
 
 const ASSET_PATH = resolve(__dirname, '..', 'public', 'gnm', 'gnm_head.gnmb');
 
-let cached: GnmHeadAsset | null = null;
+let cached: GnmAssetBundle | null = null;
 
 /** アセットが無ければテストを落とす（生成し忘れを黙って通さない）。 */
-export function loadAsset(): GnmHeadAsset {
+export function loadBundle(): GnmAssetBundle {
   if (cached !== null) return cached;
   let bytes: Buffer;
   try {
@@ -25,8 +26,18 @@ export function loadAsset(): GnmHeadAsset {
         `python tools/export_gnm_assets.py で生成してください（${String(error)}）`,
     );
   }
-  cached = parseGnmHeadAsset(
+  cached = parseGnmAssetBundle(
     bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer,
   );
   return cached;
+}
+
+/** 書き出しが使う側だけ。 */
+export function loadAsset(): GnmHeadAsset {
+  return loadBundle().asset;
+}
+
+/** 3D ビューが使う側だけ。 */
+export function loadPreview(): GnmPreviewAsset {
+  return loadBundle().preview;
 }

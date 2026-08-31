@@ -7,13 +7,24 @@
 // 既定を presentation に持たないためで、**ここは「読めたか」しか判断しない**。
 
 import { ExportSettings, validateExportSettings } from '../application/settings';
+import { DEFAULT_VIEW_SETTINGS, ViewSettings, normalizeViewSettings } from './viewSettings';
 
 export const PARAMETERS_KEY = 'export_parameters/v1';
+
+/**
+ * 3D ビューの値の保存先。**書き出しの値とキーを分ける。**
+ *
+ * 混ぜると、ビュー側の値が壊れただけで書き出しの値まで既定へ戻る（`validateExportSettings` は
+ * 通らない値を丸ごと捨てる）。影響範囲が違うものを 1 つの JSON に入れない。
+ */
+export const VIEW_PARAMETERS_KEY = 'view_parameters/v1';
 
 /** presentation が依存する、パラメータ保存先の最小契約。 */
 export interface ParameterStore {
   load(): ExportSettings | null;
   save(parameters: ExportSettings): void;
+  loadView(): ViewSettings;
+  saveView(settings: ViewSettings): void;
 }
 
 /** `localStorage` を使うパラメータ保存先。 */
@@ -47,6 +58,34 @@ export class LocalStorageParameterStore implements ParameterStore {
       this.storage.setItem(PARAMETERS_KEY, JSON.stringify(parameters, Object.keys(parameters).sort()));
     } catch (error) {
       throw new Error(`パラメーターを書き込めませんでした: ${String(error)}`);
+    }
+  }
+
+  /** ビューの値は範囲外でも丸めて使う（結果に影響しないので、戻すより丸める方が親切）。 */
+  loadView(): ViewSettings {
+    let raw: string | null;
+    try {
+      raw = this.storage.getItem(VIEW_PARAMETERS_KEY);
+    } catch {
+      return DEFAULT_VIEW_SETTINGS;
+    }
+    if (raw === null) return DEFAULT_VIEW_SETTINGS;
+    try {
+      return normalizeViewSettings(JSON.parse(raw) as unknown);
+    } catch {
+      return DEFAULT_VIEW_SETTINGS;
+    }
+  }
+
+  saveView(settings: ViewSettings): void {
+    const normalized = normalizeViewSettings(settings);
+    try {
+      this.storage.setItem(
+        VIEW_PARAMETERS_KEY,
+        JSON.stringify(normalized, Object.keys(normalized).sort()),
+      );
+    } catch (error) {
+      throw new Error(`3D ビューの値を書き込めませんでした: ${String(error)}`);
     }
   }
 }

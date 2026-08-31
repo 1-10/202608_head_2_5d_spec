@@ -247,8 +247,12 @@ export function isPipelineError(error: unknown): boolean {
   );
 }
 
-/** 3Dビューの遅延入力。既存配列の参照を束ねるだけ。 */
-export interface DebugSceneSource {
+/**
+ * 3D 確認ビューへ渡す入力。既存配列の参照を束ねるだけ。
+ *
+ * **書き出しの結果ではない。** 3D ビューは `domain/preview` がこれを組み立てて描く。
+ */
+export interface PreviewSceneSource {
   readonly vertices: Float64Array;
   readonly asset: GnmHeadAsset;
   readonly skinAlbedo: Uint8Array;
@@ -273,7 +277,7 @@ export interface ExportOutcome {
    * presentation へ渡すために返す。
    */
   readonly eyeAlbedos: Readonly<Record<EyeSide, EyeAlbedo>>;
-  readonly debugSceneSource: DebugSceneSource;
+  readonly previewSceneSource: PreviewSceneSource;
   /** 段「フィット」の結果（残差の表示に使う）。 */
   readonly headFit: HeadFit;
   /** 段「髪シェル」の中間結果。髪が無ければ null。 */
@@ -513,7 +517,7 @@ export async function exportGuest(input: {
     artifacts,
     inspection,
     eyeAlbedos,
-    debugSceneSource: {
+    previewSceneSource: {
       vertices,
       asset,
       skinAlbedo: artifacts.skinAlbedo,

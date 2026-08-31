@@ -14,6 +14,7 @@
 
 import { ModelFileNotFoundError } from '../domain/errors';
 import { GnmHeadAsset, GnmHeadMesh } from '../domain/gnm/model';
+import { GnmPreviewAsset } from '../domain/preview/asset';
 import { GNMB_CONTENT_HEAD_ASSET, readGnmbContainer, requireArray } from './gnmb';
 
 /** 既定の配置先（`tools/export_gnm_assets.py` の出力先と揃える）。 */
@@ -37,8 +38,27 @@ export const EXPECTED_MESH_COMPONENT_NAMES: readonly string[] = [
   'tongue',
 ];
 
-/** GNMB を fetch して `GnmHeadAsset` にする。 */
-export async function loadGnmHeadAsset(url = DEFAULT_ASSET_URL): Promise<GnmHeadAsset> {
+/** 公式 npz の `joint_names`。3D ビューの首と視線がこの並びに依存する。 */
+export const EXPECTED_JOINT_NAMES: readonly string[] = [
+  'neck',
+  'head',
+  'left_eye',
+  'right_eye',
+];
+
+/**
+ * 1 つの GNMB から出てくる組。
+ *
+ * `asset` は書き出しが使う値だけ（デスクトップ側の `GnmHeadAsset` と同じ型）、`preview` は 3D ビュー
+ * だけが使う値。**分けてあるのは書き出しの型に確認用の道具を混ぜないため。**
+ */
+export interface GnmAssetBundle {
+  readonly asset: GnmHeadAsset;
+  readonly preview: GnmPreviewAsset;
+}
+
+/** GNMB を fetch して `GnmAssetBundle` にする。 */
+export async function loadGnmAssetBundle(url = DEFAULT_ASSET_URL): Promise<GnmAssetBundle> {
   let response: Response;
   try {
     response = await fetch(url);
@@ -54,11 +74,14 @@ export async function loadGnmHeadAsset(url = DEFAULT_ASSET_URL): Promise<GnmHead
         ' python tools/export_gnm_assets.py で public/gnm/gnm_head.gnmb を生成してください。',
     );
   }
-  return parseGnmHeadAsset(await response.arrayBuffer(), url);
+  return parseGnmAssetBundle(await response.arrayBuffer(), url);
 }
 
-/** GNMB のバイト列を `GnmHeadAsset` にする（テストから直接呼べる形）。 */
-export function parseGnmHeadAsset(buffer: ArrayBuffer, source = 'gnm_head.gnmb'): GnmHeadAsset {
+/** GNMB のバイト列を `GnmAssetBundle` にする（テストから直接呼べる形）。 */
+export function parseGnmAssetBundle(
+  buffer: ArrayBuffer,
+  source = 'gnm_head.gnmb',
+): GnmAssetBundle {
   const container = readGnmbContainer(buffer, GNMB_CONTENT_HEAD_ASSET);
   const header = container.header;
 
@@ -158,7 +181,7 @@ export function parseGnmHeadAsset(buffer: ArrayBuffer, source = 'gnm_head.gnmb')
     throw new Error('密対応の配列の要素数が揃っていない');
   }
 
-  return {
+  const asset: GnmHeadAsset = {
     source: `${source} (${requireString(header, 'source')})`,
     gnmVersion,
     gnmVariant,
@@ -181,6 +204,86 @@ export function parseGnmHeadAsset(buffer: ArrayBuffer, source = 'gnm_head.gnmb')
       edgeMeters: denseEdgeMeters,
       pointCount: densePointCount,
     },
+  };
+
+  return { asset, preview: parsePreview(container, header, vertexCount, componentCount) };
+}
+
+/** 3D ビュー用の配列を取り出す。要素数はここで全部突き合わせる。 */
+function parsePreview(
+  container: ReturnType<typeof readGnmbContainer>,
+  header: Record<string, unknown>,
+  vertexCount: number,
+  identityComponentCount: number,
+): GnmPreviewAsset {
+  const vertexGroupNames = requireStringArray(header, 'vertex_group_names');
+  const jointNames = requireStringArray(header, 'joint_names');
+  if (
+    jointNames.length !== EXPECTED_JOINT_NAMES.length ||
+    jointNames.some((name, index) => name !== EXPECTED_JOINT_NAMES[index])
+  ) {
+    throw new Error(
+      `joint_names が ${jointNames.join(', ')}` +
+        `（期待 ${EXPECTED_JOINT_NAMES.join(', ')}）。首と視線の割り当てが変わる`,
+    );
+  }
+  const expressionPresetNames = requireStringArray(header, 'expression_preset_names');
+  const expressionPresetScales = Float64Array.from(
+    requireNumberArray(header, 'expression_preset_scales'),
+  );
+  if (expressionPresetScales.length !== expressionPresetNames.length) {
+    throw new Error('expression_preset_scales と expression_preset_names の数が合わない');
+  }
+
+  const vertexGroups = requireArray(container, 'vertexGroups', Uint8Array);
+  const jointParentIndices = requireArray(container, 'jointParentIndices', Int32Array);
+  const templateJointPositions = requireArray(container, 'templateJointPositions', Float32Array);
+  const jointIdentityBasis = requireArray(container, 'jointIdentityBasis', Float32Array);
+  const skinJointIndices = requireArray(container, 'skinJointIndices', Uint8Array);
+  const skinJointWeights = requireArray(container, 'skinJointWeights', Float32Array);
+  const expressionPresetBasisQ = requireArray(container, 'expressionPresetBasisQ', Int16Array);
+
+  const jointCount = jointNames.length;
+  const presetCount = expressionPresetNames.length;
+  for (const [name, actual, expected] of [
+    ['vertexGroups', vertexGroups.length, vertexGroupNames.length * vertexCount],
+    ['jointParentIndices', jointParentIndices.length, jointCount],
+    ['templateJointPositions', templateJointPositions.length, jointCount * 3],
+    ['jointIdentityBasis', jointIdentityBasis.length, identityComponentCount * jointCount * 3],
+    ['skinJointIndices', skinJointIndices.length, vertexCount * 2],
+    ['skinJointWeights', skinJointWeights.length, vertexCount * 2],
+    ['expressionPresetBasisQ', expressionPresetBasisQ.length, presetCount * vertexCount * 3],
+  ] as const) {
+    if (actual !== expected) {
+      throw new Error(`${name} の要素数が ${actual}（期待 ${expected}）`);
+    }
+  }
+  for (let joint = 0; joint < jointCount; joint++) {
+    if (jointParentIndices[joint] >= joint) {
+      throw new Error(
+        `ジョイント ${jointNames[joint]} の親が後ろにある（親を先に並べる前提が崩れている）`,
+      );
+    }
+  }
+  for (const index of skinJointIndices) {
+    if (index >= jointCount) throw new Error('skinJointIndices がジョイント数の範囲外を指している');
+  }
+
+  return {
+    vertexGroupNames,
+    vertexGroups,
+    jointNames,
+    jointParentIndices,
+    templateJointPositions,
+    jointIdentityBasis,
+    skinJointIndices,
+    skinJointWeights,
+    expressionPresetNames,
+    expressionPresetBasisQ,
+    expressionPresetScales,
+    vertexCount,
+    jointCount,
+    presetCount,
   };
 }
 

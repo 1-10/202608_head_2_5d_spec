@@ -6,12 +6,16 @@
 
 import { ExportOutcome, exportGuest } from './application/exportGuest';
 import { ExportSettings } from './application/settings';
-import { GnmHeadAsset } from './domain/gnm/model';
+
 import { PhotoRgb } from './domain/photo';
 import { CachingAtlasBaker } from './infrastructure/atlasBaker';
 import { DavidDepthNormalEstimator } from './infrastructure/depthNormal';
 import { MediaPipeFaceLandmarkDetector } from './infrastructure/faceLandmarks';
-import { DEFAULT_ASSET_URL, loadGnmHeadAsset } from './infrastructure/gnmAsset';
+import {
+  DEFAULT_ASSET_URL,
+  GnmAssetBundle,
+  loadGnmAssetBundle,
+} from './infrastructure/gnmAsset';
 import { DomainHairImageProcessor } from './infrastructure/hairImage';
 import { buildGuestZip } from './infrastructure/packaging';
 import { MediaPipePersonSegmenter } from './infrastructure/segmentation';
@@ -31,12 +35,12 @@ export class Exporter {
   private readonly depthNormal = new DavidDepthNormalEstimator();
   private readonly atlasBaker = new CachingAtlasBaker();
   private readonly hairImageProcessor = new DomainHairImageProcessor();
-  private asset: GnmHeadAsset | null = null;
+  private bundle: GnmAssetBundle | null = null;
 
-  /** GNM アセットの読込（約 29MB）。初回だけ走る。 */
-  async loadAsset(url = DEFAULT_ASSET_URL): Promise<GnmHeadAsset> {
-    if (this.asset === null) this.asset = await loadGnmHeadAsset(url);
-    return this.asset;
+  /** GNM アセットの読込（約 32MB）。初回だけ走る。 */
+  async loadAsset(url = DEFAULT_ASSET_URL): Promise<GnmAssetBundle> {
+    if (this.bundle === null) this.bundle = await loadGnmAssetBundle(url);
+    return this.bundle;
   }
 
   /** DAViD がどの実行環境で動いているか（画面に出す）。まだ推論していなければ null。 */
@@ -50,10 +54,10 @@ export class Exporter {
     settings: ExportSettings,
     onStage?: (stage: string) => void,
   ): Promise<ExportOutcome> {
-    const asset = await this.loadAsset();
+    const bundle = await this.loadAsset();
     return exportGuest({
       photo,
-      asset,
+      asset: bundle.asset,
       landmarkDetector: this.landmarkDetector,
       segmenter: this.segmenter,
       depthNormal: this.depthNormal,
@@ -76,3 +80,4 @@ export function exporterVersion(): string {
 }
 
 export { buildGuestZip };
+export type { GnmAssetBundle };

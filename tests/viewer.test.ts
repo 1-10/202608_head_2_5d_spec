@@ -1,121 +1,109 @@
-// 3D ビューの投影とパラメータ永続化の検査。
+// 3D ビューの定数とパラメータ永続化の検査。
 //
-// 描画そのものはブラウザでしか動かないが、**投影行列は純粋計算**なので枠に収まることを機械で押さえ
-// られる（境界球が回転に関わらず NDC に収まる、という保証がこの行列の存在理由）。
+// 描画そのものはブラウザでしか動かないので、ここで押さえるのは**Unity 側から写した値**と、値の
+// 保存が壊れていないこと。カメラ・光・背景・alpha clip は 1-10/2607_Obayashi_Avatar_Mockup_3DGS の
+// `Assets/Sandbox/Ooba/GNM` が正本で、写しなのでズレたら気付ける形にしておく。
+//
+// 首と視線・表情・領域分けの数値そのものは `tests/preview.test.ts`（純粋計算と実アセット）で見る。
 
 import { describe, expect, it } from 'vitest';
-import * as THREE from 'three';
 import {
-  DEPTH_FILL,
-  FRAME_FILL,
+  ALL_TEXTURES_KEY,
+  AMBIENT_LIGHT,
+  DEFAULT_BACKGROUND,
+  DEFAULT_DISTANCE_METERS,
+  DEFAULT_FOV_DEGREES,
+  LAYER_KEYS,
+  LIGHT_DIRECTION,
   MAXIMUM_ZOOM,
   MINIMUM_ZOOM,
-  normalRotation,
-  viewProjection,
+  RESET_KEY,
+  TARGET_HEIGHT_METERS,
+  TEXTURE_KEYS,
+  WIREFRAME_KEY,
 } from '../src/presentation/viewer';
+import { LAYER_ORDER } from '../src/domain/preview/asset';
 import { DEFAULT_SETTINGS } from '../src/application/settings';
 import { LocalStorageParameterStore } from '../src/presentation/parameterStore';
+import { DEFAULT_VIEW_SETTINGS, normalizeViewSettings } from '../src/presentation/viewSettings';
 
-const CENTER: readonly [number, number, number] = [0.01, 0.3, 0.02];
-const RADIUS = 0.18;
-
-function project(
-  point: readonly [number, number, number],
-  options: { yaw?: number; pitch?: number; zoom?: number; pan?: [number, number] } = {},
-): THREE.Vector3 {
-  const matrix = viewProjection({
-    center: CENTER,
-    radius: RADIUS,
-    width: 800,
-    height: 600,
-    zoom: options.zoom ?? 1,
-    yaw: options.yaw ?? 0,
-    pitch: options.pitch ?? 0,
-    pan: options.pan ?? [0, 0],
-  });
-  return new THREE.Vector3(point[0], point[1], point[2]).applyMatrix4(matrix);
-}
-
-describe('viewProjection', () => {
-  it('中心は原点へ来る', () => {
-    const projected = project(CENTER);
-    expect(projected.x).toBeCloseTo(0, 10);
-    expect(projected.y).toBeCloseTo(0, 10);
-    expect(projected.z).toBeCloseTo(0, 10);
+describe('Unity 側から写したカメラと光', () => {
+  it('カメラは Viewer.unity の MainCamera と同じ', () => {
+    expect(DEFAULT_FOV_DEGREES).toBe(20);
+    expect(DEFAULT_DISTANCE_METERS).toBeCloseTo(1.3, 10);
+    expect(TARGET_HEIGHT_METERS).toBeCloseTo(0.297, 10);
+    expect(DEFAULT_BACKGROUND).toBe('#26292e');
   });
 
-  it('境界球はどの向きへ回しても NDC に収まる（FRAME_FILL の余白が残る）', () => {
-    // 境界球の表面の点を球面上に散らして、全部が枠と深度の内側に入ることを見る。
-    for (const yaw of [0, 0.7, 1.9, 3.0]) {
-      for (const pitch of [-1.45, -0.5, 0, 1.45]) {
-        for (let sample = 0; sample < 40; sample++) {
-          const theta = (sample / 40) * Math.PI * 2;
-          const phi = Math.acos(1 - (2 * (sample % 7)) / 6);
-          const point: [number, number, number] = [
-            CENTER[0] + RADIUS * Math.sin(phi) * Math.cos(theta),
-            CENTER[1] + RADIUS * Math.sin(phi) * Math.sin(theta),
-            CENTER[2] + RADIUS * Math.cos(phi),
-          ];
-          const projected = project(point, { yaw, pitch });
-          // 短辺（高さ）方向は FRAME_FILL まで、長辺はそれより余裕がある。
-          expect(Math.abs(projected.y)).toBeLessThanOrEqual(FRAME_FILL + 1e-9);
-          expect(Math.abs(projected.x)).toBeLessThanOrEqual(FRAME_FILL + 1e-9);
-          // 深度は [-DEPTH_FILL, DEPTH_FILL]（1 未満なので near/far に触れない）。
-          expect(Math.abs(projected.z)).toBeLessThanOrEqual(DEPTH_FILL + 1e-9);
-        }
-      }
-    }
-  });
-
-  it('拡大は x と y だけに掛かる（深度は動かない）', () => {
-    const point: [number, number, number] = [CENTER[0], CENTER[1], CENTER[2] + RADIUS];
-    const plain = project(point);
-    const zoomed = project(point, { zoom: MAXIMUM_ZOOM });
-    expect(zoomed.z).toBeCloseTo(plain.z, 10);
-    // 拡大しても深度が [-1, 1] を越えない（越えると手前と奥が切られる）。
-    expect(Math.abs(zoomed.z)).toBeLessThan(1);
-  });
-
-  it('GNM の +Z（前）は NDC の手前（z が小さい側）へ来る', () => {
-    const front = project([CENTER[0], CENTER[1], CENTER[2] + RADIUS]);
-    const back = project([CENTER[0], CENTER[1], CENTER[2] - RADIUS]);
-    expect(front.z).toBeLessThan(back.z);
-  });
-
-  it('平行移動は NDC 単位で効き、深度に掛からない', () => {
-    const point: [number, number, number] = [...CENTER] as [number, number, number];
-    const moved = project(point, { pan: [0.25, -0.125] });
-    expect(moved.x).toBeCloseTo(0.25, 10);
-    expect(moved.y).toBeCloseTo(-0.125, 10);
-    expect(moved.z).toBeCloseTo(0, 10);
-  });
-
-  it('yaw は縦軸まわり（+Y が動かない）', () => {
-    const rotation = normalRotation(Math.PI / 2, 0);
-    const up = new THREE.Vector3(0, 1, 0).applyMatrix4(rotation);
-    expect(up.x).toBeCloseTo(0, 10);
-    expect(up.y).toBeCloseTo(1, 10);
-    expect(up.z).toBeCloseTo(0, 10);
-  });
-
-  it('半径が正でなければ落ちる', () => {
-    expect(() =>
-      viewProjection({
-        center: CENTER,
-        radius: 0,
-        width: 100,
-        height: 100,
-        zoom: 1,
-        yaw: 0,
-        pitch: 0,
-        pan: [0, 0],
-      }),
-    ).toThrow(/境界球の半径/);
+  it('光は上・前・被写体から見て右から来る（Unity の DirectionalLight と同じ向き）', () => {
+    const [x, y, z] = LIGHT_DIRECTION;
+    // GNM 空間の +X は解剖学的な左。Unity 空間は X 反転なので、あちらの +X 側の光は
+    // こちらでは負になる。**ここの符号を間違えると顔の陰の向きが左右反転する。**
+    expect(x).toBeLessThan(0);
+    expect(y).toBeGreaterThan(0);
+    expect(z).toBeGreaterThan(0);
+    expect(Math.hypot(x, y, z)).toBeCloseTo(1, 3);
+    expect(AMBIENT_LIGHT).toBeGreaterThan(0);
+    expect(AMBIENT_LIGHT).toBeLessThan(1);
   });
 
   it('拡大率の範囲は 0.3〜5.0', () => {
     expect(MINIMUM_ZOOM).toBe(0.3);
     expect(MAXIMUM_ZOOM).toBe(5.0);
+  });
+});
+
+describe('キー割り当て', () => {
+  it('層とテクスチャのキーは LAYER_ORDER と同じ並び', () => {
+    expect(Object.values(LAYER_KEYS)).toEqual([...LAYER_ORDER]);
+    expect(Object.values(TEXTURE_KEYS)).toEqual([...LAYER_ORDER]);
+  });
+
+  it('単独キーが重複していない', () => {
+    const codes = [
+      ...Object.keys(LAYER_KEYS),
+      ...Object.keys(TEXTURE_KEYS),
+      ALL_TEXTURES_KEY,
+      RESET_KEY,
+      WIREFRAME_KEY,
+    ];
+    expect(new Set(codes).size).toBe(codes.length);
+  });
+});
+
+describe('3D ビューの値の正規化', () => {
+  it('既定値はそのまま通る', () => {
+    expect(normalizeViewSettings(DEFAULT_VIEW_SETTINGS)).toEqual(DEFAULT_VIEW_SETTINGS);
+  });
+
+  it('範囲外は**捨てずに丸める**（書き出しの値とは扱いが違う）', () => {
+    const normalized = normalizeViewSettings({
+      ...DEFAULT_VIEW_SETTINGS,
+      fovDegrees: 999,
+      headYawDegrees: -999,
+      neckShare: 5,
+    });
+    expect(normalized.fovDegrees).toBe(60);
+    expect(normalized.headYawDegrees).toBe(-15);
+    expect(normalized.neckShare).toBe(1);
+  });
+
+  it('型が違う値・不正な色・知らない再生モードは既定へ戻す', () => {
+    const normalized = normalizeViewSettings({
+      fovDegrees: 'wide',
+      background: 'red',
+      playMode: 'loop',
+      blinkEnabled: 'yes',
+    });
+    expect(normalized.fovDegrees).toBe(DEFAULT_VIEW_SETTINGS.fovDegrees);
+    expect(normalized.background).toBe(DEFAULT_VIEW_SETTINGS.background);
+    expect(normalized.playMode).toBe('off');
+    expect(normalized.blinkEnabled).toBe(DEFAULT_VIEW_SETTINGS.blinkEnabled);
+  });
+
+  it('オブジェクトでなければ丸ごと既定', () => {
+    expect(normalizeViewSettings(null)).toEqual(DEFAULT_VIEW_SETTINGS);
+    expect(normalizeViewSettings([1, 2])).toEqual(DEFAULT_VIEW_SETTINGS);
   });
 });
 
@@ -169,5 +157,17 @@ describe('パラメータの永続化', () => {
     expect(() =>
       store.save({ ...DEFAULT_SETTINGS, hairLiftMm: DEFAULT_SETTINGS.hairRolloffMm + 1 }),
     ).toThrow(/hairLiftMm/);
+  });
+
+  it('3D ビューの値は別のキーへ保存し、片方が壊れても他方に影響しない', () => {
+    const storage = new FakeStorage();
+    const store = new LocalStorageParameterStore(storage);
+    store.save(DEFAULT_SETTINGS);
+    store.saveView({ ...DEFAULT_VIEW_SETTINGS, fovDegrees: 35, playMode: 'random' });
+    expect(store.loadView().fovDegrees).toBe(35);
+    expect(store.loadView().playMode).toBe('random');
+    storage.setItem('view_parameters/v1', '{壊れた');
+    expect(store.loadView()).toEqual(DEFAULT_VIEW_SETTINGS);
+    expect(store.load()).toEqual(DEFAULT_SETTINGS);
   });
 });
