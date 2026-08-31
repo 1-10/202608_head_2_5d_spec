@@ -71,10 +71,15 @@ describe('README の調整パラメータの表', () => {
 describe('README の 3D ビューの表', () => {
   it('カメラ（Unity 側 MainCamera の写し）', () => {
     expect(README).toContain(
-      `| 投影 | 透視 FOV ${DEFAULT_FOV_DEGREES}° / 距離 ${DEFAULT_DISTANCE_METERS}m` +
-        ` / 注視点 y=${TARGET_HEIGHT_METERS}m |`,
+      `| 投影 | 透視 FOV ${DEFAULT_FOV_DEGREES}° / 距離 ${DEFAULT_DISTANCE_METERS}m |`,
     );
     expect(README).toContain(`| 背景 | \`${DEFAULT_BACKGROUND}\` |`);
+  });
+
+  it('注視点は頭部の中心（Unity の固定値と違えている理由まで書く）', () => {
+    expect(README).toContain(
+      `| 注視点 | **頭部の外接箱の中心**（あちらは眼の高さ y=${TARGET_HEIGHT_METERS}m 固定） |`,
+    );
   });
 
   it('領域の並び（先勝ちなので順序そのものが仕様）', () => {
