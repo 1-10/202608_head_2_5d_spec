@@ -7,6 +7,10 @@
 //
 // identity 基底は int16 量子化のまま持つ（実数へ展開すると 56MB になる）。値へ戻すのは
 // `domain/gnm/model.basisValue` / `verticesOf` の側。
+//
+// **`GnmModel`（アセット + 68 点定義 + 密対応を束ねる型）を持たない。** デスクトップ側は npz と
+// `head_sparse_68.txt` が別のファイルから来るので「揃っていること」を型で保証する必要があるが、
+// こちらは 1 つの GNMB に全部入っているので `GnmHeadAsset` がそのまま揃った組である。
 
 import { ModelFileNotFoundError } from '../domain/errors';
 import { GnmHeadAsset, GnmHeadMesh } from '../domain/gnm/model';

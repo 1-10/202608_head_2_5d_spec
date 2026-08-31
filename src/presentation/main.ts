@@ -7,16 +7,16 @@
 import './style.css';
 import { bakeReport } from '../domain/atlas/bake';
 import { LAYER_ORDER, buildDebugScene } from '../domain/debugScene';
-import { EYE_SIDES } from '../domain/eyes/layout';
 import { irisToLimbusRatio } from '../domain/eyes/bake';
+import { EYE_SIDES } from '../domain/eyes/layout';
 import { depthCoverage } from '../domain/hair/shell';
 import { PhotoRgb } from '../domain/photo';
 import { ExportOutcome, describeFailure, isPipelineError } from '../application/exportGuest';
 import { Exporter, buildGuestZip } from '../composition';
-import { createPanelState, setupGui, toExportSettings } from './gui';
+import { GuiHandle, createPanelState, setupGui, toExportSettings } from './gui';
 import { InputManager } from './input';
 import { renderInspection } from './inspectionView';
-import { OrbitDragController } from './interaction';
+import { LocalStorageParameterStore } from './parameterStore';
 import { Viewer } from './viewer';
 
 const elements = {
@@ -28,8 +28,7 @@ const elements = {
   status: requireElement<HTMLElement>('status-message'),
   report: requireElement<HTMLElement>('report'),
   viewport: requireElement<HTMLElement>('canvas-head'),
-  yawReadout: requireElement<HTMLElement>('readout-yaw'),
-  pitchReadout: requireElement<HTMLElement>('readout-pitch'),
+  viewReadout: requireElement<HTMLElement>('readout-view'),
   video: requireElement<HTMLVideoElement>('webcam-video'),
   guiContainer: requireElement<HTMLElement>('gui-container'),
   inspection: requireElement<HTMLElement>('inspection'),
@@ -41,7 +40,9 @@ function requireElement<T extends HTMLElement>(id: string): T {
   return element as T;
 }
 
-const panelState = createPanelState();
+const parameterStore = new LocalStorageParameterStore();
+// 保存されたパラメータがあれば復元する。壊れていれば application 側の既定へ戻る。
+const panelState = createPanelState(parameterStore.load() ?? undefined);
 const exporter = new Exporter();
 const inputManager = new InputManager(elements.video);
 const viewer = new Viewer(elements.viewport);
@@ -50,30 +51,33 @@ let photo: PhotoRgb | null = null;
 let outcome: ExportOutcome | null = null;
 let busy = false;
 
-setupGui(elements.guiContainer, panelState, { onLayersChanged: () => applyLayers() });
+const gui: GuiHandle = setupGui(elements.guiContainer, panelState, {
+  onLayerVisibilityChanged: (layer, visible) => viewer.setLayerVisible(layer, visible),
+  onLayerTextureChanged: (layer, enabled) => viewer.setLayerTextureEnabled(layer, enabled),
+  onAllTexturesToggled: () => viewer.toggleAllTextures(),
+  onResetView: () => viewer.resetView(),
+  onSaveParameters: () => {
+    try {
+      parameterStore.save(toExportSettings(panelState));
+      setStatus('パラメーターを保存しました。次回起動時に復元します');
+    } catch (error) {
+      setStatus(`パラメーターを保存できませんでした: ${describeFailure(error).cause}`, true);
+    }
+  },
+});
 
-new OrbitDragController([elements.viewport], {
-  getYaw: () => viewer.yawDeg,
-  setYaw: (value) => {
-    viewer.yawDeg = value;
-    viewer.applyOrientation();
-    updateOrientationReadout();
-  },
-  // 3Dビューは検査用なので回転範囲を制限しない（Yaw ±15° の品質目標は写真投影の話で、
-  // 「どこまで回して確認してよいか」ではない）。
-  getMaxYawDeg: () => 180,
-  getPitch: () => viewer.pitchDeg,
-  setPitch: (value) => {
-    viewer.pitchDeg = value;
-    viewer.applyOrientation();
-    updateOrientationReadout();
-  },
-  getMaxPitchDeg: () => 89,
-  getZoom: () => viewer.zoom,
-  setZoom: (value) => {
-    viewer.zoom = value;
-    viewer.applyOrientation();
-  },
+viewer.onViewChanged = (): void => {
+  updateViewReadout();
+  gui.syncViewControls(viewer.layerStates(), viewer.textureStates());
+};
+
+// キー操作は 3Dビューが持つ（層・テクスチャ・視点のリセット）。入力欄にフォーカスがあるときは
+// 拾わない。
+window.addEventListener('keydown', (event) => {
+  if (event.metaKey || event.ctrlKey || event.altKey) return;
+  const target = event.target as HTMLElement | null;
+  if (target !== null && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)) return;
+  if (viewer.handleKey(event.code)) event.preventDefault();
 });
 
 function setStatus(message: string, isError = false): void {
@@ -81,13 +85,11 @@ function setStatus(message: string, isError = false): void {
   elements.status.classList.toggle('error', isError);
 }
 
-function updateOrientationReadout(): void {
-  elements.yawReadout.textContent = viewer.yawDeg.toFixed(1);
-  elements.pitchReadout.textContent = viewer.pitchDeg.toFixed(1);
-}
-
-function applyLayers(): void {
-  viewer.setHiddenLayers(LAYER_ORDER.filter((layer) => !panelState.visibleLayers[layer]));
+function updateViewReadout(): void {
+  const degrees = (radians: number): string => ((radians * 180) / Math.PI).toFixed(1);
+  elements.viewReadout.textContent =
+    `Yaw ${degrees(viewer.yaw)}° / Pitch ${degrees(viewer.pitch)}° /` +
+    ` Zoom ${viewer.zoom.toFixed(2)}x`;
 }
 
 function updateButtons(): void {
@@ -104,33 +106,38 @@ async function runExport(): Promise<void> {
       setStatus(`段「${stage}」を実行しています…`),
     );
     outcome = result;
+    const source = result.debugSceneSource;
     viewer.setScene(
       buildDebugScene({
-        vertices: result.debugSceneSource.vertices,
-        headMesh: result.debugSceneSource.asset.mesh,
+        vertices: source.vertices,
+        headMesh: source.asset.mesh,
         skinAlbedo: {
-          data: result.debugSceneSource.skinAlbedo,
-          width: result.debugSceneSource.atlasSize,
-          height: result.debugSceneSource.atlasSize,
+          data: source.skinAlbedo,
+          width: source.atlasSize,
+          height: source.atlasSize,
         },
         eyeAlbedos: {
           left: {
-            data: result.debugSceneSource.eyeAlbedos.left,
-            width: result.debugSceneSource.eyeTextureSize,
-            height: result.debugSceneSource.eyeTextureSize,
+            data: source.eyeAlbedos.left,
+            width: source.eyeTextureSize,
+            height: source.eyeTextureSize,
           },
           right: {
-            data: result.debugSceneSource.eyeAlbedos.right,
-            width: result.debugSceneSource.eyeTextureSize,
-            height: result.debugSceneSource.eyeTextureSize,
+            data: source.eyeAlbedos.right,
+            width: source.eyeTextureSize,
+            height: source.eyeTextureSize,
           },
         },
-        hair: result.debugSceneSource.hair,
-        hairAlbedo: result.debugSceneSource.hairAlbedo,
-        hairAlpha: result.debugSceneSource.hairAlpha,
+        hair: source.hair,
+        hairAlbedo: source.hairAlbedo,
+        hairAlpha: source.hairAlpha,
       }),
     );
-    applyLayers();
+    // シーンを差し替えると表示状態が初期化されるので、パネルを合わせ直す。
+    for (const layer of LAYER_ORDER) {
+      viewer.setLayerVisible(layer, panelState.visibleLayers[layer]);
+      viewer.setLayerTextureEnabled(layer, panelState.texturedLayers[layer]);
+    }
     renderInspection(elements.inspection, result.inspection);
     elements.report.textContent = buildReport(result);
     setStatus('');
@@ -158,7 +165,7 @@ function buildReport(result: ExportOutcome): string {
       ` exporter ${manifest.exporter_version}`,
   );
   lines.push(
-    `フィット残差 RMS（写真ピクセル）: ` +
+    'フィット残差 RMS（写真ピクセル）: ' +
       result.headFit.residualRmsPixels.map((value) => value.toFixed(2)).join(' → '),
   );
   for (const side of EYE_SIDES) {
@@ -263,7 +270,7 @@ function animate(): void {
   viewer.render();
 }
 
-updateOrientationReadout();
+updateViewReadout();
 updateButtons();
 animate();
 

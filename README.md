@@ -69,7 +69,7 @@ hf upload harry00902/202608_head_2_5d_spec public/david/david-multitask-vitl16-i
 ```bash
 npm run build    # 型チェック + 本番ビルド
 npm run preview  # ビルド結果のプレビュー
-npm test         # domain / application の検査（実アセットを読む）
+npm test         # domain / application の検査（実アセットを読む。86件）
 ```
 
 ## パイプライン
@@ -88,6 +88,25 @@ npm test         # domain / application の検査（実アセットを読む）
 切り出しは 2 つ走らせる — 深度・法線は頭部だけを覆う詰めた正方形、人物前景はメッシュ全体を覆う広い方。
 
 各段の出力は**検査画像**としてそのまま画面に並ぶ。
+
+### 3D ビュー
+
+書き出しの直後にフィット結果からシーンを作り、回転（左ドラッグ）・平行移動（右ドラッグ）・拡大
+（ホイール）して公式UVの貼られ方を確認できる。**正射影・固定 +Z 法線**（テクスチャに焼き込まれた
+陰影の上へ幾何法線の影を重ねない）。
+
+| 操作 | キー |
+|:--|:--|
+| 層の表示（肌 / 眼球 / 口腔内 / 髪シェル） | `1` `2` `3` `4` |
+| 層ごとのテクスチャ（OFF で下地色と陰影だけ） | `A` `S` `D` `F` |
+| 全テクスチャをまとめて切り替え | `T` |
+| 正面・等倍に戻す | `R` |
+
+テクスチャを外せるのは、絵の中の暗い所が「写真にそう写っていた」のか「面が無い・法線が逆・前後関係が
+壊れている」のかを分けるため。
+
+パラメータは「パラメーターを保存」で `localStorage` へ書き、次回起動時に復元する（壊れた値は使わず
+`application` 側の既定へ戻る）。
 
 ### 調整パラメータ
 
@@ -125,6 +144,9 @@ npm test         # domain / application の検査（実アセットを読む）
 | アトラスレイアウトの永続キャッシュ | ブラウザに置き場が無い。セッション内の使い回しだけ持つ（実測 2048² で layout 173ms / bake 1.8s） |
 | CUDA カーネル・ONNX CUDA EP の box filter | 置き換える先が無いので domain の実装をそのまま呼ぶ。**品質判断は元から domain にある** |
 | zip の一時ファイル → rename | Blob を作り終えてから初めてダウンロードが始まるので、「最終名のファイルが現れた時点で必ず完成している」が構造的に満たされる |
+| 段ごとの開発用スクリプト（`tools/bake_atlas.py` 等） | 同じ役割を画面の検査画像とパラメータパネルが担う（写真を差し替えて即座に全段の絵が出る） |
+| numpy のチャンク上限（`CANDIDATE_CHUNK_BUDGET` 等） | ベクトル化のための中間配列そのものが無い（テクセルごとの素直なループ） |
+| 3Dビューの遅延生成（`build_viewer_scene`） | 3Dビューが画面の主役で常に見えているので、門を置く先が無い |
 
 ### web だから揃わないもの
 
@@ -163,7 +185,8 @@ src/
   infrastructure/  # Port の実装（gnmb / gnmAsset / packaging / imaging / photoCanvas /
                    #   faceLandmarks / segmentation / depthNormal / atlasBaker / hairImage）
   composition.ts   # 配線（具体実装を組み立てて Port として注入するのはここだけ）
-  presentation/    # 入口（main / viewer / gui / inspectionView / input / interaction / style.css）
+  presentation/    # 入口（main / viewer / gui / inspectionView / input / parameterStore /
+                   #   style.css）
 tests/             # domain / application の検査（実アセットを読む。推論は偽の Port）
 ```
 

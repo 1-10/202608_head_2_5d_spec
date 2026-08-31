@@ -137,6 +137,9 @@ export const HAIR_ENTRY_NAMES: readonly string[] = [
 
 /**
  * zip のファイル名。時刻は `capturedAt` から作る（別に時計を読まない）。
+ *
+ * 形式はデスクトップ側の `ZIP_NAME_FORMAT`（`guest_%Y%m%d%H%M%S.zip`）と同じ。JS に strftime が
+ * 無いので組み立てを手で書いているが、**書式そのものは契約**なので変えないこと。
  */
 export function zipNameOf(manifest: GuestManifest): string {
   const captured = capturedAtDate(manifest);

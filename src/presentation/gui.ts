@@ -1,14 +1,15 @@
-// 調整パラメータのパネル。
+// 調整パラメータと 3D ビューの操作パネル。
 //
-// **表示の都合しか持たない。** 既定値・範囲・選べる値はすべて `application/settings` が持つ
-// （入口ごとに違う既定を持つと、どちらで動かしたかで結果が変わる）。ここがするのは、その値を
-// lil-gui のコントロールへ結ぶことだけ。
+// **表示の都合しか持たない。** 既定値・範囲・選べる値はすべて `application/settings` が持つ（入口
+// ごとに違う既定を持つと、どちらで動かしたかで結果が変わる）。ここがするのは、その値を lil-gui の
+// コントロールへ結ぶことだけ。
 //
 // デスクトップ側は CLI と GUI の 2 入口を持ち、`--help` がパラメータの一覧を出す。ブラウザは入口が
 // 1 つなので、**このパネルが一覧そのもの**になる。
 
 import GUI from 'lil-gui';
 import {
+  DEFAULT_IDENTITY_CLIP,
   DEFAULT_SETTINGS,
   EYE_TEXTURE_SIZE_CHOICES,
   ExportSettings,
@@ -29,12 +30,22 @@ import {
   TEXTURE_SIZE_CHOICES,
 } from '../application/settings';
 import { LAYER_ORDER } from '../domain/debugScene';
+import { ALL_TEXTURES_KEY, LAYER_KEYS, RESET_KEY, TEXTURE_KEYS } from './viewer';
+
+/** 層の日本語ラベル（デスクトップ側の `LAYER_LABELS` と同じ）。 */
+export const LAYER_LABELS: Readonly<Record<string, string>> = {
+  skin: '肌',
+  eyes: '眼球',
+  mouth: '口腔内',
+  hair: '髪シェル',
+};
 
 /** パネルが編集する状態（`ExportSettings` + ビューの表示切り替え）。 */
 export interface PanelState {
   settings: {
     disagreementScale: number;
-    /** 0 = 上限なし（`identityClip: null`）。lil-gui は null を扱えないので 0 を「無し」に使う。 */
+    /** identity 係数の上限を置くか。**置かない**のが既定（公式 GNM も置いていない）。 */
+    clipEnabled: boolean;
     identityClip: number;
     skinAtlasSize: number;
     eyeTextureSize: number;
@@ -45,35 +56,44 @@ export interface PanelState {
     hairLiftMm: number;
     hairRolloffMm: number;
   };
+  /** 層ごとの表示。 */
   visibleLayers: Record<string, boolean>;
+  /** 層ごとのテクスチャ。OFF では `baseColor` と陰影だけになる。 */
+  texturedLayers: Record<string, boolean>;
 }
 
-export function createPanelState(): PanelState {
+export function createPanelState(settings: ExportSettings = DEFAULT_SETTINGS): PanelState {
   const visibleLayers: Record<string, boolean> = {};
-  for (const layer of LAYER_ORDER) visibleLayers[layer] = true;
+  const texturedLayers: Record<string, boolean> = {};
+  for (const layer of LAYER_ORDER) {
+    visibleLayers[layer] = true;
+    texturedLayers[layer] = true;
+  }
   return {
     settings: {
-      disagreementScale: DEFAULT_SETTINGS.disagreementScale,
-      identityClip: DEFAULT_SETTINGS.identityClip ?? 0,
-      skinAtlasSize: DEFAULT_SETTINGS.skinAtlasSize,
-      eyeTextureSize: DEFAULT_SETTINGS.eyeTextureSize,
-      hairTextureSize: DEFAULT_SETTINGS.hairTextureSize,
-      atlasForegroundThreshold: DEFAULT_SETTINGS.atlasForegroundThreshold,
-      atlasForegroundExponent: DEFAULT_SETTINGS.atlasForegroundExponent,
-      atlasHarmonicScreening: DEFAULT_SETTINGS.atlasHarmonicScreening,
-      hairLiftMm: DEFAULT_SETTINGS.hairLiftMm,
-      hairRolloffMm: DEFAULT_SETTINGS.hairRolloffMm,
+      disagreementScale: settings.disagreementScale,
+      clipEnabled: settings.identityClip !== null,
+      identityClip: settings.identityClip ?? DEFAULT_IDENTITY_CLIP,
+      skinAtlasSize: settings.skinAtlasSize,
+      eyeTextureSize: settings.eyeTextureSize,
+      hairTextureSize: settings.hairTextureSize,
+      atlasForegroundThreshold: settings.atlasForegroundThreshold,
+      atlasForegroundExponent: settings.atlasForegroundExponent,
+      atlasHarmonicScreening: settings.atlasHarmonicScreening,
+      hairLiftMm: settings.hairLiftMm,
+      hairRolloffMm: settings.hairRolloffMm,
     },
     visibleLayers,
+    texturedLayers,
   };
 }
 
-/** パネルの状態を `ExportSettings` へ移す（0 の `identityClip` は「上限なし」）。 */
+/** パネルの状態を `ExportSettings` へ移す。 */
 export function toExportSettings(state: PanelState): ExportSettings {
   const { settings } = state;
   return {
     disagreementScale: settings.disagreementScale,
-    identityClip: settings.identityClip <= 0 ? null : settings.identityClip,
+    identityClip: settings.clipEnabled ? settings.identityClip : null,
     skinAtlasSize: settings.skinAtlasSize,
     eyeTextureSize: settings.eyeTextureSize,
     hairTextureSize: settings.hairTextureSize,
@@ -85,25 +105,48 @@ export function toExportSettings(state: PanelState): ExportSettings {
   };
 }
 
+/** キーコードを人に見せる短い表記（`KeyA` → `A` / `Digit1` → `1`）。 */
+function keyLabel(code: string): string {
+  return code.replace(/^Key/, '').replace(/^Digit/, '');
+}
+
+export interface GuiCallbacks {
+  onLayerVisibilityChanged: (layer: string, visible: boolean) => void;
+  onLayerTextureChanged: (layer: string, enabled: boolean) => void;
+  onAllTexturesToggled: () => void;
+  onResetView: () => void;
+  onSaveParameters: () => void;
+}
+
+export interface GuiHandle {
+  /** ビュー側で状態が変わったとき、パネルのチェックを合わせる。 */
+  syncViewControls(layerStates: readonly [string, boolean][], textureStates: readonly [string, boolean][]): void;
+}
+
 export function setupGui(
   container: HTMLElement,
   state: PanelState,
-  callbacks: { onLayersChanged: () => void },
-): GUI {
+  callbacks: GuiCallbacks,
+): GuiHandle {
   const gui = new GUI({ container, title: '書き出しパラメータ', width: 300 });
 
   const fit = gui.addFolder('フィット');
   fit
-    .add(state.settings, 'disagreementScale', MINIMUM_DISAGREEMENT_SCALE, MAXIMUM_DISAGREEMENT_SCALE, 0.05)
+    .add(
+      state.settings,
+      'disagreementScale',
+      MINIMUM_DISAGREEMENT_SCALE,
+      MAXIMUM_DISAGREEMENT_SCALE,
+      0.05,
+    )
     .name('事前分布の倍率');
+  fit.add(state.settings, 'clipEnabled').name('係数の上限を置く');
   fit
-    .add(state.settings, 'identityClip', 0, MAXIMUM_IDENTITY_CLIP, 0.1)
-    .name(`identity 上限（0=無し / ${MINIMUM_IDENTITY_CLIP}〜）`);
+    .add(state.settings, 'identityClip', MINIMUM_IDENTITY_CLIP, MAXIMUM_IDENTITY_CLIP, 0.1)
+    .name('identity 係数の上限');
 
   const texture = gui.addFolder('テクスチャ');
-  texture
-    .add(state.settings, 'skinAtlasSize', [...TEXTURE_SIZE_CHOICES])
-    .name('肌アトラスの一辺');
+  texture.add(state.settings, 'skinAtlasSize', [...TEXTURE_SIZE_CHOICES]).name('肌アトラスの一辺');
   texture
     .add(state.settings, 'eyeTextureSize', [...EYE_TEXTURE_SIZE_CHOICES])
     .name('眼球テクスチャの一辺');
@@ -148,9 +191,54 @@ export function setupGui(
     .add(state.settings, 'hairRolloffMm', MINIMUM_HAIR_ROLLOFF_MM, MAXIMUM_HAIR_ROLLOFF_MM, 0.1)
     .name('巻き込み (mm)');
 
-  const layers = gui.addFolder('3Dビューの層');
+  const actions = { 保存: callbacks.onSaveParameters };
+  gui.add(actions, '保存').name('パラメーターを保存（次回起動時に復元）');
+
+  const view = gui.addFolder('3Dビュー');
+  const layerControllers = new Map<string, ReturnType<typeof view.add>>();
+  const textureControllers = new Map<string, ReturnType<typeof view.add>>();
+  const layerKeyOf = (layer: string): string =>
+    Object.entries(LAYER_KEYS).find(([, value]) => value === layer)?.[0] ?? '';
+  const textureKeyOf = (layer: string): string =>
+    Object.entries(TEXTURE_KEYS).find(([, value]) => value === layer)?.[0] ?? '';
+
+  const layers = view.addFolder('表示する層');
   for (const layer of LAYER_ORDER) {
-    layers.add(state.visibleLayers, layer).name(layer).onChange(callbacks.onLayersChanged);
+    layerControllers.set(
+      layer,
+      layers
+        .add(state.visibleLayers, layer)
+        .name(`${LAYER_LABELS[layer] ?? layer}   [${keyLabel(layerKeyOf(layer))}]`)
+        .onChange((value: boolean) => callbacks.onLayerVisibilityChanged(layer, value)),
+    );
   }
-  return gui;
+  const textures = view.addFolder('テクスチャを貼る層');
+  for (const layer of LAYER_ORDER) {
+    textureControllers.set(
+      layer,
+      textures
+        .add(state.texturedLayers, layer)
+        .name(`${LAYER_LABELS[layer] ?? layer}   [${keyLabel(textureKeyOf(layer))}]`)
+        .onChange((value: boolean) => callbacks.onLayerTextureChanged(layer, value)),
+    );
+  }
+  const viewActions = {
+    全テクスチャ: callbacks.onAllTexturesToggled,
+    視点: callbacks.onResetView,
+  };
+  view.add(viewActions, '全テクスチャ').name(`全テクスチャを切り替え   [${keyLabel(ALL_TEXTURES_KEY)}]`);
+  view.add(viewActions, '視点').name(`正面・等倍に戻す   [${keyLabel(RESET_KEY)}]`);
+
+  return {
+    syncViewControls(layerStates, textureStates) {
+      for (const [layer, visible] of layerStates) {
+        state.visibleLayers[layer] = visible;
+        layerControllers.get(layer)?.updateDisplay();
+      }
+      for (const [layer, enabled] of textureStates) {
+        state.texturedLayers[layer] = enabled;
+        textureControllers.get(layer)?.updateDisplay();
+      }
+    },
+  };
 }
