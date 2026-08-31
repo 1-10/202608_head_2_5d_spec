@@ -3,46 +3,48 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>GNM Head 疑似3Dアバター</title>
-    <link rel="stylesheet" href="/src/style.css" />
+    <title>GNM Head Exporter (Web)</title>
   </head>
   <body>
     <div id="app">
       <header id="toolbar">
-        <h1>GNM Head 疑似3Dアバター</h1>
+        <h1>GNM Head Exporter <span class="subtitle">(Web)</span></h1>
         <div class="toolbar-actions">
           <button id="btn-webcam">Webcam</button>
-          <button id="btn-upload">Upload Image</button>
+          <button id="btn-upload">写真を選ぶ</button>
           <input id="file-input" type="file" accept="image/*" hidden />
           <button id="btn-reset">Reset</button>
-          <button id="btn-export" disabled>Export Guest</button>
-          <button id="btn-export-template" disabled>Export Template</button>
+          <button id="btn-export" disabled>guest zip を書き出す</button>
           <span id="status-message" class="status-message"></span>
         </div>
       </header>
 
       <div id="content-row">
         <main id="viewport-row">
-          <section class="viewport-pane" id="pane-head">
-            <div class="pane-label">GNM HEAD</div>
+          <section class="viewport-pane">
+            <div class="pane-label">
+              3D ビュー（ドラッグで回転 / ホイールで拡大）
+              <span class="readouts">
+                Yaw <span id="readout-yaw">0.0</span>&deg; / Pitch
+                <span id="readout-pitch">0.0</span>&deg;
+              </span>
+            </div>
             <div class="pane-canvas" id="canvas-head"></div>
           </section>
+          <pre id="report"></pre>
         </main>
 
         <div id="gui-container"></div>
       </div>
 
-      <footer id="bottom-panel">
-        <div class="bottom-row">
-          <label>Yaw: <span id="readout-yaw">0.0</span>&deg;</label>
-          <label>Pitch: <span id="readout-pitch">0.0</span>&deg;</label>
-          <label><input id="toggle-blink" type="checkbox" checked /> Blink</label>
-        </div>
-      </footer>
+      <section id="inspection-panel">
+        <h2>検査画像（各段の出力そのもの）</h2>
+        <div id="inspection"></div>
+      </section>
     </div>
 
     <video id="webcam-video" autoplay playsinline muted hidden></video>
 
-    <script type="module" src="/src/main.ts"></script>
+    <script type="module" src="/src/presentation/main.ts"></script>
   </body>
 </html>

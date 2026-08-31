@@ -17,10 +17,20 @@ fp32 428MB/タスクのままではブラウザ配布に大きすぎるため、
 
 from __future__ import annotations
 
+import hashlib
 import urllib.request
 from pathlib import Path
 
 BASE_URL = "https://facesyntheticspubwedata.z6.web.core.windows.net/iccv-2025/models"
+
+FP32_SHA256 = "cf993e33ac7d6acac642c59b1512bdf97cd576975e93fe5c9697f3425023b6c1"
+"""落とした fp32 の SHA-256。**照合するのは fp32 だけ**.
+
+手元に残る fp16 / int8 はその場で作った変換結果で、そのバイト列は onnxconverter-common /
+onnxruntime の版で変わる。版が上がるたびに嘘になる値を記録しない。
+
+値は 1-10/2608_Obayashi_GNMHeadExporter の ``tools/fetch_models.py`` と同じ（あちらが正本）。
+"""
 
 # タスク名 → (配布ファイル名, バリアント)。
 # multitask (ViT-L) は1回の推論でdepth/normal/foregroundを同時に返す。
@@ -65,6 +75,17 @@ def prepare(task: str, filename: str, variant: str) -> None:
         url = f"{BASE_URL}/{filename}"
         print(f"downloading {url} ...")
         urllib.request.urlretrieve(url, fp32)
+    digest = hashlib.sha256()
+    with fp32.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    if digest.hexdigest() != FP32_SHA256:
+        raise SystemExit(
+            f"{fp32} のハッシュが合いません\n"
+            f"       期待 {FP32_SHA256}\n"
+            f"       実際 {digest.hexdigest()}\n"
+            "       上流が差し替わったか、途中で切れています。消して撃ち直してください"
+        )
     print(f"{task} fp32: {fp32.stat().st_size // 2**20} MB")
 
     if not fp16.exists():

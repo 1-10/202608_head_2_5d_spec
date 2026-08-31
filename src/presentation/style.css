@@ -1,0 +1,194 @@
+:root {
+  color-scheme: dark;
+  --bg: #14161a;
+  --panel: #1b1d21;
+  --line: #2c3037;
+  --text: #e6e8ea;
+  --muted: #9aa0a6;
+  --accent: #4a9eff;
+  --error: #ff6b6b;
+  font-family: system-ui, -apple-system, 'Segoe UI', 'Hiragino Kaku Gothic ProN', Meiryo, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+}
+
+#app {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+#toolbar {
+  display: flex;
+  align-items: baseline;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+
+#toolbar h1 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+#toolbar .subtitle {
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+button {
+  padding: 6px 12px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: #23262b;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.status-message {
+  font-size: 12px;
+  color: var(--muted);
+  white-space: pre-line;
+}
+
+.status-message.error {
+  color: var(--error);
+}
+
+#content-row {
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+  min-height: 60vh;
+}
+
+#viewport-row {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.viewport-pane {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 360px;
+}
+
+.pane-label {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 10px;
+  font-size: 11px;
+  color: var(--muted);
+  border-bottom: 1px solid var(--line);
+}
+
+.pane-canvas {
+  flex: 1 1 auto;
+  min-height: 0;
+  cursor: grab;
+}
+
+.pane-canvas.dragging {
+  cursor: grabbing;
+}
+
+.pane-canvas canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+#report {
+  margin: 0;
+  padding: 10px 12px;
+  border-top: 1px solid var(--line);
+  background: var(--panel);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--muted);
+  white-space: pre-wrap;
+  max-height: 30vh;
+  overflow: auto;
+}
+
+#gui-container {
+  flex: 0 0 auto;
+  border-left: 1px solid var(--line);
+  background: var(--panel);
+}
+
+#gui-container .lil-gui {
+  --width: 300px;
+}
+
+#inspection-panel {
+  border-top: 1px solid var(--line);
+  padding: 12px 16px 24px;
+}
+
+#inspection-panel h2 {
+  margin: 0 0 10px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+#inspection {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+}
+
+.inspection-item {
+  margin: 0;
+  max-width: 320px;
+}
+
+.inspection-item canvas {
+  display: block;
+  width: 100%;
+  height: auto;
+  border: 1px solid var(--line);
+  background: #000;
+  image-rendering: pixelated;
+}
+
+.inspection-item figcaption {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--muted);
+}

@@ -7,11 +7,15 @@ sample/
 .DS_Store
 Thumbs.db
 desktop.ini
+__pycache__/
 
-# GNM作業ファイル (テスト画像等)。生成済みアセットだけはコミットする
+# アセット生成の入力（tools/fetch_gnm_assets.py が落とす。公式配布物なので再配布しない）
+assets/
+
+# GNM作業ファイル（テスト画像等）。生成済みアセットだけはコミットする
 public/gnm/*
-!public/gnm/gnm_head_lite.bin
-!public/gnm/gnm_expression_decoder.bin
+!public/gnm/gnm_head.gnmb
 
-# DAViD Depthモデル (100MB超のためコミットしない。tools/prepare_david_model.py で生成)
+# DAViD モデル（100MB超のためコミットしない。tools/prepare_david_model.py で生成し
+# Hugging Face Hub へ上げたものをブラウザが直接読む）
 public/david/

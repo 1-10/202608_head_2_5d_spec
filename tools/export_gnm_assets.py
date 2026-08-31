@@ -1,408 +1,689 @@
-# GNM Head (github.com/google/GNM, Apache-2.0) の gnm_head.npz から、
-# ブラウザ用の軽量アセット gnm_head_lite.bin を生成するビルド時スクリプト。
-#
-# 使い方:
-#   git clone --depth 1 https://github.com/google/GNM.git <どこか>
-#   curl -LO https://raw.githubusercontent.com/google-ai-edge/mediapipe/master/mediapipe/modules/face_geometry/data/canonical_face_model.obj
-#   python tools/export_gnm_assets.py <GNM>/gnm/shape/data/versions/v3_0/gnm_head.npz canonical_face_model.obj
-#   → public/gnm/gnm_head_lite.bin (既定) が生成される
-#   .obj (MediaPipe canonical face model, Apache-2.0) を渡すと、468点の密対応表
-#   (Umeyama+TPS整列→GNM表面へ投影) も焼き込まれ、フィット精度が上がる
-#
-# 含まれるもの (見える表面だけに間引く):
-# - skin + eye_exteriors の頂点/三角形サブセット (眼窩内部を除外)
-# - 口腔内 (mouth_sock/歯/歯茎/舌) を別の三角形セットとして同梱。
-#   写真投影を持たず実法線+ライティングで描くため、頭部表面とは別メッシュにする
-# - identity基底の上位K成分 (int16量子化。基底はPCAで分散降順・係数はz-scoreスケール)
-# - HEAD_SPARSE_68 ランドマークのbarycentric定義 (iBUG-68順)
-# - 耳の頂点グループ重み (髪との整合処理用)
-# - joints (neck/head/left_eye/right_eye) のskinning weightsとbind位置のidentity基底
-#   (公式 linear_blend_skinning / joint_positions_bind_pose 用。UnityのLBSに渡す)
-#
-# バイナリ形式: b'GNML' + uint32(jsonバイト長) + JSONヘッダ + ペイロード(4バイト境界)。
-# JSONヘッダに各セクションのオフセット/型を書くので、レイアウトはヘッダが正本。
+"""GNM 公式 npz → ブラウザ用アセット（GNMB content="head_asset"）を生成する.
+
+使い方::
+
+    python tools/fetch_gnm_assets.py     # npz / head_sparse_68.txt / canonical を取得
+    python tools/export_gnm_assets.py    # public/gnm/gnm_head.gnmb を生成
+
+**この生成物は 1-10/2608_Obayashi_GNMHeadExporter の
+``infrastructure/gnm_asset.load_gnm_head_npz`` が npz から作る値と同じもの**を、
+ブラウザが読める形（GNMB コンテナ）にしたものである。あちらは Python が npz を直接
+読めるので変換を持たない。ブラウザは npz を読めないので、この 1 段だけが web 側に
+増える — **web だから必要な差分**であって、内容の差ではない。
+
+正本はあちらの ``infrastructure/gnm_asset.py`` と ``domain/gnm/dense.py``。ここの関数は
+その移植で、**判断（何を読むか・領域の作り方・密対応の作り方）を変えない**。変えたら
+出力が別物になるので、変えるときはあちらと一緒に変えること。
+
+GNMB のバイト配置（あちらの ``infrastructure.gnm_asset`` が正本）::
+
+    magic  "GNMB"  4 bytes ASCII
+    uint32 headerLen                    little endian
+    JSON   header  headerLen bytes      UTF-8
+    payload                             各配列は 4 byte 境界
+
+identity 基底だけ int16 に量子化する
+------------------------------------
+**成分は絞らない**（公式の全成分をその並びのまま持つ）。絞ると「どこで切るか」の判断が
+残り続けるうえ、公式の並びは寄与の厳密な降順ではない。
+
+量子化するのはブラウザへ送るバイト数のため（float32 で 56MB、int16 で 28MB）。あちらは
+量子化しない — ローカルの npz を読むので送る必要がない。フィットへの影響はあちらが
+実測しており（残差の 5 桁目・係数の差 7e-4 = 誤差 146nm）、その測定がこちらの根拠に
+なる。実際の最大誤差はこのスクリプトが毎回表示する。
+"""
+
+from __future__ import annotations
 
 import json
 import struct
 import sys
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
-# identity基底は表情基底と同じく領域ブロック構造で、identity_names は
-#   head_000..head_169 (170) / eyes_170..eyes_172 (3) / teeth_173..teeth_252 (80)
-# の順に並ぶ。先頭K成分を採ると head ブロックの上位Kだけになり、eyes と teeth の
-# ブロックは丸ごと落ちる (「全体でノルム降順」ではない)。
-#
-# それで問題ない理由: teeth_* は歯・歯茎以外の頂点を動かさず (実測: 他の頂点での
-# 最大変位 0.0004mm)、eyes_* は眼球以外を動かさない。フィットは顔表面の468点
-# 対応だけを見るので、これらの係数はデータから一切観測されず、正則化つき
-# 最小二乗では0になる = 落としても描画結果は同じ。
-# 逆に言うと歯の形は常にGNMの平均歯で、個人差は入らない (口を閉じた写真1枚からは
-# 元々復元できない情報)。
-IDENTITY_BASIS_COUNT = 64  # head ブロックの上位64成分
+REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_NPZ = REPOSITORY_ROOT / "assets" / "gnm" / "gnm_head.npz"
+DEFAULT_SPARSE_68 = REPOSITORY_ROOT / "assets" / "gnm" / "head_sparse_68.txt"
+DEFAULT_CANONICAL = REPOSITORY_ROOT / "assets" / "mediapipe" / "canonical_face_model.obj"
+DEFAULT_OUTPUT = REPOSITORY_ROOT / "public" / "gnm" / "gnm_head.gnmb"
 
-# 表情基底は領域ごとにPCA順 (ノルム降順を確認済み)。ランダム表情デモ用に
-# 主要領域の上位成分だけ持つ (瞳孔は正面写真デモでは効果が薄いため除外)。
-# tongueの4成分 (tongue_mean + tongue_000..002) は公式デモGUI
-# (gnm/shape/demos/gnm_head_demo.ipynb) がスライダーとして露出しているのと同じ選び方。
-# GNM Headに顎ジョイントは無く (joint_names = neck/head/left_eye/right_eye)、
-# 舌の姿勢はこの表情成分だけが与える
-EXPRESSION_PICKS = {
-    'left_eye_region': 10,
-    'right_eye_region': 10,
-    'lower_face_region': 20,
-    'tongue': 4,
+MAGIC = b"GNMB"
+GNMB_FORMAT = "GNMB"
+GNMB_FORMAT_VERSION = 1
+GNMB_CONTENT_HEAD_ASSET = "head_asset"
+PAYLOAD_ALIGNMENT = 4
+UV_ORIGIN = "bottom-left"
+
+_DTYPE_TO_TOKEN = {
+    np.dtype("<f4"): "f32",
+    np.dtype("<i2"): "int16",
+    np.dtype("<u2"): "u16",
+    np.dtype("<u4"): "u32",
+    np.dtype("<i4"): "i32",
+    np.dtype("u1"): "u8",
 }
 
-# MediaPipe FaceMesh 468点 → iBUG-68 の対応表 (src/gnmHead.ts と同一の定数)。
-# 密対応構築時の初期整列 (Umeyama+TPS) の制御点に使う
-MEDIAPIPE_IBUG68 = [
-    # 顎ライン。GNMのhead_sparse_68はiBUG 2〜6 (向かって左顎) を空間的に逆順
-    # (顎寄り→耳寄り) で定義しているため、MediaPipe側も149→93の逆順で合わせる
+EXPECTED_MESH_COMPONENT_NAMES: tuple[str, ...] = (
+    "skin",
+    "left_eye",
+    "right_eye",
+    "upper_teeth_and_gums",
+    "lower_teeth_and_gums",
+    "tongue",
+)
+EXPECTED_SPLIT_VERTEX_COUNT = 18437
+IBUG68_POINT_COUNT = 68
+MEDIAPIPE_FACE_MESH_COUNT = 468
+SPARSE_68_WEIGHT_SUM_TOLERANCE = 5e-3
+
+MOUTH_RIM_APERTURE_RING_WEIGHTS = (1.0, 1.0, 0.5)
+EYE_COMPONENT_NAMES = ("left_eye", "right_eye")
+NEIGHBOURHOOD_EDGES = 8.0
+
+MEDIAPIPE_IBUG68: tuple[int, ...] = (
+    # 顎ライン 0-16。index 2〜6 が標準の iBUG 順の逆なのは誤りではない
+    # （GNM の head_sparse_68 が向かって左の顎を顎寄り → 耳寄りで定義している）。
     162, 234, 149, 136, 172, 58, 93, 148, 152, 377, 378, 365, 397, 288, 323, 454, 389,
+    # 眉 17-21（左）/ 22-26（右）
     70, 63, 105, 66, 107, 336, 296, 334, 293, 300,
+    # 鼻梁 27-30 + 鼻底 31-35
     168, 197, 5, 4, 75, 97, 2, 326, 305,
+    # 目 36-41（左）/ 42-47（右）
     33, 160, 158, 133, 153, 144, 362, 385, 387, 263, 373, 380,
+    # 口 外周 48-59 + 内周 60-67
     61, 39, 37, 0, 267, 269, 291, 405, 314, 17, 84, 181, 78, 82, 13, 312, 308, 317, 14, 87,
-]
+)
 
-DENSE_MAX_RESIDUAL_M = 0.008  # 整列後の投影残差がこれを超える点は対応から除外
+IBUG68_CHAINS: tuple[tuple[str, tuple[int, ...], bool], ...] = (
+    ("顎", tuple(range(0, 17)), False),
+    ("眉左", tuple(range(17, 22)), False),
+    ("眉右", tuple(range(22, 27)), False),
+    ("鼻梁", tuple(range(27, 31)), False),
+    ("鼻底", tuple(range(31, 36)), False),
+    ("目左", tuple(range(36, 42)), True),
+    ("目右", tuple(range(42, 48)), True),
+    ("唇外周", tuple(range(48, 60)), True),
+    ("唇内周", tuple(range(60, 68)), True),
+)
+DEGENERATE_EDGE_RATIO = 0.25
+REVERSAL_COSINE = -0.5
+MIN_REVERSED_EDGES = 2
+
+NPZ_KEYS: dict[str, str] = {
+    "version": "読む",
+    "variant": "読む",
+    "template_vertex_positions": "読む",
+    "vertex_identity_basis": "読む",
+    "triangles": "読む",
+    "triangle_uvs": "読む",
+    "vertex_groups": "読む",
+    "vertex_group_names": "読む",
+    "mesh_component_names": "読む",
+    "pose_correctives_regressor": "読まない: v3_0 / head では全要素ゼロ",
+    "expression_basis": "読まない: Exporter は identity だけを求める",
+    "expression_names": "読まない: 同上",
+    "identity_names": "読まない: 係数は index で送る",
+    "skinning_weights": "読まない: Exporter は姿勢を持たない",
+    "joint_regressor": "読まない: 同上",
+    "joint_names": "読まない: 同上",
+    "joint_parent_indices": "読まない: 同上",
+    "joint_identity_basis": "読まない: 同上",
+    "template_joint_positions": "読まない: 同上",
+    "bone_aligned_template_joint_orientations": "読まない: 同上",
+    "mirror_indices": "読まない: 左右対称で色を複製する段を持たない",
+    "quads": "読まない: 三角形の側を使う",
+    "quad_uvs": "読まない: 同上",
+}
+"""公式 npz の全キーと、読む / 読まない理由（正本はあちらの ``NPZ_KEYS``）。
+
+キーが増減したらこのスクリプトが落ちる。落ちたら扱いを決めてから足すこと。
+"""
 
 
+# ---------------------------------------------------------------------------
+# npz → split 空間のメッシュ
+# ---------------------------------------------------------------------------
+def names_of(array: np.ndarray) -> list[str]:
+    return [str(name) for name in array.tolist()]
+
+
+def split_by_face_varying_uv(
+    triangles: np.ndarray, triangle_uvs: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """face-varying UV を per-vertex UV にするため、UV の切れ目で頂点を複製する.
+
+    ``(頂点 index, u, v)`` の辞書順ソートなので ``uv_split_source`` は単調非減少になる。
+    **この単調性は契約** — TS 側の ``splitIndicesOf`` が二分探索で引く。
+    """
+    corner_vertices = triangles.reshape(-1).astype(np.int32)
+    corner_uvs = triangle_uvs.reshape(-1, 2).astype(np.float32)
+
+    key = np.empty(
+        corner_vertices.shape[0],
+        dtype=[("vertex", np.int32), ("u", np.float32), ("v", np.float32)],
+    )
+    key["vertex"] = corner_vertices
+    key["u"] = corner_uvs[:, 0]
+    key["v"] = corner_uvs[:, 1]
+
+    unique_key, inverse = np.unique(key, return_inverse=True)
+    return (
+        inverse.reshape(triangles.shape).astype(np.uint32),
+        unique_key["vertex"].astype(np.uint32),
+        np.stack([unique_key["u"], unique_key["v"]], axis=1).astype(np.float32),
+    )
+
+
+def component_ids(
+    vertex_groups: np.ndarray, vertex_group_names: list[str], mesh_component_names: list[str]
+) -> np.ndarray:
+    """頂点グループからメッシュ構成要素の id（split 前の index 空間）を作る。"""
+    if tuple(mesh_component_names) != EXPECTED_MESH_COMPONENT_NAMES:
+        raise SystemExit(
+            f"mesh_component_names が {tuple(mesh_component_names)}"
+            f"（期待 {EXPECTED_MESH_COMPONENT_NAMES}）。component_id の意味が変わる"
+        )
+    membership = np.stack(
+        [vertex_groups[vertex_group_names.index(name)] > 0 for name in mesh_component_names]
+    )
+    group_count = membership.sum(axis=0)
+    if (group_count == 0).any():
+        raise SystemExit(f"どの構成要素にも属さない頂点が {int((group_count == 0).sum())} 個ある")
+    if (group_count > 1).any():
+        raise SystemExit(f"複数の構成要素に属する頂点が {int((group_count > 1).sum())} 個ある")
+    return np.argmax(membership, axis=0).astype(np.uint8)
+
+
+def photo_only_atlas_region(npz: Any, vertex_group_names: list[str]) -> np.ndarray:
+    """首・胴体を「写真100%か補完100%の二択」にする領域（split 前）。"""
+    positions = np.asarray(npz["template_vertex_positions"])
+    groups = np.asarray(npz["vertex_groups"])
+    chin = groups[vertex_group_names.index("chin_region")] > 0
+    ears = groups[vertex_group_names.index("ears")] > 0
+    if not chin.any() or not ears.any():
+        raise SystemExit("公式GNMの chin_region または ears が空")
+    chin_bottom = float(positions[chin, 1].min())
+    chin_half_width = float(np.abs(positions[chin, 0]).max())
+    ear_bottom = float(positions[ears, 1].min())
+    face_region_names = [name for name in vertex_group_names if name.endswith("_region")]
+    face_region = np.any(
+        np.stack([groups[vertex_group_names.index(name)] > 0 for name in face_region_names]),
+        axis=0,
+    )
+    lower_neck_and_torso = positions[:, 1] < chin_bottom
+    side_neck = (
+        (positions[:, 1] < ear_bottom)
+        & (np.abs(positions[:, 0]) > chin_half_width)
+        & ~face_region
+    )
+    return np.asarray(lower_neck_and_torso | side_neck, dtype=bool)
+
+
+def mouth_aperture_ring_weight(
+    triangles: np.ndarray, lips: np.ndarray, sock: np.ndarray
+) -> np.ndarray:
+    """口腔壁との接続面から唇の中を位相 BFS し、リングごとの重みを立てる。"""
+    neighbours: dict[int, set[int]] = {}
+    seeds: set[int] = set()
+    for triangle in triangles:
+        members = [int(value) for value in triangle]
+        if sock[members].any():
+            seeds.update(vertex for vertex in members if lips[vertex])
+        for index in range(3):
+            first, second = members[index], members[(index + 1) % 3]
+            if lips[first] and lips[second]:
+                neighbours.setdefault(first, set()).add(second)
+                neighbours.setdefault(second, set()).add(first)
+
+    weight = np.zeros(lips.shape[0], dtype=np.float64)
+    visited = set(seeds)
+    frontier = list(seeds)
+    for level_weight in MOUTH_RIM_APERTURE_RING_WEIGHTS:
+        if not frontier:
+            break
+        weight[frontier] = np.maximum(weight[frontier], level_weight)
+        nearer: list[int] = []
+        for vertex in frontier:
+            for neighbour in neighbours.get(vertex, ()):
+                if neighbour not in visited:
+                    visited.add(neighbour)
+                    nearer.append(neighbour)
+        frontier = nearer
+    return weight
+
+
+def mouth_rim_region(npz: Any, vertex_group_names: list[str]) -> np.ndarray:
+    """開口部の縁（唇のインナーロール）の重み 0..1（split 前）。"""
+    groups = np.asarray(npz["vertex_groups"])
+    triangles = np.asarray(npz["triangles"]).reshape(-1, 3)
+    missing = [
+        name for name in ("upper_lip", "lower_lip", "mouth_sock") if name not in vertex_group_names
+    ]
+    if missing:
+        raise SystemExit(f"公式GNMの口まわりのグループが無い: {missing}")
+    lips = np.any(
+        np.stack(
+            [groups[vertex_group_names.index(name)] > 0 for name in ("upper_lip", "lower_lip")]
+        ),
+        axis=0,
+    )
+    sock = groups[vertex_group_names.index("mouth_sock")] > 0
+    if not lips.any() or not sock.any():
+        raise SystemExit("公式GNMの唇グループまたは mouth_sock が空")
+    rim = mouth_aperture_ring_weight(triangles, lips, sock).astype(np.float32)
+    if not rim.any():
+        raise SystemExit("開口部の縁が空（唇と mouth_sock が接していない）")
+    return rim
+
+
+def load_sparse_68(path: Path) -> tuple[np.ndarray, np.ndarray]:
+    """``head_sparse_68.txt`` を読んで (頂点 index (68,3), 重み (68,3)) を返す。"""
+    rows = np.loadtxt(path, dtype=np.float64)
+    if rows.shape != (IBUG68_POINT_COUNT, 6):
+        raise SystemExit(f"head_sparse_68.txt の形が {rows.shape}（期待 (68, 6)）")
+    vertex_indices = rows[:, 0::2]
+    weights = rows[:, 1::2]
+    if not np.array_equal(vertex_indices, np.rint(vertex_indices)):
+        raise SystemExit("頂点 index の列に整数でない値がある")
+    row_sums = weights.sum(axis=1)
+    worst = int(np.argmax(np.abs(row_sums - 1.0)))
+    if abs(row_sums[worst] - 1.0) > SPARSE_68_WEIGHT_SUM_TOLERANCE:
+        raise SystemExit(f"barycentric の行和が 1.0 から離れすぎている: 行 {worst}")
+    return vertex_indices.astype(np.int32), (weights / row_sums[:, None]).astype(np.float32)
+
+
+# ---------------------------------------------------------------------------
+# 密対応（あちらの domain/gnm/dense.py の移植）
+# ---------------------------------------------------------------------------
 def load_canonical_obj(path: Path) -> np.ndarray:
-    """MediaPipe canonical_face_model.obj (頂点i = landmark i, 468頂点) を読む。"""
-    verts = []
-    with open(path, encoding='utf-8') as f:
-        for line in f:
-            if line.startswith('v '):
-                verts.append([float(x) for x in line.split()[1:4]])
-    v = np.asarray(verts, dtype=np.float64)
-    assert v.shape[0] == 468, f'canonical face modelの頂点数が468ではない: {v.shape[0]}'
-    return v
+    """MediaPipe canonical_face_model.obj（頂点 i = landmark i）を読む。"""
+    vertices: list[list[float]] = []
+    with open(path, encoding="utf-8") as handle:
+        for line in handle:
+            if line.startswith("v "):
+                vertices.append([float(value) for value in line.split()[1:4]])
+    points = np.asarray(vertices, dtype=np.float64)
+    if points.shape[0] != MEDIAPIPE_FACE_MESH_COUNT:
+        raise SystemExit(f"canonical の頂点数が {points.shape[0]}（期待 468）")
+    return points
 
 
-def umeyama_similarity(src: np.ndarray, dst: np.ndarray) -> tuple[float, np.ndarray, np.ndarray]:
-    """3D相似変換 (s, R, t) を最小二乗で求める (Umeyama 1991)。"""
-    mu_s = src.mean(0)
-    mu_d = dst.mean(0)
-    sc = src - mu_s
-    dc = dst - mu_d
-    cov = dc.T @ sc / len(src)
-    u, s, vt = np.linalg.svd(cov)
-    d = np.sign(np.linalg.det(u @ vt))
-    diag = np.diag([1.0, 1.0, d])
-    r = u @ diag @ vt
-    scale = np.trace(np.diag(s) @ diag) / (sc ** 2).sum(axis=1).mean()
-    t = mu_d - scale * r @ mu_s
-    return scale, r, t
+def solve_similarity_3d(
+    source: np.ndarray, target: np.ndarray
+) -> tuple[float, np.ndarray, np.ndarray]:
+    """3D 相似変換（Umeyama 1991）。鏡映は許さない（別人の顔になる）。"""
+    source_mean = source.mean(axis=0)
+    target_mean = target.mean(axis=0)
+    centered_source = source - source_mean
+    centered_target = target - target_mean
+    covariance = centered_target.T @ centered_source / len(source)
+    left, singular, right = np.linalg.svd(covariance)
+    reflection = np.diag([1.0, 1.0, np.sign(np.linalg.det(left @ right))])
+    rotation = left @ reflection @ right
+    scale = float(
+        np.trace(np.diag(singular) @ reflection) / (centered_source**2).sum(axis=1).mean()
+    )
+    return scale, rotation, target_mean - scale * rotation @ source_mean
 
 
-def tps_warp(ctrl_src: np.ndarray, ctrl_dst: np.ndarray, points: np.ndarray, reg: float = 1e-6) -> np.ndarray:
-    """3D thin-plate spline (カーネルU(r)=r) で points を warp する。"""
-    n = len(ctrl_src)
+def thin_plate_warp(
+    control_source: np.ndarray,
+    control_target: np.ndarray,
+    points: np.ndarray,
+    regularization: float = 1e-6,
+) -> np.ndarray:
+    """3D thin-plate spline（カーネル ``U(r) = r``）。制御点は厳密に一致する。"""
+    count = len(control_source)
 
-    def kernel(a: np.ndarray, b: np.ndarray) -> np.ndarray:
-        return np.linalg.norm(a[:, None, :] - b[None, :, :], axis=2)
+    def kernel(first: np.ndarray, second: np.ndarray) -> np.ndarray:
+        return np.linalg.norm(first[:, None, :] - second[None, :, :], axis=2)
 
-    k = kernel(ctrl_src, ctrl_src) + np.eye(n) * reg
-    p = np.hstack([np.ones((n, 1)), ctrl_src])
-    a = np.zeros((n + 4, n + 4))
-    a[:n, :n] = k
-    a[:n, n:] = p
-    a[n:, :n] = p.T
-    b = np.zeros((n + 4, 3))
-    b[:n] = ctrl_dst
-    sol = np.linalg.solve(a, b)
-    w, aff = sol[:n], sol[n:]
-    kq = kernel(points, ctrl_src)
-    return kq @ w + np.hstack([np.ones((len(points), 1)), points]) @ aff
+    affine_basis = np.hstack([np.ones((count, 1)), control_source])
+    system = np.zeros((count + 4, count + 4))
+    system[:count, :count] = (
+        kernel(control_source, control_source) + np.eye(count) * regularization
+    )
+    system[:count, count:] = affine_basis
+    system[count:, :count] = affine_basis.T
+    right_hand = np.zeros((count + 4, 3))
+    right_hand[:count] = control_target
+    solution = np.linalg.solve(system, right_hand)
+    bending, affine = solution[:count], solution[count:]
+    return kernel(points, control_source) @ bending + np.hstack(
+        [np.ones((len(points), 1)), points]
+    ) @ affine
 
 
-def project_point_to_triangles(point: np.ndarray, tri_verts: np.ndarray) -> tuple[int, np.ndarray, float]:
-    """点を三角形群へ投影し (三角形index, barycentric, 距離) を返す。tri_verts: (T,3,3)。"""
-    a, b, c = tri_verts[:, 0], tri_verts[:, 1], tri_verts[:, 2]
-    ab = b - a
-    ac = c - a
-    ap = point[None, :] - a
-    d00 = (ab * ab).sum(1)
-    d01 = (ab * ac).sum(1)
-    d11 = (ac * ac).sum(1)
-    d20 = (ap * ab).sum(1)
-    d21 = (ap * ac).sum(1)
-    denom = np.maximum(1e-12, d00 * d11 - d01 * d01)
-    v = (d11 * d20 - d01 * d21) / denom
-    w = (d00 * d21 - d01 * d20) / denom
-    v = np.clip(v, 0, 1)
-    w = np.clip(w, 0, 1)
-    over = v + w > 1
-    scale_over = np.where(over, v + w, 1)
-    v = v / scale_over
-    w = w / scale_over
-    closest = a + ab * v[:, None] + ac * w[:, None]
-    dist = np.linalg.norm(closest - point[None, :], axis=1)
-    ti = int(np.argmin(dist))
-    return ti, np.array([1 - v[ti] - w[ti], v[ti], w[ti]]), float(dist[ti])
+def project_to_triangles(
+    points: np.ndarray, triangle_vertices: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """各点を三角形群の最近点へ落とす（三角形 index / barycentric / 距離）。"""
+    query = np.asarray(points, dtype=np.float64)
+    corner_a = triangle_vertices[:, 0]
+    edge_ab = triangle_vertices[:, 1] - corner_a
+    edge_ac = triangle_vertices[:, 2] - corner_a
+
+    dot_aa = np.einsum("ij,ij->i", edge_ab, edge_ab)
+    dot_ab = np.einsum("ij,ij->i", edge_ab, edge_ac)
+    dot_bb = np.einsum("ij,ij->i", edge_ac, edge_ac)
+    denominator = np.maximum(1e-12, dot_aa * dot_bb - dot_ab * dot_ab)
+
+    offset = query[:, None, :] - corner_a[None, :, :]
+    dot_pa = np.einsum("pij,ij->pi", offset, edge_ab)
+    dot_pb = np.einsum("pij,ij->pi", offset, edge_ac)
+
+    v = np.clip((dot_bb * dot_pa - dot_ab * dot_pb) / denominator, 0.0, 1.0)
+    w = np.clip((dot_aa * dot_pb - dot_ab * dot_pa) / denominator, 0.0, 1.0)
+    overflow = np.maximum(1.0, v + w)
+    v /= overflow
+    w /= overflow
+
+    closest = corner_a[None] + edge_ab[None] * v[..., None] + edge_ac[None] * w[..., None]
+    distances = np.linalg.norm(closest - query[:, None, :], axis=2)
+    chosen = np.argmin(distances, axis=1)
+    rows = np.arange(len(query))
+    picked_v = v[rows, chosen]
+    picked_w = w[rows, chosen]
+    return (
+        chosen,
+        np.stack([1.0 - picked_v - picked_w, picked_v, picked_w], axis=1),
+        distances[rows, chosen],
+    )
+
+
+def assert_landmark_chain_orientation(model_xyz: np.ndarray, other_xyz: np.ndarray) -> None:
+    """68 点の対応が交差していないことを確かめる（あちらの domain/gnm/fit.py の移植）。"""
+    violations: list[str] = []
+    for name, chain, is_ring in IBUG68_CHAINS:
+        heads = np.asarray(chain)
+        tails = np.roll(heads, -1) if is_ring else heads[1:]
+        heads = heads if is_ring else heads[:-1]
+
+        model_edges = model_xyz[tails] - model_xyz[heads]
+        other_edges = other_xyz[tails] - other_xyz[heads]
+        model_lengths = np.linalg.norm(model_edges, axis=1)
+        other_lengths = np.linalg.norm(other_edges, axis=1)
+        usable = (model_lengths > DEGENERATE_EDGE_RATIO * np.median(model_lengths)) & (
+            other_lengths > DEGENERATE_EDGE_RATIO * np.median(other_lengths)
+        )
+        cosines = np.einsum("ij,ij->i", model_edges, other_edges) / np.where(
+            usable, model_lengths * other_lengths, 1.0
+        )
+        reversed_edges = np.flatnonzero(usable & (cosines < REVERSAL_COSINE))
+        if reversed_edges.size < MIN_REVERSED_EDGES:
+            continue
+        violations += [
+            f"{name}: 点 {heads[edge]} → {tails[edge]} の差分が逆を向いている"
+            f"（cos {cosines[edge]:+.3f}）"
+            for edge in reversed_edges
+        ]
+    if violations:
+        raise SystemExit(
+            "68 点の対応が交差している:\n" + "\n".join(f"  - {line}" for line in violations)
+        )
 
 
 def build_dense_correspondence(
     canonical: np.ndarray,
-    gnm_positions: np.ndarray,
-    gnm_triangles: np.ndarray,
-    lm_indices: np.ndarray,
-    lm_weights: np.ndarray,
-    exclude_vertex_mask: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """canonical 468頂点をGNM表面へ整列・投影し、barycentric対応表を作る。
+    template: np.ndarray,
+    triangles: np.ndarray,
+    uv_split_source: np.ndarray,
+    component_id: np.ndarray,
+    component_names: tuple[str, ...],
+    sparse68_indices: np.ndarray,
+    sparse68_weights: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float]:
+    """canonical の 468 点を GNM 平均顔の表面へ写して barycentric 対応を作る.
 
-    返り値: (mpIndices uint16 (M,), triIndices (M,3) uint32, weights (M,3) f32, conf (M,) f32)
+    戻り値:
+        ``(mediapipe_indices, vertex_indices（split 前）, weights, residual_meters,
+        edge_meters)``
     """
-    gnm68 = (gnm_positions[lm_indices] * lm_weights[..., None]).sum(axis=1)  # (68,3)
-    can68 = canonical[MEDIAPIPE_IBUG68]
+    split_source = np.asarray(uv_split_source, dtype=np.int64)
+    resolved = np.searchsorted(split_source, sparse68_indices.astype(np.int64), side="left")
+    if not np.array_equal(split_source[resolved], sparse68_indices):
+        raise SystemExit("uv_split_source から split 前 index を引き直せなかった")
+    gnm68 = np.einsum("ijk,ij->ik", template[resolved], sparse68_weights.astype(np.float64))
 
-    scale, r, t = umeyama_similarity(can68, gnm68)
-    aligned = canonical @ (scale * r).T + t
+    picks = np.asarray(MEDIAPIPE_IBUG68, dtype=np.int64)
+    scale, rotation, translation = solve_similarity_3d(canonical[picks], gnm68)
+    aligned = canonical @ (scale * rotation).T + translation
+    # 交差していると次の TPS が「正しく」補間して面が折り返る。例外にならないので止める。
+    assert_landmark_chain_orientation(gnm68, aligned[picks])
+    warped = thin_plate_warp(aligned[picks], gnm68, aligned)
 
-    # 対応表の並び検証: iBUGの連続チェーン (顎・眉・鼻・目・唇) に沿って、
-    # canonical側とGNM側の差分ベクトルが同方向 (内積>0) であることを確認する。
-    # 逆順セグメントがあると対応が交差し、TPSがそれを「正しく」補間して面が折り返る
-    # (実例: GNMのhead_sparse_68は左顎iBUG 2〜6が空間的に逆順。対応表側で逆順に合わせ済み)
-    chains = [
-        list(range(0, 17)),               # 顎
-        list(range(17, 22)),              # 眉左
-        list(range(22, 27)),              # 眉右
-        list(range(27, 31)),              # 鼻梁
-        list(range(31, 36)),              # 鼻底
-        list(range(36, 42)) + [36],       # 目左 (リング)
-        list(range(42, 48)) + [42],       # 目右 (リング)
-        list(range(48, 60)) + [48],       # 唇外周 (リング)
-        list(range(60, 68)) + [60],       # 唇内周 (リング)
+    eye_components = [
+        index for index, name in enumerate(component_names) if name in EYE_COMPONENT_NAMES
     ]
-    ctrl = aligned[MEDIAPIPE_IBUG68]
-    reversed_pairs = []
-    for chain in chains:
-        for a, b in zip(chain, chain[1:]):
-            dg = gnm68[b] - gnm68[a]
-            dc = ctrl[b] - ctrl[a]
-            # 近接点 (<1mm) は方向が定まらないため除外
-            if np.linalg.norm(dg) < 1e-3 or np.linalg.norm(dc) < 1e-3:
-                continue
-            if float(dg @ dc) < 0:
-                reversed_pairs.append((a, b))
-    if reversed_pairs:
-        detail = ', '.join(f'iBUG{a}-{b}' for a, b in reversed_pairs)
-        raise SystemExit(f'対応の並び反転を検出 ({len(reversed_pairs)}区間): {detail}\n'
-                         'MEDIAPIPE_IBUG68 の並びとGNM head_sparse_68 の並びを確認してください')
+    if not eye_components:
+        raise SystemExit(f"眼球の構成要素が見つからない: {component_names}")
+    excluded = np.isin(component_id, eye_components)
+    usable = ~excluded[triangles].any(axis=1)
+    target_triangles = np.asarray(triangles, dtype=np.int64)[usable]
+    if target_triangles.size == 0:
+        raise SystemExit("投影先の三角形が無い（除外が広すぎる）")
+    corners = template[target_triangles]
+    centroids = corners.mean(axis=1)
 
-    # 68点対応を厳密一致させるTPSで残差 (頬・額のトポロジ差) を吸収する
-    aligned = tps_warp(aligned[MEDIAPIPE_IBUG68], gnm68, aligned)
-
-    # 投影対象: 除外グループ (眼球・耳) を含まない三角形のみ
-    tri_ok = ~exclude_vertex_mask[gnm_triangles].any(axis=1)
-    tris = gnm_triangles[tri_ok]
-    tri_verts_all = gnm_positions[tris]
-    centroids = tri_verts_all.mean(axis=1)
-
-    mp_out, tri_out, w_out, conf_out = [], [], [], []
-    for mp_idx in range(468):
-        p = aligned[mp_idx]
-        near = np.linalg.norm(centroids - p[None, :], axis=1) < 0.03
-        if not near.any():
-            continue
-        ti_local, bary, dist = project_point_to_triangles(p, tri_verts_all[near])
-        if dist > DENSE_MAX_RESIDUAL_M:
-            continue
-        tri = tris[np.nonzero(near)[0][ti_local]]
-        mp_out.append(mp_idx)
-        tri_out.append(tri)
-        w_out.append(bary)
-        conf_out.append(1.0 / (1.0 + dist / 0.002))
-
-    return (
-        np.asarray(mp_out, dtype=np.uint16),
-        np.asarray(tri_out, dtype=np.uint32),
-        np.asarray(w_out, dtype=np.float32),
-        np.asarray(conf_out, dtype=np.float32),
-    )
-
-
-def main() -> None:
-    if len(sys.argv) < 2:
-        print(__doc__)
-        sys.exit(1)
-    npz_path = Path(sys.argv[1])
-    canonical_path = None
-    out_path = Path(__file__).parent.parent / 'public' / 'gnm' / 'gnm_head_lite.bin'
-    for arg in sys.argv[2:]:
-        if arg.endswith('.obj'):
-            canonical_path = Path(arg)
-        else:
-            out_path = Path(arg)
-
-    # allow_pickle=False (既定): npzは素のndarrayのみでpickleを含まない。
-    # 入力はGoogle公式リポジトリ配布の gnm_head.npz を想定。
-    d = np.load(npz_path)
-    group_names = [str(n) for n in d['vertex_group_names']]
-    groups = d['vertex_groups']
-
-    def group(name: str) -> np.ndarray:
-        return groups[group_names.index(name)]
-
-    # 口腔内 = 口腔壁 + 歯 + 歯茎 + 舌。開口時に実ジオメトリとして見せる。
-    # 頭部表面と同じ頂点配列・同じ基底に乗せる (顎の開閉は lower_face_region の
-    # 表情基底が歯茎・舌・口腔壁を動かし、上顎の歯だけ変位0 = 解剖学的に正しい)
-    mouth_interior = (
-        (group('mouth_sock') > 0.5)
-        | (group('teeth') > 0.5)
-        | (group('gums') > 0.5)
-        | (group('tongue') > 0.5)
-    )
-    # skin_exteriorではなくskin全体を使う。skin_exteriorは鼻孔内部を含まず、
-    # 鼻孔がメッシュの穴 (黒い点) として見えるため
-    vertex_mask = (group('skin') > 0.5) | (group('eye_exteriors') > 0.5) | mouth_interior
-    old_to_new = np.full(len(vertex_mask), -1, dtype=np.int64)
-    old_to_new[vertex_mask] = np.arange(vertex_mask.sum())
-
-    positions = d['template_vertex_positions'][vertex_mask].astype(np.float32)  # (N,3) メートル
-    tris_all = d['triangles']
-    tri_keep = vertex_mask[tris_all].all(axis=1)
-    tris_kept = tris_all[tri_keep]
-    # 三角形を2セットへ分ける: 口腔内頂点を1つでも含むものは口腔内メッシュ側。
-    # こうすると頭部表面側は「口腔壁を除いた従来の集合」と完全に一致し、
-    # 口の開口境界リング (computeMouthInteriorWeightsが使う唯一の境界辺) も保たれる
-    is_interior_tri = mouth_interior[tris_kept].any(axis=1)
-    triangles = old_to_new[tris_kept[~is_interior_tri]].astype(np.uint32)  # (T,3) 頭部表面
-    interior_triangles = old_to_new[tris_kept[is_interior_tri]].astype(np.uint32)  # (Ti,3) 口腔内
-
-    basis_full = d['vertex_identity_basis'][:IDENTITY_BASIS_COUNT][:, vertex_mask, :]  # (K,N,3)
-    scales = np.abs(basis_full).max(axis=(1, 2)).astype(np.float32)  # (K,)
-    scales[scales == 0] = 1.0
-    basis_q = np.round(basis_full / scales[:, None, None] * 32767).astype(np.int16)
-
-    lm = np.loadtxt(npz_path.parent.parent.parent / 'landmarks' / 'head_sparse_68.txt')
-    lm_idx_old = lm[:, 0::2].astype(np.int64)
-    lm_w = lm[:, 1::2].astype(np.float32)
-    assert vertex_mask[lm_idx_old].all(), 'ランドマーク頂点がサブセット外です'
-    lm_idx = old_to_new[lm_idx_old].astype(np.uint32)
-
-    ear_weight = np.clip(group('ears')[vertex_mask] * 255, 0, 255).astype(np.uint8)
-    # 眼球グループ重み (現在ランタイム未使用。眼球分離を試行した名残 — 再挑戦用に同梱)
-    eye_weight = np.clip(group('eyes')[vertex_mask] * 255, 0, 255).astype(np.uint8)
-    # 鼻孔の内壁 = skinに含まれるがskin_exteriorに含まれない鼻先近傍の頂点。
-    # 穴のジオメトリは角度によって黒い穴/影として破綻し、写真の鼻孔の暗さだけで
-    # 十分表現できるため、ランタイムで平滑化して膜状に塞ぐ対象としてマークする
-    interior = (group('skin') > 0.5) & (group('skin_exterior') < 0.5)
-    lm_pos = (d['template_vertex_positions'][lm_idx_old] * lm_w[..., None]).sum(axis=1)
-    nose_tip = lm_pos[30]  # iBUG-68の30番 = 鼻先
-    dist = np.linalg.norm(d['template_vertex_positions'] - nose_tip, axis=1)
-    # 口腔壁もskin\skin_exteriorかつ鼻先3cm圏に入るため明示的に除く (塞ぐ対象は鼻孔だけ)
-    nostril = interior & (dist < 0.03) & ~mouth_interior
-    nostril_weight = (nostril[vertex_mask] * 255).astype(np.uint8)
-    print(f'鼻孔内壁: {int(nostril[vertex_mask].sum())} 頂点 / 眼球: {int((eye_weight >= 128).sum())} 頂点')
-
-    # 口腔内のパーツID (色分け用)。歯∩歯茎は歯を優先 (露出面が歯)
-    part = np.zeros(len(vertex_mask), dtype=np.uint8)
-    part[group('gums') > 0.5] = 3
-    part[group('teeth') > 0.5] = 2
-    part[group('tongue') > 0.5] = 4
-    part[group('mouth_sock') > 0.5] = 1
-    mouth_part_id = part[vertex_mask]
-    counts = {n: int((mouth_part_id == i).sum()) for i, n in enumerate(['-', '口腔壁', '歯', '歯茎', '舌'])}
-    print(f'口腔内: {int(mouth_interior[vertex_mask].sum())} 頂点 / {len(interior_triangles)} 三角形 '
-          f'({counts["口腔壁"]}/{counts["歯"]}/{counts["歯茎"]}/{counts["舌"]})')
-
-    # joints (neck/head/left_eye/right_eye)。公式 gnm_common.py の
-    # linear_blend_skinning / joint_positions_bind_pose に渡すデータをそのまま持つ:
-    # - skinWeights: (N,J) 頂点ごとの関節重み (公式は (J,V)。転置してサブセット)
-    # - jointIdentityBasis: (K,J,3) 関節bind位置のidentity基底 (identity基底と同じ上位K成分)
-    # - templateJointPositions / jointNames / jointParentIndices はヘッダJSONへ
-    skin_weights = d['skinning_weights'][:, vertex_mask].T.astype(np.float32)  # (N,J)
-    joint_identity_basis = d['joint_identity_basis'][:IDENTITY_BASIS_COUNT].astype(np.float32)  # (K,J,3)
-    joint_names = [str(n) for n in d['joint_names']]
-    print(f'joints: {joint_names} / 重み列和 {skin_weights.sum(axis=1).min():.4f}〜{skin_weights.sum(axis=1).max():.4f}')
-
-    expr_names = [str(n) for n in d['expression_names']]
-    expr_indices = []
-    for prefix, count in EXPRESSION_PICKS.items():
-        expr_indices += [i for i, n in enumerate(expr_names) if n.startswith(prefix)][:count]
-    expr_full = d['expression_basis'][expr_indices][:, vertex_mask, :]  # (M,N,3)
-    expr_scales = np.abs(expr_full).max(axis=(1, 2)).astype(np.float32)
-    expr_scales[expr_scales == 0] = 1.0
-    expr_q = np.round(expr_full / expr_scales[:, None, None] * 32767).astype(np.int16)
-
-    # 密対応 (MediaPipe 468点 → GNM表面barycentric)。canonical_face_model.obj があれば構築
-    dense = None
-    if canonical_path is not None:
-        canonical = load_canonical_obj(canonical_path)
-        exclude = (group('ears') > 0.5) | (group('eyes') > 0.5)
-        dense = build_dense_correspondence(
-            canonical, positions.astype(np.float64), triangles.astype(np.int64), lm_idx.astype(np.int64), lm_w, exclude[vertex_mask],
+    # 長さの基準はメッシュ自身の辺。アセットの解像度が変わっても意味が変わらない。
+    edge = float(
+        np.median(
+            np.concatenate(
+                [
+                    np.linalg.norm(corners[:, (corner + 1) % 3] - corners[:, corner], axis=1)
+                    for corner in range(3)
+                ]
+            )
         )
-        mp_idx_arr, dense_tri, dense_w, dense_conf = dense
-        # フィット重みは投影信頼度のみ (意味的な手決め重みは持たない —
-        # 恣意的な数値がフィットを歪める疑いがあり、素の最小二乗と比較するため)
-        dense_weight = dense_conf.astype(np.float32)
-        print(f'密対応: {len(mp_idx_arr)}/468 点 (残差>{DENSE_MAX_RESIDUAL_M*1000:.0f}mm除外, 重み=信頼度のみ)')
+    )
+    neighbourhood = NEIGHBOURHOOD_EDGES * edge
 
-    sections = {
-        'positions': positions,       # float32 (N,3)
-        'triangles': triangles,       # uint32 (T,3)
-        'identityBasisQ': basis_q,    # int16 (K,N,3)
-        'landmarkIndices': lm_idx,    # uint32 (68,3)
-        'landmarkWeights': lm_w,      # float32 (68,3)
-        'earWeight': ear_weight,      # uint8 (N,)
-        'eyeWeight': eye_weight,      # uint8 (N,) 眼球グループ重み
-        'nostrilWeight': nostril_weight,  # uint8 (N,) 鼻孔内壁 (平滑化で塞ぐ対象)
-        'interiorTriangles': interior_triangles,  # uint32 (Ti,3) 口腔内メッシュ
-        'mouthPartId': mouth_part_id,  # uint8 (N,) 0=なし 1=口腔壁 2=歯 3=歯茎 4=舌
-        'expressionBasisQ': expr_q,   # int16 (M,N,3)
-        'skinWeights': skin_weights,  # float32 (N,J) LBS頂点重み
-        'jointIdentityBasis': joint_identity_basis,  # float32 (K,J,3)
-    }
-    if dense is not None:
-        sections['denseMpIndices'] = dense[0]      # uint16 (M,) MediaPipe landmark index
-        sections['denseTriIndices'] = dense[1]     # uint32 (M,3)
-        sections['denseBaryWeights'] = dense[2]    # float32 (M,3)
-        sections['denseFitWeights'] = dense_weight  # float32 (M,) フィット重み (投影信頼度)
+    mediapipe_indices: list[int] = []
+    vertex_indices: list[np.ndarray] = []
+    weights: list[np.ndarray] = []
+    residuals: list[float] = []
+    for index in range(MEDIAPIPE_FACE_MESH_COUNT):
+        near = np.flatnonzero(np.linalg.norm(centroids - warped[index], axis=1) < neighbourhood)
+        if near.size == 0:
+            continue
+        chosen, barycentric, distance = project_to_triangles(
+            warped[index : index + 1], corners[near]
+        )
+        mediapipe_indices.append(index)
+        vertex_indices.append(target_triangles[near[chosen[0]]])
+        weights.append(barycentric[0])
+        residuals.append(float(distance[0]))
 
-    payload = bytearray()
-    section_meta = {}
-    for name, arr in sections.items():
-        if len(payload) % 4:
-            payload.extend(b'\x00' * (4 - len(payload) % 4))
-        raw = np.ascontiguousarray(arr).tobytes()
-        section_meta[name] = {'offset': len(payload), 'byteLength': len(raw), 'dtype': str(arr.dtype)}
-        payload.extend(raw)
+    if not mediapipe_indices:
+        raise SystemExit("対応が 1 点も付かなかった（整列が壊れている）")
+    return (
+        np.asarray(mediapipe_indices, dtype=np.uint16),
+        # split 空間の index を split 前へ戻す（TS 側が split 前で受ける）。
+        split_source[np.asarray(vertex_indices, dtype=np.int64)].astype(np.int32),
+        np.asarray(weights, dtype=np.float32),
+        np.asarray(residuals, dtype=np.float32),
+        edge,
+    )
+
+
+# ---------------------------------------------------------------------------
+# GNMB コンテナ
+# ---------------------------------------------------------------------------
+def build_gnmb_container_bytes(
+    content: str, arrays: dict[str, np.ndarray], metadata: dict[str, Any]
+) -> bytes:
+    """GNMB bin の全バイトを返す（``arrays`` の並びがそのまま payload の並び）。"""
+    entries: dict[str, Any] = {}
+    chunks: list[bytes] = []
+    offset = 0
+    for name, array in arrays.items():
+        token = _DTYPE_TO_TOKEN.get(array.dtype)
+        if token is None:
+            raise SystemExit(f"{name} の dtype {array.dtype} は GNMB で表せない")
+        padding = -offset % PAYLOAD_ALIGNMENT
+        if padding:
+            chunks.append(b"\0" * padding)
+            offset += padding
+        data = np.ascontiguousarray(array).tobytes()
+        entries[name] = {
+            "offset": offset,
+            "byteLength": len(data),
+            "dtype": token,
+            "shape": list(array.shape),
+        }
+        chunks.append(data)
+        offset += len(data)
 
     header = {
-        'source': 'google/GNM gnm_head.npz v3_0 (Apache-2.0)',
-        'vertexCount': int(positions.shape[0]),
-        'triangleCount': int(triangles.shape[0]),
-        'interiorTriangleCount': int(interior_triangles.shape[0]),
-        'identityBasisCount': IDENTITY_BASIS_COUNT,
-        'identityBasisScales': [float(s) for s in scales],
-        'expressionBasisCount': len(expr_indices),
-        'expressionBasisScales': [float(s) for s in expr_scales],
-        'expressionNames': [expr_names[i] for i in expr_indices],
-        'landmarkCount': int(lm_idx.shape[0]),
-        'denseLandmarkCount': int(len(dense[0])) if dense is not None else 0,
-        'jointNames': joint_names,
-        'jointParentIndices': [int(p) for p in d['joint_parent_indices']],
-        'templateJointPositions': [[float(v) for v in row] for row in d['template_joint_positions']],
-        'sections': section_meta,
+        "format": GNMB_FORMAT,
+        "version": GNMB_FORMAT_VERSION,
+        "content": content,
+        "uv_origin": UV_ORIGIN,
+        **metadata,
+        "arrays": entries,
     }
-    header_bytes = json.dumps(header).encode('utf-8')
-
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(out_path, 'wb') as f:
-        f.write(b'GNML')
-        f.write(struct.pack('<I', len(header_bytes)))
-        f.write(header_bytes)
-        f.write(payload)
-
-    total_mb = out_path.stat().st_size / 1e6
-    print(f'{out_path} を生成しました: 頂点 {positions.shape[0]:,} / 三角形 {triangles.shape[0]:,} / 基底 {IDENTITY_BASIS_COUNT} / {total_mb:.1f} MB')
+    header_bytes = json.dumps(header, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return b"".join([MAGIC, struct.pack("<I", len(header_bytes)), header_bytes, *chunks])
 
 
-if __name__ == '__main__':
+# ---------------------------------------------------------------------------
+def main() -> None:
+    arguments = sys.argv[1:]
+    npz_path = Path(arguments[0]) if len(arguments) > 0 else DEFAULT_NPZ
+    sparse_path = Path(arguments[1]) if len(arguments) > 1 else DEFAULT_SPARSE_68
+    canonical_path = Path(arguments[2]) if len(arguments) > 2 else DEFAULT_CANONICAL
+    output_path = Path(arguments[3]) if len(arguments) > 3 else DEFAULT_OUTPUT
+
+    for label, path in (
+        ("gnm_head.npz", npz_path),
+        ("head_sparse_68.txt", sparse_path),
+        ("canonical_face_model.obj", canonical_path),
+    ):
+        if not path.is_file():
+            raise SystemExit(
+                f"{label} が無い: {path}\n"
+                "  python tools/fetch_gnm_assets.py で取得してください"
+            )
+
+    with np.load(npz_path, allow_pickle=False) as npz:
+        actual = set(npz.files)
+        known = set(NPZ_KEYS)
+        if actual != known:
+            raise SystemExit(
+                f"npz のキーが想定と違う: 増えた={sorted(actual - known)}"
+                f" 消えた={sorted(known - actual)}。NPZ_KEYS で扱いを決めてから進めること"
+            )
+        gnm_version = str(npz["version"])
+        gnm_variant = str(npz["variant"])
+        vertex_group_names = names_of(npz["vertex_group_names"])
+        mesh_component_names = names_of(npz["mesh_component_names"])
+
+        triangles, uv_split_source, vertex_uvs = split_by_face_varying_uv(
+            npz["triangles"], npz["triangle_uvs"]
+        )
+        if uv_split_source.shape[0] != EXPECTED_SPLIT_VERTEX_COUNT:
+            raise SystemExit(
+                f"per-vertex UV 化後の頂点数が {uv_split_source.shape[0]}"
+                f"（期待 {EXPECTED_SPLIT_VERTEX_COUNT}）。split かアセットが変わっている"
+            )
+        source = uv_split_source.astype(np.int64)
+        if np.unique(source).size != int(source[-1]) + 1:
+            raise SystemExit("uv_split_source に現れない公式頂点がある")
+
+        template = npz["template_vertex_positions"][source].astype(np.float32)
+        component = component_ids(
+            npz["vertex_groups"], vertex_group_names, mesh_component_names
+        )[source]
+        ear_region = (npz["vertex_groups"][vertex_group_names.index("ears")] > 0)[source]
+        photo_only = photo_only_atlas_region(npz, vertex_group_names)[source]
+        rim = mouth_rim_region(npz, vertex_group_names)[source]
+        identity_basis = np.ascontiguousarray(
+            npz["vertex_identity_basis"][:, source], dtype=np.float32
+        )
+
+    sparse68_indices, sparse68_weights = load_sparse_68(sparse_path)
+    canonical = load_canonical_obj(canonical_path)
+    (
+        dense_mediapipe,
+        dense_vertices,
+        dense_weights,
+        dense_residuals,
+        dense_edge,
+    ) = build_dense_correspondence(
+        canonical,
+        template.astype(np.float64),
+        triangles.astype(np.int64),
+        uv_split_source,
+        component,
+        tuple(mesh_component_names),
+        sparse68_indices,
+        sparse68_weights,
+    )
+    missing = [index for index in MEDIAPIPE_IBUG68 if index not in set(dense_mediapipe.tolist())]
+    if missing:
+        raise SystemExit(
+            f"密対応に iBUG 68 の点が {len(missing)} 個足りない（MediaPipe index {missing}）"
+        )
+
+    # 成分ごとの絶対最大で int16 へ。値 = q * scale / 32767。
+    scales = np.abs(identity_basis).max(axis=(1, 2)).astype(np.float64)
+    scales[scales == 0.0] = 1.0
+    quantized = np.rint(identity_basis / scales[:, None, None] * 32767.0).astype(np.int16)
+    error = float(
+        np.abs(
+            quantized.astype(np.float64) * scales[:, None, None] / 32767.0 - identity_basis
+        ).max()
+    )
+
+    arrays: dict[str, np.ndarray] = {
+        "templateVertexPositions": template,
+        "vertexUvs": vertex_uvs,
+        "triangles": triangles,
+        "uvSplitSource": uv_split_source,
+        "componentId": component.astype(np.uint8),
+        "earRegion": ear_region.astype(np.uint8),
+        "atlasPhotoOnlyRegion": photo_only.astype(np.uint8),
+        "mouthRimRegion": rim.astype(np.float32),
+        "identityBasisQ": quantized,
+        "sparse68VertexIndices": sparse68_indices.astype(np.int32),
+        "sparse68Weights": sparse68_weights.astype(np.float32),
+        "denseMediapipeIndices": dense_mediapipe.astype(np.uint16),
+        "denseVertexIndices": dense_vertices.astype(np.int32),
+        "denseWeights": dense_weights.astype(np.float32),
+        "denseResidualMeters": dense_residuals.astype(np.float32),
+    }
+    metadata: dict[str, Any] = {
+        "source": (
+            f"google/GNM gnm_head.npz (version={gnm_version},"
+            f" variant={gnm_variant}, Apache-2.0)"
+        ),
+        "gnm_version": gnm_version,
+        "gnm_variant": gnm_variant,
+        "component_names": list(mesh_component_names),
+        "identity_basis_scales": [float(value) for value in scales],
+        "dense_edge_meters": dense_edge,
+    }
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_bytes(build_gnmb_container_bytes(GNMB_CONTENT_HEAD_ASSET, arrays, metadata))
+
+    print(
+        f"{output_path} を生成しました\n"
+        f"  split 頂点 {template.shape[0]:,} / 三角形 {triangles.shape[0]:,}\n"
+        f"  identity 成分 {identity_basis.shape[0]}"
+        f"（int16 量子化の最大誤差 {error * 1e9:.1f} nm）\n"
+        f"  密対応 {dense_mediapipe.shape[0]}/468 点"
+        f"（辺の中央値 {dense_edge * 1000:.2f} mm /"
+        f" 残差 中央 {float(np.median(dense_residuals)) * 1000:.2f} mm"
+        f" 最大 {float(dense_residuals.max()) * 1000:.2f} mm）\n"
+        f"  口腔縁 {int((rim > 0).sum()):,} 頂点 /"
+        f" 写真専用領域 {int(photo_only.sum()):,} 頂点 /"
+        f" 耳 {int(ear_region.sum()):,} 頂点\n"
+        f"  {output_path.stat().st_size / 1e6:.1f} MB"
+    )
+
+
+if __name__ == "__main__":
     main()

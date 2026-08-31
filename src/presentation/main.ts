@@ -1,0 +1,274 @@
+// 入口。UI 配線・書き出しの起動・3Dビューと検査画像の表示。
+//
+// **ここに判断を置かない。** 失敗時の扱い（どの段で何が起きて、どうすればよいか）は
+// `application/exportGuest.describeFailure` が持ち、パラメータの既定値と範囲は
+// `application/settings` が持つ。ここがするのは、それを画面へ出すことだけ。
+
+import './style.css';
+import { bakeReport } from '../domain/atlas/bake';
+import { LAYER_ORDER, buildDebugScene } from '../domain/debugScene';
+import { EYE_SIDES } from '../domain/eyes/layout';
+import { irisToLimbusRatio } from '../domain/eyes/bake';
+import { depthCoverage } from '../domain/hair/shell';
+import { PhotoRgb } from '../domain/photo';
+import { ExportOutcome, describeFailure, isPipelineError } from '../application/exportGuest';
+import { Exporter, buildGuestZip } from '../composition';
+import { createPanelState, setupGui, toExportSettings } from './gui';
+import { InputManager } from './input';
+import { renderInspection } from './inspectionView';
+import { OrbitDragController } from './interaction';
+import { Viewer } from './viewer';
+
+const elements = {
+  buttonWebcam: requireElement<HTMLButtonElement>('btn-webcam'),
+  buttonUpload: requireElement<HTMLButtonElement>('btn-upload'),
+  buttonReset: requireElement<HTMLButtonElement>('btn-reset'),
+  buttonExport: requireElement<HTMLButtonElement>('btn-export'),
+  fileInput: requireElement<HTMLInputElement>('file-input'),
+  status: requireElement<HTMLElement>('status-message'),
+  report: requireElement<HTMLElement>('report'),
+  viewport: requireElement<HTMLElement>('canvas-head'),
+  yawReadout: requireElement<HTMLElement>('readout-yaw'),
+  pitchReadout: requireElement<HTMLElement>('readout-pitch'),
+  video: requireElement<HTMLVideoElement>('webcam-video'),
+  guiContainer: requireElement<HTMLElement>('gui-container'),
+  inspection: requireElement<HTMLElement>('inspection'),
+};
+
+function requireElement<T extends HTMLElement>(id: string): T {
+  const element = document.getElementById(id);
+  if (element === null) throw new Error(`要素 ${id} が index.html に無い`);
+  return element as T;
+}
+
+const panelState = createPanelState();
+const exporter = new Exporter();
+const inputManager = new InputManager(elements.video);
+const viewer = new Viewer(elements.viewport);
+
+let photo: PhotoRgb | null = null;
+let outcome: ExportOutcome | null = null;
+let busy = false;
+
+setupGui(elements.guiContainer, panelState, { onLayersChanged: () => applyLayers() });
+
+new OrbitDragController([elements.viewport], {
+  getYaw: () => viewer.yawDeg,
+  setYaw: (value) => {
+    viewer.yawDeg = value;
+    viewer.applyOrientation();
+    updateOrientationReadout();
+  },
+  // 3Dビューは検査用なので回転範囲を制限しない（Yaw ±15° の品質目標は写真投影の話で、
+  // 「どこまで回して確認してよいか」ではない）。
+  getMaxYawDeg: () => 180,
+  getPitch: () => viewer.pitchDeg,
+  setPitch: (value) => {
+    viewer.pitchDeg = value;
+    viewer.applyOrientation();
+    updateOrientationReadout();
+  },
+  getMaxPitchDeg: () => 89,
+  getZoom: () => viewer.zoom,
+  setZoom: (value) => {
+    viewer.zoom = value;
+    viewer.applyOrientation();
+  },
+});
+
+function setStatus(message: string, isError = false): void {
+  elements.status.textContent = message;
+  elements.status.classList.toggle('error', isError);
+}
+
+function updateOrientationReadout(): void {
+  elements.yawReadout.textContent = viewer.yawDeg.toFixed(1);
+  elements.pitchReadout.textContent = viewer.pitchDeg.toFixed(1);
+}
+
+function applyLayers(): void {
+  viewer.setHiddenLayers(LAYER_ORDER.filter((layer) => !panelState.visibleLayers[layer]));
+}
+
+function updateButtons(): void {
+  elements.buttonExport.disabled = busy || photo === null;
+}
+
+/** 書き出しを走らせ、3Dビューと検査画像と内訳を更新する。 */
+async function runExport(): Promise<void> {
+  if (photo === null || busy) return;
+  busy = true;
+  updateButtons();
+  try {
+    const result = await exporter.run(photo, toExportSettings(panelState), (stage) =>
+      setStatus(`段「${stage}」を実行しています…`),
+    );
+    outcome = result;
+    viewer.setScene(
+      buildDebugScene({
+        vertices: result.debugSceneSource.vertices,
+        headMesh: result.debugSceneSource.asset.mesh,
+        skinAlbedo: {
+          data: result.debugSceneSource.skinAlbedo,
+          width: result.debugSceneSource.atlasSize,
+          height: result.debugSceneSource.atlasSize,
+        },
+        eyeAlbedos: {
+          left: {
+            data: result.debugSceneSource.eyeAlbedos.left,
+            width: result.debugSceneSource.eyeTextureSize,
+            height: result.debugSceneSource.eyeTextureSize,
+          },
+          right: {
+            data: result.debugSceneSource.eyeAlbedos.right,
+            width: result.debugSceneSource.eyeTextureSize,
+            height: result.debugSceneSource.eyeTextureSize,
+          },
+        },
+        hair: result.debugSceneSource.hair,
+        hairAlbedo: result.debugSceneSource.hairAlbedo,
+        hairAlpha: result.debugSceneSource.hairAlpha,
+      }),
+    );
+    applyLayers();
+    renderInspection(elements.inspection, result.inspection);
+    elements.report.textContent = buildReport(result);
+    setStatus('');
+  } catch (error) {
+    console.error(error);
+    const report = describeFailure(error);
+    const stage = report.stage === null ? '' : `段「${report.stage}」で`;
+    const remedy = report.remedy === null ? '' : `\n${report.remedy}`;
+    setStatus(`${stage}失敗しました（${report.errorType}）: ${report.cause}${remedy}`, true);
+    if (!isPipelineError(error)) console.warn('想定外の失敗（バグの可能性）', error);
+  } finally {
+    busy = false;
+    updateButtons();
+  }
+}
+
+/** 内訳を人が読める形にまとめる（デスクトップ側が標準出力へ出しているもの）。 */
+function buildReport(result: ExportOutcome): string {
+  const lines: string[] = [];
+  const manifest = result.artifacts.manifest;
+  lines.push(
+    `guest.json: format_version ${manifest.format_version} /` +
+      ` identity ${manifest.identity_count} 成分 /` +
+      ` GNM ${manifest.gnm_version} ${manifest.gnm_variant} /` +
+      ` exporter ${manifest.exporter_version}`,
+  );
+  lines.push(
+    `フィット残差 RMS（写真ピクセル）: ` +
+      result.headFit.residualRmsPixels.map((value) => value.toFixed(2)).join(' → '),
+  );
+  for (const side of EYE_SIDES) {
+    const albedo = result.eyeAlbedos[side];
+    lines.push(
+      `眼球 ${side}: 虹彩 ${albedo.irisRadiusPx.toFixed(1)}px /` +
+        ` limbus ${albedo.limbusRadiusPx.toFixed(1)}px` +
+        `（比 ${irisToLimbusRatio(albedo).toFixed(3)}）`,
+    );
+  }
+  lines.push(bakeReport(result.atlas));
+  if (result.hairShell === null) {
+    lines.push('髪シェル: 髪が写っていないので作られていない（zip に髪系 3 つは入らない）');
+  } else {
+    lines.push(
+      `髪シェル: 頂点 ${result.hairShell.vertexCount} / 三角形 ${result.hairShell.triangleCount} /` +
+        ` Depth 被覆 ${(depthCoverage(result.hairShell) * 100).toFixed(1)}% /` +
+        ` Depth 残差 ${(result.hairShell.depthFit.residualRmsMeters * 1000).toFixed(2)}mm`,
+    );
+  }
+  const provider = exporter.depthNormalProvider;
+  if (provider !== null) lines.push(`DAViD の実行環境: ${provider}`);
+  return lines.join('\n');
+}
+
+/** guest zip をダウンロードさせる。 */
+async function downloadZip(): Promise<void> {
+  if (outcome === null) return;
+  const { blob, filename } = await buildGuestZip(outcome.artifacts);
+  const anchor = document.createElement('a');
+  anchor.href = URL.createObjectURL(blob);
+  anchor.download = filename;
+  anchor.click();
+  URL.revokeObjectURL(anchor.href);
+  setStatus(`書き出し完了: ${filename}（${(blob.size / 1024 / 1024).toFixed(1)}MB）`);
+}
+
+async function acceptPhoto(next: PhotoRgb): Promise<void> {
+  photo = next;
+  outcome = null;
+  elements.report.textContent = '';
+  updateButtons();
+  await runExport();
+}
+
+elements.buttonUpload.addEventListener('click', () => elements.fileInput.click());
+elements.fileInput.addEventListener('change', async () => {
+  const file = elements.fileInput.files?.[0];
+  if (file === undefined) return;
+  if (inputManager.isWebcamActive) {
+    inputManager.stopWebcam();
+    elements.buttonWebcam.textContent = 'Webcam';
+  }
+  try {
+    await acceptPhoto(await inputManager.loadFromFile(file));
+  } catch (error) {
+    setStatus(describeFailure(error).cause, true);
+  }
+  elements.fileInput.value = '';
+});
+
+elements.buttonWebcam.addEventListener('click', async () => {
+  try {
+    if (!inputManager.isWebcamActive) {
+      setStatus('Webcam を起動しています…');
+      await inputManager.startWebcam();
+      elements.buttonWebcam.textContent = 'Capture';
+      setStatus('正面を向いて Capture を押してください。');
+      return;
+    }
+    const captured = inputManager.captureWebcamFrame();
+    inputManager.stopWebcam();
+    elements.buttonWebcam.textContent = 'Webcam';
+    await acceptPhoto(captured);
+  } catch (error) {
+    console.error(error);
+    setStatus('Webcam にアクセスできませんでした。', true);
+  }
+});
+
+elements.buttonReset.addEventListener('click', () => {
+  inputManager.stopWebcam();
+  elements.buttonWebcam.textContent = 'Webcam';
+  photo = null;
+  outcome = null;
+  viewer.dispose();
+  elements.inspection.replaceChildren();
+  elements.report.textContent = '';
+  updateButtons();
+  setStatus('');
+});
+
+elements.buttonExport.addEventListener('click', () => {
+  if (outcome === null) void runExport().then(() => downloadZip());
+  else void downloadZip();
+});
+
+window.addEventListener('resize', () => viewer.resize());
+
+function animate(): void {
+  requestAnimationFrame(animate);
+  viewer.render();
+}
+
+updateOrientationReadout();
+updateButtons();
+animate();
+
+// GNM アセットは 29MB あるので、写真を待たずに落とし始める（初回の書き出しの待ちを短くする）。
+void exporter
+  .loadAsset()
+  .then(() => setStatus('写真を選んでください（ファイル / Webcam）。'))
+  .catch((error) => setStatus(describeFailure(error).cause, true));
