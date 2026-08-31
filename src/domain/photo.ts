@@ -169,6 +169,36 @@ export function samplePhotoLinearAt(
 }
 
 /**
+ * 矩形を切り出した写真を返す（縮小しない・画素をそのまま写す）。
+ *
+ * 画像の外は要求できない（はみ出しを黙って詰めると、戻すときの原点がずれる）。
+ */
+export function cropPhotoRect(
+  photo: PhotoRgb,
+  left: number,
+  top: number,
+  right: number,
+  bottom: number,
+): PhotoRgb {
+  validatePhoto(photo);
+  const width = right - left;
+  const height = bottom - top;
+  if (width <= 0 || height <= 0) throw new Error(`クロップの大きさが ${width}x${height}`);
+  if (left < 0 || top < 0 || right > photo.width || bottom > photo.height) {
+    throw new Error(
+      `クロップ (${left}, ${top})-(${right}, ${bottom}) が` +
+        ` ${photo.width}x${photo.height} の外へ出ている`,
+    );
+  }
+  const data = new Uint8Array(width * height * 3);
+  for (let row = 0; row < height; row++) {
+    const source = ((top + row) * photo.width + left) * 3;
+    data.set(photo.data.subarray(source, source + width * 3), row * width * 3);
+  }
+  return { data, width, height };
+}
+
+/**
  * 長辺が `longestSide` になるまで縮小する。縦横比は変えない。
  *
  * **面積平均**で縮める。bilinear で点標本化すると、2 倍を超える縮小で入力画素の大半を

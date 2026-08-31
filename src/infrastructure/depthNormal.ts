@@ -34,8 +34,9 @@ import type { InferenceSession } from 'onnxruntime-web';
 import { DepthNormalEstimator } from '../application/ports';
 import { GpuUnavailableError, ModelFileNotFoundError } from '../domain/errors';
 import { DepthNormalResult, makeField, rectFromPixels, validateDepthNormal } from '../domain/field';
-import { PhotoRgb } from '../domain/photo';
-import { cropSquareToRgb } from './photoCanvas';
+import { PhotoRgb, cropPhotoRect } from '../domain/photo';
+import { TRIANGLE, resamplePil } from '../domain/resample';
+
 
 /** グラフが固定している入力の一辺。ファイル名の `_384` はグラフと一致しない。 */
 export const INPUT_RESOLUTION = 512;
@@ -147,14 +148,22 @@ export class DavidDepthNormalEstimator implements DepthNormalEstimator {
       );
     }
 
-    const rgba = cropSquareToRgb(photo, square, INPUT_RESOLUTION);
+    // **整数で切り出してから PIL と同じ BILINEAR で縮める。** canvas の `drawImage` は
+    // `imageSmoothingQuality: 'high'` でも中身がブラウザ依存で、bilinear とは別のフィルタになる。
+    // ここはモデルの入力なので、フィルタが違えば深度も法線も違う値が出る。
+    const input = resamplePil(
+      cropPhotoRect(photo, square.x, square.y, square.x + square.size, square.y + square.size),
+      INPUT_RESOLUTION,
+      INPUT_RESOLUTION,
+      TRIANGLE,
+    );
     const area = INPUT_RESOLUTION * INPUT_RESOLUTION;
     // RGB の [0,1]・CHW。**チャンネル順は RGB**（デスクトップ側が実測で決めた規約）。
     const tensorData = new Float32Array(3 * area);
     for (let pixel = 0; pixel < area; pixel++) {
-      tensorData[pixel] = rgba[pixel * 4] / 255;
-      tensorData[area + pixel] = rgba[pixel * 4 + 1] / 255;
-      tensorData[2 * area + pixel] = rgba[pixel * 4 + 2] / 255;
+      tensorData[pixel] = input.data[pixel * 3] / 255;
+      tensorData[area + pixel] = input.data[pixel * 3 + 1] / 255;
+      tensorData[2 * area + pixel] = input.data[pixel * 3 + 2] / 255;
     }
     const feeds: Record<string, unknown> = {
       [this.session.inputNames[0]]: new this.ort.Tensor('float32', tensorData, [

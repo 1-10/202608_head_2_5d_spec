@@ -1,8 +1,11 @@
 // 写真（RGB）とブラウザの canvas の行き来。
 //
-// MediaPipe も DAViD の前処理も入力に canvas / ImageBitmap を要求するので、`PhotoRgb` から 1 箇所で
-// 作る。**推論のたびに作り直さない**よう、同じ写真に対しては呼び出し側がキャッシュする
-// （`composition` が写真ごとに 1 枚だけ持つ）。
+// MediaPipe が入力に canvas / ImageBitmap を要求するので、`PhotoRgb` から 1 箇所で作る。
+// **推論のたびに作り直さない**よう、同じ写真については WeakMap で使い回す。
+//
+// **縮小はここでやらない。** canvas の `drawImage` は `imageSmoothingQuality: 'high'` でも中身が
+// ブラウザ依存で、デスクトップ側が使う PIL の bilinear / LANCZOS とは別のフィルタになる。縮小は
+// `domain/resample`（PIL と同じ実装）が持つ。
 
 import { PhotoRgb } from '../domain/photo';
 
@@ -29,37 +32,4 @@ export function photoToCanvas(photo: PhotoRgb): HTMLCanvasElement {
   context.putImageData(new ImageData(rgba, photo.width, photo.height), 0, 0);
   cache.set(photo.data, canvas);
   return canvas;
-}
-
-/**
- * 写真の正方領域を切り出して指定の一辺へ縮めた RGB を返す（DAViD の前処理）。
- *
- * 縮小は canvas の `drawImage`（bilinear 相当）。デスクトップ側は Pillow の
- * `Image.Resampling.BILINEAR` を使っており、**同じ補間の種類**である。
- */
-export function cropSquareToRgb(
-  photo: PhotoRgb,
-  square: { x: number; y: number; size: number },
-  resolution: number,
-): Uint8ClampedArray {
-  const source = photoToCanvas(photo);
-  const canvas = document.createElement('canvas');
-  canvas.width = resolution;
-  canvas.height = resolution;
-  const context = canvas.getContext('2d', { willReadFrequently: true });
-  if (context === null) throw new Error('canvas の 2d コンテキストが取れない');
-  context.imageSmoothingEnabled = true;
-  context.imageSmoothingQuality = 'high';
-  context.drawImage(
-    source,
-    square.x,
-    square.y,
-    square.size,
-    square.size,
-    0,
-    0,
-    resolution,
-    resolution,
-  );
-  return context.getImageData(0, 0, resolution, resolution).data;
 }

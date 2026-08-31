@@ -9,19 +9,14 @@
 // 委ねると、選ばれる顔が解像度やモデルの版で黙って変わる。複数返させて `domain/faceSubject` の規則
 // （得点 = 一辺 − 画像中心からの距離）で選ぶ。
 //
-// **解像度の階段は持たない（デスクトップ側との差分）。** あちらは長辺 256〜3840 の階段を全段回して
-// 検出を束ねる（どの解像度で当たるかが写真ごとに違うため）。ブラウザでは 1 枚あたり数百 ms × 段数が
-// 体感に直に出るので、**写真の解像度そのままで 1 回だけ検出する**。取り逃がしの向きは同じ（顔が
-// 出なければ `FaceNotDetectedError`）で、主役の規則は共有している。
+// **二段検出は `domain/faceLadder` が持つ。** ここは「1 枚の画像から顔を全部返す」だけを担い、
+// 解像度の階段・主役の選定・主役の周りを切っての再検出はあちらが組む（純粋なので検出器なしで
+// 検証できる）。1 回だけの検出で済ませてはいけない — 大きな写真では顔幅が数十画素になり、口の位置
+// がずれる。
 
 import { FaceLandmarker, FilesetResolver } from '@mediapipe/tasks-vision';
 import { FaceNotDetectedError, ModelFileNotFoundError } from '../domain/errors';
-import {
-  FaceSquare,
-  faceSquareOfLandmarks,
-  imageCenter,
-  subjectIndex,
-} from '../domain/faceSubject';
+import { detectTwoPass } from '../domain/faceLadder';
 import { PhotoRgb } from '../domain/photo';
 import { FACE_LANDMARK_COUNT, FACE_MESH_LANDMARK_COUNT, FaceLandmarkDetector } from '../application/ports';
 import { photoToCanvas } from './photoCanvas';
@@ -39,12 +34,12 @@ const MODEL_ASSET_URL =
   '/float16/1/face_landmarker.task';
 
 /**
- * 検出させる顔の数の上限。
+ * 検出させる顔の数の上限（デスクトップ側 `MAX_DETECTED_FACES` と同値）。
  *
- * 1 にしてはいけない（主役の判断が検出器の「確からしさ」に移る）。集合写真でも主役の規則が採点
- * できるだけの数を返させる。
+ * 1 にしてはいけない（主役の判断が検出器の「確からしさ」に移る）。**上限であってコストではない** —
+ * 増えるのは写っている顔 1 つあたりの推論だけで、使われない枠のぶんは払わない。
  */
-const MAX_FACES = 10;
+const MAX_FACES = 5;
 
 export class MediaPipeFaceLandmarkDetector implements FaceLandmarkDetector {
   private landmarker: FaceLandmarker | null = null;
@@ -70,17 +65,21 @@ export class MediaPipeFaceLandmarkDetector implements FaceLandmarkDetector {
 
   async detect(photo: PhotoRgb): Promise<Float64Array> {
     await this.init();
-    if (this.landmarker === null) throw new Error('FaceLandmarker が初期化されていない');
-    const canvas = photoToCanvas(photo);
-    const result = this.landmarker.detect(canvas);
-    const faces = result.faceLandmarks ?? [];
-    if (faces.length === 0) {
-      throw new FaceNotDetectedError('顔を検出できませんでした。');
-    }
+    const result = detectTwoPass({
+      detectFaces: (image) => this.detectOnce(image),
+      photo,
+      faceMeshCount: FACE_MESH_LANDMARK_COUNT,
+    });
+    return result.landmarks;
+  }
 
+  /** 1 枚の画像から写っている顔を全部返す（階段の 1 段ぶん）。 */
+  private detectOnce(photo: PhotoRgb): Float64Array[] {
+    if (this.landmarker === null) throw new Error('FaceLandmarker が初期化されていない');
+    const faces = this.landmarker.detect(photoToCanvas(photo)).faceLandmarks ?? [];
     const candidates: Float64Array[] = [];
-    const squares: FaceSquare[] = [];
     for (const face of faces) {
+      // 虹彩を含む 478 点が返らない段は候補にしない（眼球テクスチャの半径が取れない）。
       if (face.length < FACE_LANDMARK_COUNT) continue;
       const points = new Float64Array(FACE_LANDMARK_COUNT * 2);
       for (let point = 0; point < FACE_LANDMARK_COUNT; point++) {
@@ -88,16 +87,13 @@ export class MediaPipeFaceLandmarkDetector implements FaceLandmarkDetector {
         points[point * 2 + 1] = face[point].y * photo.height;
       }
       candidates.push(points);
-      squares.push(faceSquareOfLandmarks(points, FACE_MESH_LANDMARK_COUNT));
     }
     if (candidates.length === 0) {
       throw new FaceNotDetectedError(
-        `虹彩を含む ${FACE_LANDMARK_COUNT} 点が返りませんでした（検出器の設定を確認してください）。`,
+        `${photo.width}x${photo.height} では虹彩を含む ${FACE_LANDMARK_COUNT} 点が返らなかった`,
       );
     }
-    // **束ねない。** 束ねるのは解像度の階段が同じ顔を複数回返すからで、1 回しか検出しないこちらでは
-    // 同じ顔が 2 件出ることが無い。得点の規則だけを共有する。
-    return candidates[subjectIndex(squares, imageCenter([photo.width, photo.height]))];
+    return candidates;
   }
 
   close(): void {

@@ -1,16 +1,20 @@
-// 画像のエンコード（ブラウザの canvas 経由）。
+// 画像のエンコード。
 //
-// デスクトップ側は Pillow で書く。ブラウザには JPEG / PNG のエンコーダが canvas しかないので、
-// **ここだけは web で置き換わる**。
+// **JPEG は自分で書く（`infrastructure/jpeg`）。** canvas の `toBlob('image/jpeg', q)` は色差を
+// 4:2:0 に間引き、止める手段が無い。デスクトップ側は `subsampling=0`（4:4:4）を明示していて、理由も
+// 「4:2:0 はアトラスの chart 境界と髪の縁で色をにじませ、Unity 側の継ぎ目の原因を切り分けられなく
+// する」と書いてある。canvas を使うと**あちらが消した不具合を出力に戻す**ことになる。
 //
-// **JPEG のクロマサブサンプリングは選べない。** デスクトップ側は `subsampling=0`（4:4:4）で品質 90 を
-// 指定しているが、canvas の `toBlob('image/jpeg', 0.9)` は実装依存で 4:2:0 になる。**色差の解像度が
-// 半分になるのはブラウザ側の制約**で、こちらから指定する手が無い。肌アトラスは低周波の色が主なので
-// 実害は小さいが、**同じ写真から作った zip がバイト単位で一致しないのはこれが理由**。
+// **PNG も自分で書く（`infrastructure/png`）。** canvas は何を渡してもカラータイプ 6（RGBA）で書く
+// が、デスクトップ側は配列の次元で mode を決めていて `hair_alpha` は mode "L"（1 チャンネル）で出る。
+// 契約も「単一チャンネルの uint8 画像」と言っているので、RGB へ膨らませて書くと**申告と違う形の
+// ファイルを渡す**ことになる。
 //
-// PNG は可逆なので実装差が出ない（眼球テクスチャと `hair_alpha` はこちら）。
+// canvas に残るのは検査画像の表示だけ（`drawRgbImage`）。
 
 import { AlphaImage, RgbImage } from '../domain/contract';
+import { encodeJpeg444 } from './jpeg';
+import { encodeGrayPng, encodeRgbPng } from './png';
 
 /** JPEG の品質。デスクトップ側の `JPEG_QUALITY` と同じ値。 */
 export const JPEG_QUALITY = 90;
@@ -27,63 +31,23 @@ function toRgba(image: RgbImage): Uint8ClampedArray {
   return out;
 }
 
-/** 単一チャンネルを RGBA のグレースケールへ広げる。 */
-function alphaToRgba(image: AlphaImage): Uint8ClampedArray {
-  const out = new Uint8ClampedArray(image.width * image.height * 4);
-  for (let pixel = 0; pixel < image.width * image.height; pixel++) {
-    out[pixel * 4] = image.data[pixel];
-    out[pixel * 4 + 1] = image.data[pixel];
-    out[pixel * 4 + 2] = image.data[pixel];
-    out[pixel * 4 + 3] = 255;
-  }
-  return out;
-}
-
 /**
- * RGBA を canvas に載せて指定の形式へエンコードする。
+ * RGB を JPEG（4:4:4）にする。
  *
- * `OffscreenCanvas` があればそちらを使う（DOM を汚さず、Worker でも動く）。
+ * `async` のままなのは、呼び出し側（`packaging`）が PNG と同じ形で扱えるようにするため。
  */
-async function encode(
-  rgba: Uint8ClampedArray,
-  width: number,
-  height: number,
-  type: 'image/jpeg' | 'image/png',
-  quality?: number,
-): Promise<Uint8Array> {
-  const imageData = new ImageData(rgba, width, height);
-  if (typeof OffscreenCanvas !== 'undefined') {
-    const canvas = new OffscreenCanvas(width, height);
-    const context = canvas.getContext('2d');
-    if (context === null) throw new Error('OffscreenCanvas の 2d コンテキストが取れない');
-    context.putImageData(imageData, 0, 0);
-    const blob = await canvas.convertToBlob({ type, quality });
-    return new Uint8Array(await blob.arrayBuffer());
-  }
-  const canvas = document.createElement('canvas');
-  canvas.width = width;
-  canvas.height = height;
-  const context = canvas.getContext('2d');
-  if (context === null) throw new Error('canvas の 2d コンテキストが取れない');
-  context.putImageData(imageData, 0, 0);
-  const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, type, quality));
-  if (blob === null) throw new Error(`${type} のエンコードに失敗した`);
-  return new Uint8Array(await blob.arrayBuffer());
-}
-
-/** RGB を JPEG にする。 */
 export async function encodeJpeg(image: RgbImage, quality = JPEG_QUALITY): Promise<Uint8Array> {
-  return encode(toRgba(image), image.width, image.height, 'image/jpeg', quality / 100);
+  return encodeJpeg444(image.data, image.width, image.height, quality);
 }
 
-/** RGB を PNG にする。 */
+/** RGB を PNG（カラータイプ 2）にする。 */
 export async function encodePng(image: RgbImage): Promise<Uint8Array> {
-  return encode(toRgba(image), image.width, image.height, 'image/png');
+  return encodeRgbPng(image.data, image.width, image.height);
 }
 
-/** 単一チャンネルを PNG にする（グレースケールとして 3ch へ広げる）。 */
+/** 単一チャンネルを PNG（カラータイプ 0 = グレースケール）にする。 */
 export async function encodeAlphaPng(image: AlphaImage): Promise<Uint8Array> {
-  return encode(alphaToRgba(image), image.width, image.height, 'image/png');
+  return encodeGrayPng(image.data, image.width, image.height);
 }
 
 /** RGBA の `ImageData` を RGB の写真へ落とす（入力の段で 1 回だけ）。 */

@@ -231,6 +231,7 @@ npm test
 | WebGPU → WASM のフォールバック | 実行環境を利用者が選べない。あちらは CUDA が無ければ起動時に落とす。どちらで動いたかは画面に出す（黙って遅くしない） |
 | Webカメラ入力 | ブラウザにしかない入力経路 |
 | 検査画像を画面に並べる | 書き出す先が無い（あちらは写真ごとのディレクトリへ PNG） |
+| JPEG / PNG / 再標本化を自分で書く（`infrastructure/jpeg` / `infrastructure/png` / `domain/resample`） | あちらは Pillow を呼ぶだけ。ブラウザの canvas は**指定できない選択（4:2:0・カラータイプ 6・実装依存の縮小フィルタ）を押し付ける**ので、API を使うのをやめて書いた。**内容の差ではなく、同じ内容にするための差分** |
 | 3D ビューの姿勢・表情（`src/domain/preview/`） | **書き出しの契約には入らない。** guest が Unity でどう出るかを確認するために、あちらの `GnmHeadInstance` / `GnmSkeleton` / `GnmExpressionPlayer` と同じ動きを持つ。デスクトップ側の 3D ビューは姿勢を持たない |
 | GNMB へ vertex group / ジョイント / スキニング重み / 表情プリセット（+3.3MB） | 上記の入力。`export_guest` は 1 つも読まない。前提（bind pose に回転が無い・pose correctives が全ゼロ・重み和 1・影響ボーン 2 本）はアセット生成時に毎回検査して、崩れたら生成が落ちる |
 | 自動まばたき・ワイヤーフレーム・背景色・FOV と距離の調整 | 旧 web 版から残したもの。Unity 側には無いが、写真 1 枚から起こした頭を確認するのに効く |
@@ -254,11 +255,26 @@ npm test
 
 ### web だから揃わないもの
 
+**内部処理は揃える。** ブラウザの API が別のフィルタや別の形式を使うなら、**API を使うのをやめて
+自分で書く**。ここに残っているのは、書き直しても原理的に一致しない差だけ。
+
 | 差分 | 理由 |
 |:--|:--|
-| JPEG のクロマサブサンプリング | canvas の `toBlob('image/jpeg', 0.9)` は 4:2:0 になり、指定できない（あちらは Pillow で 4:4:4）。**同じ写真から作った zip がバイト単位で一致しないのはこれが理由** |
-| 顔検出の解像度の階段 | あちらは長辺 256〜3840 を全段回して検出を束ねる。ブラウザでは 1 枚あたり数百 ms × 段数が体感に出るので、写真の解像度で 1 回だけ検出する。**主役の規則（得点 = 一辺 − 対象点からの距離）は共有している** |
 | 内部の蓄積精度 | numpy が float32 で足すところを JS は倍精度で足す（JS の数は倍精度しか無い）。**移植の方が精度が高い**側の差で、実測 1.8e-5。**guest.json に出る `identity` だけは float32 の精度へ丸める**（あちらが `astype(np.float32)` している位置と同じ） |
+| JPEG の DCT の実装 | libjpeg は既定でスケール付き整数 DCT、こちらは浮動小数の分離型 DCT。**量子化表・Huffman 表・標本比（4:4:4）は一致**しており、Pillow の出力との画素差は実測で最大 9 / 平均 0.34、バイト数は 20,011 対 20,006（197x131 の色差が高周波な絵）。**バイト単位では一致しない** |
+| PNG / zip のバイト列 | deflate の実装が違う（fflate 対 zlib）。画素は可逆なので**厳密に一致**し、カラータイプも一致（`hair_alpha` は mode "L"）。バイト数は 17,562 対 17,743（RGB）/ 194 対 191（グレースケール） |
+
+#### 直したもの（かつて「揃わない」に置いていた差）
+
+**判断が間違っていた。** どちらも「ブラウザの制約」ではなく、ブラウザの API を使うのをやめれば
+揃うものだった。
+
+| かつての差 | 何が起きていたか | どう直したか |
+|:--|:--|:--|
+| 顔検出の解像度の階段を持たない | **2160x3840 の写真で口の位置がずれた。** 段1（縮小して顔を探す）だけで済ませていたので、大きな写真では顔幅が数十画素になり、ランドマークの精度が出ない。あちらは段2（主役の周りを元解像度から切り出して再検出）で精度を出している | 二段検出を `domain/faceLadder` へ移植。**縮小に LANCZOS が要る**ので、Pillow と同じ再標本化を `domain/resample` に書いた（canvas の `drawImage` は中身がブラウザ依存で、直している不具合＝縮小のエイリアシングの原因側に戻る）。実測で階段の縮小に 1.3 秒（あちらは PIL が C なので +125ms）。**書き出し全体が数秒かかる中でこの増分は問題にならない** |
+| JPEG が 4:2:0 になる | あちらが `subsampling=0` を明示している理由は「4:2:0 はアトラスの chart 境界と髪の縁で色をにじませ、Unity 側の継ぎ目の原因を切り分けられなくする」。canvas で書くと**あちらが消した不具合を出力に戻す** | baseline JPEG のエンコーダ（4:4:4）を `infrastructure/jpeg` に書いた |
+| PNG が常に RGBA になる | canvas は何を渡してもカラータイプ 6 で書く。あちらは配列の次元で mode を決め、`hair_alpha` は mode "L"（1 チャンネル）。契約も「単一チャンネル」と言っているので、**申告と違う形のファイルを渡していた** | PNG のエンコーダ（カラータイプ 0 / 2）を `infrastructure/png` に書いた |
+| DAViD の入力を canvas で縮小 | あちらは Pillow の BILINEAR。canvas の `imageSmoothingQuality: 'high'` は中身がブラウザ依存で別のフィルタ。**モデルの入力**なので深度も法線も違う値になる | 整数で切り出してから `domain/resample` の BILINEAR で縮める |
 
 ## 消費側へ渡すもの
 
@@ -286,12 +302,13 @@ tools/
   golden_export_guest.py    # 正本の domain を動かして突き合わせ基準を作る
   GnmExpressionPresets_v3_0.npz  # 表情プリセット 20 本（正本は Unity 側の export_expression_presets.py）
 src/
-  domain/          # 純粋計算（contract / field / photo / ramp / normal / faceSubject / inspection /
-                   #   gnm / atlas / eyes / hair）
+  domain/          # 純粋計算（contract / field / photo / resample / ramp / normal /
+                   #   faceSubject / faceLadder / inspection / gnm / atlas / eyes / hair）
     preview/       # 3D ビューだけが使う層（asset / pose / expression / scene）。**正本は Unity 側**
   application/     # ユースケースと Port（settings / ports / exportGuest）
-  infrastructure/  # Port の実装（gnmb / gnmAsset / packaging / imaging / photoCanvas /
-                   #   faceLandmarks / segmentation / depthNormal / atlasBaker / hairImage）
+  infrastructure/  # Port の実装（gnmb / gnmAsset / packaging / imaging / jpeg / png /
+                   #   photoCanvas / faceLandmarks / segmentation / depthNormal / atlasBaker /
+                   #   hairImage）
   composition.ts   # 配線（具体実装を組み立てて Port として注入するのはここだけ）
   presentation/    # 入口（main / viewer / gui / inspectionView / input / viewSettings /
                    #   style.css）
