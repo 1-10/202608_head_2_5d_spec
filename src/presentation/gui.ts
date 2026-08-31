@@ -7,6 +7,10 @@
 // デスクトップ側は CLI と GUI の 2 入口を持ち、`--help` がパラメータの一覧を出す。ブラウザは入口が
 // 1 つなので、**このパネルが一覧そのもの**になる。
 //
+// **パネルは 2 枚に分ける（書き出し = 左 / 3D ビュー = 右）。** 片方は書き出す zip の中身を変え、
+// もう片方は見え方しか変えない。同じ列に混ざっていると「今どちらを触ったか」が分からず、書き出しの
+// 値をビューの値だと思って動かす事故が起きる。
+//
 // 「首と視線」「表情」の節は Unity 側の Viewer パネル（`Viewer/GnmViewerUi`）と同じ並びにしてある。
 // 同じものを同じ順で触れる方が、web と Unity を見比べるときに迷わない。
 
@@ -177,7 +181,6 @@ export interface GuiCallbacks {
   onLayerTextureChanged: (layer: string, enabled: boolean) => void;
   onAllTexturesToggled: () => void;
   onResetView: () => void;
-  onSaveParameters: () => void;
   /** ビューの値が変わった（まとめて適用する）。 */
   onViewSettingsChanged: (view: ViewSettings) => void;
   /** 手で立てる表情の重みが変わった。 */
@@ -196,12 +199,22 @@ export interface GuiHandle {
   setExpressionPresets(names: readonly string[]): void;
 }
 
+/** パネルを置く先。左が書き出し、右が 3D ビュー。 */
+export interface GuiContainers {
+  readonly exportPanel: HTMLElement;
+  readonly viewPanel: HTMLElement;
+}
+
 export function setupGui(
-  container: HTMLElement,
+  containers: GuiContainers,
   state: PanelState,
   callbacks: GuiCallbacks,
 ): GuiHandle {
-  const gui = new GUI({ container, title: '書き出しパラメータ', width: 300 });
+  const gui = new GUI({
+    container: containers.exportPanel,
+    title: '書き出しパラメータ',
+    width: 280,
+  });
   const pushView = (): void => callbacks.onViewSettingsChanged(toViewSettings(state));
 
   const fit = gui.addFolder('フィット');
@@ -265,10 +278,7 @@ export function setupGui(
     .add(state.settings, 'hairRolloffMm', MINIMUM_HAIR_ROLLOFF_MM, MAXIMUM_HAIR_ROLLOFF_MM, 0.1)
     .name('巻き込み (mm)');
 
-  const actions = { 保存: callbacks.onSaveParameters };
-  gui.add(actions, '保存').name('パラメーターを保存（次回起動時に復元）');
-
-  const view = gui.addFolder('3Dビュー');
+  const view = new GUI({ container: containers.viewPanel, title: '3D ビュー', width: 280 });
 
   const camera = view.addFolder('カメラ');
   camera

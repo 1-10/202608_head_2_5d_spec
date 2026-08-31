@@ -20,10 +20,16 @@ body {
   color: var(--text);
 }
 
+/*
+ * **ページは縦スクロールしない。** 高さを 100vh に固定し、はみ出しそうな箱（内訳・検査画像・
+ * 左右のパネル）に自分のスクロールを持たせる。ページごと流れると、3D ビューを見ながら値を触る
+ * という使い方が成り立たない（触るたびに位置が動く）。
+ */
 #app {
   display: flex;
   flex-direction: column;
-  min-height: 100vh;
+  height: 100vh;
+  overflow: hidden;
 }
 
 #toolbar {
@@ -88,7 +94,8 @@ button:disabled {
   display: flex;
   align-items: stretch;
   gap: 0;
-  min-height: 60vh;
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 #viewport-row {
@@ -96,13 +103,14 @@ button:disabled {
   flex-direction: column;
   flex: 1 1 auto;
   min-width: 0;
+  min-height: 0;
 }
 
 .viewport-pane {
   display: flex;
   flex-direction: column;
   flex: 1 1 auto;
-  min-height: 360px;
+  min-height: 0;
 }
 
 .pane-label {
@@ -133,6 +141,7 @@ button:disabled {
 
 #report {
   margin: 0;
+  flex: 0 0 auto;
   padding: 10px 12px;
   border-top: 1px solid var(--line);
   background: var(--panel);
@@ -145,19 +154,32 @@ button:disabled {
   overflow: auto;
 }
 
-#gui-container {
+/* 書き出しの値は左、3D ビューの値は右。触る対象（写真 → 書き出し → 見る）と同じ並び。 */
+.gui-column {
   flex: 0 0 auto;
-  border-left: 1px solid var(--line);
+  overflow-y: auto;
+  overflow-x: hidden;
   background: var(--panel);
 }
 
-#gui-container .lil-gui {
-  --width: 300px;
+#gui-export {
+  border-right: 1px solid var(--line);
+}
+
+#gui-view {
+  border-left: 1px solid var(--line);
+}
+
+.gui-column .lil-gui {
+  --width: 280px;
 }
 
 #inspection-panel {
+  flex: 0 0 auto;
+  max-height: 30vh;
+  overflow-y: auto;
   border-top: 1px solid var(--line);
-  padding: 12px 16px 24px;
+  padding: 12px 16px;
 }
 
 #inspection-panel h2 {

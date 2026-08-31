@@ -23,7 +23,6 @@ import {
 } from './gui';
 import { InputManager } from './input';
 import { renderInspection } from './inspectionView';
-import { LocalStorageParameterStore } from './parameterStore';
 import { Viewer } from './viewer';
 import { ViewSettings } from './viewSettings';
 
@@ -38,7 +37,8 @@ const elements = {
   viewport: requireElement<HTMLElement>('canvas-head'),
   viewReadout: requireElement<HTMLElement>('readout-view'),
   video: requireElement<HTMLVideoElement>('webcam-video'),
-  guiContainer: requireElement<HTMLElement>('gui-container'),
+  guiExport: requireElement<HTMLElement>('gui-export'),
+  guiView: requireElement<HTMLElement>('gui-view'),
   inspection: requireElement<HTMLElement>('inspection'),
 };
 
@@ -48,9 +48,10 @@ function requireElement<T extends HTMLElement>(id: string): T {
   return element as T;
 }
 
-const parameterStore = new LocalStorageParameterStore();
-// 保存されたパラメータがあれば復元する。壊れていれば既定へ戻る（書き出しは捨てて既定、ビューは丸める）。
-const panelState = createPanelState(parameterStore.load() ?? undefined, parameterStore.loadView());
+// **パラメータは保存しない。** 毎回 `application/settings` と `presentation/viewSettings` の既定から
+// 始める。触った値が残っていると「前回いじった値のまま書き出した」に気付けないし、ブラウザや
+// プロファイルを変えると再現しないので、保存されている方が混乱の種になる。
+const panelState = createPanelState();
 const exporter = new Exporter();
 const inputManager = new InputManager(elements.video);
 const viewer = new Viewer(elements.viewport);
@@ -81,23 +82,18 @@ function applyViewSettings(view: ViewSettings): void {
   viewer.blinkEnabled = view.blinkEnabled;
 }
 
-const gui: GuiHandle = setupGui(elements.guiContainer, panelState, {
-  onLayerVisibilityChanged: (layer, visible) => viewer.setLayerVisible(layer, visible),
-  onLayerTextureChanged: (layer, enabled) => viewer.setLayerTextureEnabled(layer, enabled),
-  onAllTexturesToggled: () => viewer.toggleAllTextures(),
-  onResetView: () => viewer.resetView(),
-  onViewSettingsChanged: (view) => applyViewSettings(view),
-  onExpressionChanged: (name, weight) => viewer.setManualExpression(name, weight),
-  onSaveParameters: () => {
-    try {
-      parameterStore.save(toExportSettings(panelState));
-      parameterStore.saveView(toViewSettings(panelState));
-      setStatus('パラメーターを保存しました。次回起動時に復元します');
-    } catch (error) {
-      setStatus(`パラメーターを保存できませんでした: ${describeFailure(error).cause}`, true);
-    }
+const gui: GuiHandle = setupGui(
+  { exportPanel: elements.guiExport, viewPanel: elements.guiView },
+  panelState,
+  {
+    onLayerVisibilityChanged: (layer, visible) => viewer.setLayerVisible(layer, visible),
+    onLayerTextureChanged: (layer, enabled) => viewer.setLayerTextureEnabled(layer, enabled),
+    onAllTexturesToggled: () => viewer.toggleAllTextures(),
+    onResetView: () => viewer.resetView(),
+    onViewSettingsChanged: (view) => applyViewSettings(view),
+    onExpressionChanged: (name, weight) => viewer.setManualExpression(name, weight),
   },
-});
+);
 
 viewer.onViewChanged = (): void => {
   updateViewReadout();

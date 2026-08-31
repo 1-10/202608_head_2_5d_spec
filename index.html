@@ -20,19 +20,22 @@
       </header>
 
       <div id="content-row">
+        <div class="gui-column" id="gui-export"></div>
+
         <main id="viewport-row">
           <section class="viewport-pane">
             <div class="pane-label">
-              3D ビュー（左ドラッグで回転 / 右ドラッグで平行移動 / ホイールで拡大。
-              1-4 で層、A/S/D/F でテクスチャ、T で全テクスチャ、R で正面・等倍）
-              <span class="readouts" id="readout-view">Yaw 0.0&deg; / Pitch 0.0&deg; / Zoom 1.00x</span>
+              3D ビュー（左ドラッグでカメラ周回 / Shift+左で首と視線 / 右ドラッグで平行移動 /
+              ホイールで拡大。1-4 で層、A/S/D/F でテクスチャ、T で全テクスチャ、W でワイヤー、
+              R で正面・無表情）
+              <span class="readouts" id="readout-view"></span>
             </div>
             <div class="pane-canvas" id="canvas-head"></div>
           </section>
           <pre id="report"></pre>
         </main>
 
-        <div id="gui-container"></div>
+        <div class="gui-column" id="gui-view"></div>
       </div>
 
       <section id="inspection-panel">

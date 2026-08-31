@@ -135,7 +135,7 @@ npm test
 |:--|:--|:--|
 | 投影 | 透視 FOV 20° / 距離 1.3m / 注視点 y=0.297m | `Scenes/Viewer.unity` の `MainCamera` |
 | 背景 | `#26292e` | 同 `MainCamera` の `m_BackGroundColor` |
-| 光 | 平行光 1 灯（上・前・被写体の右から）+ 環境光 | 同 `DirectionalLight` |
+| 光 | 平行光 1 灯（上・前・被写体の右から）**ワールド固定** + 環境光 0.65 | 同 `DirectionalLight`。環境光の量だけ旧 web 版の `AmbientLight` に合わせた |
 | 法線 | 肌・眼球・髪は **+Z 固定**（立体感は写真に焼き込まれている）、**口腔内は実法線** | `GnmHeadInstance.FlattenNormals` |
 | 髪 | alpha clip 0.3 | `MT_GnmHairTransparent` の `_Cutoff` |
 | 領域 | 7 つ・先勝ち（`MouthSock` → `Skin` → `Teeth` → `Gums` → `Tongue` → `EyeLeft` → `EyeRight`） | `Editor/GnmHeadAssetBuilder` の `regions` |
@@ -182,9 +182,17 @@ npm test
 テクスチャを外せるのは、絵の中の暗い所が「写真にそう写っていた」のか「面が無い・法線が逆・前後関係が
 壊れている」のかを分けるため。
 
-パラメータは「パラメーターを保存」で `localStorage` へ書き、次回起動時に復元する。**書き出しの値と
-ビューの値はキーを分けてある**（`export_parameters/v1` / `view_parameters/v1`）。書き出しの値は検査を
-通らなければ使わず `application` 側の既定へ戻し、ビューの値は結果に影響しないので範囲へ丸めて使う。
+**パネルは 2 枚に分かれている。** 左が書き出しパラメータ（zip の中身が変わる）、右が 3D ビュー
+（見え方しか変わらない）。同じ列に混ざっていると「今どちらを触ったか」が分からず、書き出しの値を
+ビューの値だと思って動かす事故が起きる。
+
+**パラメータは保存しない。** 毎回 `application/settings` と `presentation/viewSettings` の既定から
+始める。触った値が残っていると「前回いじった値のまま書き出した」に気付けないし、ブラウザや
+プロファイルを変えると再現しないので、保存されている方が混乱の種になる。
+
+**画面は縦スクロールしない。** 高さを `100vh` に固定し、はみ出しそうな箱（内訳・検査画像・左右の
+パネル）が自分のスクロールを持つ。ページごと流れると、3D ビューを見ながら値を触るという使い方が
+成り立たない（触るたびに位置が動く）。
 
 ### 調整パラメータ
 
@@ -226,6 +234,7 @@ npm test
 | CUDA カーネル・ONNX CUDA EP の box filter | 置き換える先が無いので domain の実装をそのまま呼ぶ。**品質判断は元から domain にある** |
 | zip の一時ファイル → rename | Blob を作り終えてから初めてダウンロードが始まるので、「最終名のファイルが現れた時点で必ず完成している」が構造的に満たされる |
 | 段ごとの開発用スクリプト（`tools/bake_atlas.py` 等） | 同じ役割を画面の検査画像とパラメータパネルが担う（写真を差し替えて即座に全段の絵が出る） |
+| パラメータの永続化（あちらは `QSettings`） | ブラウザでは保存されている方が混乱の種になる。プロファイルやブラウザを変えると再現せず、「前回いじった値のまま書き出した」にも気付けない。毎回 `application/settings` の既定から始める |
 | numpy のチャンク上限（`CANDIDATE_CHUNK_BUDGET` 等） | ベクトル化のための中間配列そのものが無い（テクセルごとの素直なループ） |
 | 3Dビューの遅延生成（`build_viewer_scene`） | 3Dビューが画面の主役で常に見えているので、門を置く先が無い |
 | デスクトップ側の 3D ビューの正射影・領域の分け方 | **ビューの正本を Unity 側へ替えた。** 消費側の絵に揃える方が確認として意味があるので、あちらの `debug_scene` の分け方（成分ごと・口腔内を一律の色）は使わない |
@@ -272,8 +281,8 @@ src/
   infrastructure/  # Port の実装（gnmb / gnmAsset / packaging / imaging / photoCanvas /
                    #   faceLandmarks / segmentation / depthNormal / atlasBaker / hairImage）
   composition.ts   # 配線（具体実装を組み立てて Port として注入するのはここだけ）
-  presentation/    # 入口（main / viewer / gui / inspectionView / input / parameterStore /
-                   #   viewSettings / style.css）
+  presentation/    # 入口（main / viewer / gui / inspectionView / input / viewSettings /
+                   #   style.css）
 tests/             # domain / application の検査（実アセットを読む。推論は偽の Port）
   golden/          # 正本の domain を動かして作った突き合わせ基準
 ```

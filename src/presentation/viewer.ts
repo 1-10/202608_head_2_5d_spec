@@ -17,8 +17,11 @@
 // 切り絵に見える。切り分けの正本は `domain/preview/normals` と Unity 側 `FlattenNormals`。
 //
 // 法線はメッシュ空間で作って**位置と同じ LBS の回転を掛ける**。シェーダ側で +Z の定数に置き換える形は
-// 使えない（首を回しても陰影が動かなくなる）。視点への変換は three.js の `normalMatrix` に任せる —
-// 自分で Euler の逆回転を組むと、yaw と pitch が同時に入ったときに合成の順序を間違える。
+// 使えない（首を回しても陰影が動かなくなる）。
+//
+// **光はワールド固定。** Unity 側も旧 web 版もワールドに置いた平行光で、カメラを動かしても顔に当たる
+// 向きは変わらない。オブジェクト行列は単位なので、頂点法線がそのままワールド法線になる — 視点座標へ
+// 移す変換は要らない（`normalMatrix` を掛けると光が画面に貼り付いて、周回しても陰影が動かなくなる）。
 //
 // 旧 web 版から残したもの: 首と視線のドラッグ操作（0.25°/px）・自動まばたき・ワイヤーフレーム・
 // 背景色・FOV と距離の調整。Unity 側に無いが、写真 1 枚から起こした頭を確認するのに効く。
@@ -94,15 +97,20 @@ const FAR_PLANE = 20;
 export const MAXIMUM_ZOOM = 5.0;
 export const MINIMUM_ZOOM = 0.3;
 
-/** 環境光の量。Unity 側は skybox の SH を固定方向で引くが、web は定数で置き換える。 */
-export const AMBIENT_LIGHT = 0.35;
+/**
+ * 環境光の量。
+ *
+ * Unity 側は skybox の SH を固定方向で引くので解析的には合わせられない。旧 web 版の
+ * `AmbientLight 0.65` に合わせてある（下げると影側が締まるが、写真に焼き込まれた陰影の上へさらに
+ * 陰影が乗るので、**写真をそのまま見たいならここは高い方が正しい**）。
+ */
+export const AMBIENT_LIGHT = 0.65;
 
 /**
- * 光の向き（画面座標・光源へ向かうベクトル）。
+ * 光の向き（**GNM 空間**・光源へ向かうベクトル）。
  *
- * Unity 側 `DirectionalLight` の向きを、あのシーンのカメラ基準へ写した値（Unity 空間は GNM 空間の X を
- * 反転した左手系なので x の符号が入れ替わる）。あちらのカメラは動かないので、光は画面に対して固定で
- * よい。web は周回できるが、写真に焼き込まれた陰影と喧嘩しない向きが要るので同じ扱いにする。
+ * Unity 側 `DirectionalLight` の向きを GNM 空間へ写した値（Unity 空間は GNM 空間の X を反転した
+ * 左手系なので x の符号が入れ替わる）。上・前・**被写体から見て右**から当たる。
  */
 export const LIGHT_DIRECTION: readonly [number, number, number] = [-0.2802, 0.5736, 0.7698];
 
@@ -161,9 +169,8 @@ varying vec2 vUv;
 varying vec3 vNormal;
 
 void main() {
-  // normalMatrix は three.js が modelViewMatrix から作る（逆転置）。光を画面座標に固定してあるので、
-  // 法線をここで視点座標へ移す。
-  vNormal = normalMatrix * normal;
+  // 光はワールド固定。オブジェクト行列は単位なので、これがそのままワールド法線。
+  vNormal = normal;
   vUv = uv;
   gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
 }
