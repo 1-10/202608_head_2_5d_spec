@@ -165,20 +165,31 @@ export function normalRotation(yaw: number, pitch: number): THREE.Matrix4 {
   return new THREE.Matrix4().makeRotationFromEuler(new THREE.Euler(pitch, yaw, 0, 'YXZ'));
 }
 
-/** RGB + alpha を sRGB のテクスチャにする（`domain/contract.COLOR_SPACE` の申告と同じ）。 */
+/**
+ * RGB + alpha を sRGB のテクスチャにする（`domain/contract.COLOR_SPACE` の申告と同じ）。
+ *
+ * **行の反転はここで済ませる。** アトラスの行 0 は v = 1 側（`domain/contract` の座標規約）で、GL の
+ * UV は下が v = 0。`flipY` に任せると、`UNPACK_FLIP_Y_WEBGL` が生の配列に効くかどうかという実装差に
+ * 結果が乗る（`DataTexture` は `flipY` の既定が false でもある）。**ここを間違えると顔が上下逆に
+ * 貼られる**ので、配列を作るときに 1 回だけ反転して `flipY` は false のままにする。デスクトップ側も
+ * 同じ理由で numpy 側（`[::-1]`）で反転している。
+ */
 function textureFrom(image: RgbImage, alpha: AlphaImage | null): THREE.DataTexture {
   const data = new Uint8Array(image.width * image.height * 4);
-  for (let pixel = 0; pixel < image.width * image.height; pixel++) {
-    data[pixel * 4] = image.data[pixel * 3];
-    data[pixel * 4 + 1] = image.data[pixel * 3 + 1];
-    data[pixel * 4 + 2] = image.data[pixel * 3 + 2];
-    data[pixel * 4 + 3] = alpha === null ? 255 : alpha.data[pixel];
+  for (let row = 0; row < image.height; row++) {
+    const sourceRow = image.height - 1 - row;
+    for (let column = 0; column < image.width; column++) {
+      const source = sourceRow * image.width + column;
+      const target = row * image.width + column;
+      data[target * 4] = image.data[source * 3];
+      data[target * 4 + 1] = image.data[source * 3 + 1];
+      data[target * 4 + 2] = image.data[source * 3 + 2];
+      data[target * 4 + 3] = alpha === null ? 255 : alpha.data[source];
+    }
   }
   const texture = new THREE.DataTexture(data, image.width, image.height, THREE.RGBAFormat);
   texture.colorSpace = THREE.SRGBColorSpace;
-  // アトラスの行 0 は v = 1 側（`domain/contract` の座標規約）。**ここを間違えると顔が上下逆に
-  // 貼られる。** デスクトップ側は行を反転して GL へ上げているのと同じ向き。
-  texture.flipY = true;
+  texture.flipY = false;
   texture.generateMipmaps = true;
   texture.minFilter = THREE.LinearMipmapLinearFilter;
   texture.magFilter = THREE.LinearFilter;
