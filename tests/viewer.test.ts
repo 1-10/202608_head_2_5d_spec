@@ -7,6 +7,7 @@
 // 首と視線・表情・領域分け・法線の数値そのものは `tests/preview.test.ts`（純粋計算と実アセット）で見る。
 
 import { describe, expect, it } from 'vitest';
+import * as THREE from 'three';
 import {
   ALL_TEXTURES_KEY,
   AMBIENT_LIGHT,
@@ -16,6 +17,7 @@ import {
   DEFAULT_BACKGROUND,
   DEFAULT_DISTANCE_METERS,
   DEFAULT_FOV_DEGREES,
+  FRAGMENT_SHADER,
   LAYER_KEYS,
   LIGHT_DIRECTION,
   MAXIMUM_ZOOM,
@@ -24,6 +26,7 @@ import {
   TARGET_HEIGHT_METERS,
   TEXTURE_KEYS,
   WIREFRAME_KEY,
+  srgbBaseColor,
 } from '../src/presentation/viewer';
 import { LAYER_ORDER } from '../src/domain/preview/asset';
 import { DEFAULT_VIEW_SETTINGS } from '../src/presentation/viewSettings';
@@ -64,6 +67,38 @@ describe('Unity 側から写したカメラと光', () => {
   it('拡大率の範囲は 0.3〜5.0', () => {
     expect(MINIMUM_ZOOM).toBe(0.3);
     expect(MAXIMUM_ZOOM).toBe(5.0);
+  });
+});
+
+// 色の空間は絵の見え方をそのまま決める。**ここが抜けると暗く・彩度が上がり、肌が赤く寄る** —
+// 実際にそうなっていた（`ShaderMaterial` は組込みマテリアルと違って自分で戻さないと戻らない）。
+describe('色の空間', () => {
+  it('線形で計算した色を出力の色空間へ戻す（gl_FragColor への代入より後で）', () => {
+    const assignment = FRAGMENT_SHADER.lastIndexOf('gl_FragColor =');
+    const conversion = FRAGMENT_SHADER.indexOf('#include <colorspace_fragment>');
+    expect(conversion).toBeGreaterThan(assignment);
+  });
+
+  it('平坦色は sRGB として受けて線形で渡す', () => {
+    // 端は動かない。中間は sRGB の伝達関数ぶん下がる（0.5 → 0.2140）。
+    expect(srgbBaseColor([0, 0, 0]).x).toBeCloseTo(0, 10);
+    expect(srgbBaseColor([255, 255, 255]).x).toBeCloseTo(1, 10);
+    const half = srgbBaseColor([128, 128, 128]);
+    expect(half.x).toBeCloseTo(((128 / 255 + 0.055) / 1.055) ** 2.4, 6);
+    expect(half.x).toBeLessThan(128 / 255);
+    expect(half.w).toBe(1);
+
+    // 口の中の色（Unity の _BaseColor）。灰色へ寄らず、赤が主のまま線形へ落ちる。
+    const sock = srgbBaseColor([80, 37, 37]);
+    expect(sock.x).toBeGreaterThan(sock.y);
+    expect(sock.y).toBeCloseTo(sock.z, 10);
+  });
+
+  it('色の表記を線形へ直すのは setStyle が済ませる（二重に変換していない）', () => {
+    // `ColorManagement.enabled` の既定が true で、作業色空間は線形。`convertSRGBToLinear` を
+    // 続けて呼ぶと二重変換になる（白では気付けないが、パネルで色を選ぶと沈む）。
+    const gray = new THREE.Color().setStyle('#808080');
+    expect(gray.r).toBeCloseTo(((128 / 255 + 0.055) / 1.055) ** 2.4, 6);
   });
 });
 

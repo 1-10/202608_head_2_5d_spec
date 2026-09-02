@@ -202,7 +202,17 @@ void main() {
 }
 `;
 
-const FRAGMENT_SHADER = `
+/**
+ * 断片シェーダ。
+ *
+ * **色の空間の扱いがここの要。** テクスチャは `SRGBColorSpace` で載せるので GL は
+ * `SRGB8_ALPHA8` で持ち、`texture2D` が返すのは**線形**の値。光を掛けるのは線形で正しいが、
+ * 既定のフレームバッファは sRGB として表示されるので、**書き出す前に sRGB へ戻さないと暗く・
+ * 彩度が上がる**（肌は赤が主なので「赤みが増した」に見える）。組込みマテリアルは
+ * `colorspace_fragment` で戻していて、`ShaderMaterial` では自分で書かないと戻らない。旧 web 版は
+ * `MeshStandardMaterial` だったので戻っていた — **ここが旧式との絵の差の主因だった**。
+ */
+export const FRAGMENT_SHADER = `
 uniform sampler2D uTexture;
 uniform bool uUseTexture;
 uniform bool uAlphaTest;
@@ -228,6 +238,8 @@ void main() {
   vec3 diffuse =
     uLightColor * uLightIntensity * (1.0 - uAmbient) * max(dot(normal, LIGHT_DIRECTION), 0.0);
   gl_FragColor = vec4(albedo.rgb * (uAmbientColor * uAmbient + diffuse), albedo.a);
+  // 線形 → 出力の色空間（linearToOutputTexel は three が prefix で定義する）。
+  #include <colorspace_fragment>
 }
 `;
 
@@ -263,6 +275,23 @@ function textureFrom(image: RgbImage, alpha: AlphaImage | null): THREE.DataTextu
   texture.wrapT = THREE.ClampToEdgeWrapping;
   texture.needsUpdate = true;
   return texture;
+}
+
+/**
+ * 平坦色（Unity の `_BaseColor`・sRGB の 0..255）を**線形**の RGBA にする。
+ *
+ * シェーダの掛け算は線形で、出力で sRGB へ戻す。ここを通さず 255 で割っただけの値を渡すと、
+ * 線形として扱われたまま sRGB へ戻るので**明るく・彩度が落ちた**色になる（口の中や歯が白っぽく
+ * なる）。あちらも linear color space の project なので、色は GPU へ渡る前に線形へ直っている。
+ */
+export function srgbBaseColor(rgb: readonly [number, number, number]): THREE.Vector4 {
+  const color = new THREE.Color().setRGB(
+    rgb[0] / 255,
+    rgb[1] / 255,
+    rgb[2] / 255,
+    THREE.SRGBColorSpace,
+  );
+  return new THREE.Vector4(color.r, color.g, color.b, 1);
 }
 
 /** 首・視線・表情を動かすのに要る入力。シーンと一緒に渡す。 */
@@ -461,21 +490,14 @@ export class Viewer {
         vertexShader: VERTEX_SHADER,
         fragmentShader: FRAGMENT_SHADER,
         uniforms: {
-          uLightColor: { value: new THREE.Color(DEFAULT_LIGHT_COLOR).convertSRGBToLinear() },
+          uLightColor: { value: new THREE.Color(DEFAULT_LIGHT_COLOR) },
           uLightIntensity: { value: DEFAULT_LIGHT_INTENSITY },
-          uAmbientColor: { value: new THREE.Color(DEFAULT_AMBIENT_COLOR).convertSRGBToLinear() },
+          uAmbientColor: { value: new THREE.Color(DEFAULT_AMBIENT_COLOR) },
           uAmbient: { value: AMBIENT_LIGHT },
           uTexture: { value: texture },
           uUseTexture: { value: texture !== null },
           uAlphaTest: { value: transparent },
-          uBaseColor: {
-            value: new THREE.Vector4(
-              mesh.baseColor[0] / 255,
-              mesh.baseColor[1] / 255,
-              mesh.baseColor[2] / 255,
-              1,
-            ),
-          },
+          uBaseColor: { value: srgbBaseColor(mesh.baseColor) },
         },
         // 開いた面を隠さない。
         side: THREE.DoubleSide,
@@ -527,17 +549,19 @@ export class Viewer {
   /**
    * ライトの値をマテリアルへ移す。
    *
-   * 色は**sRGB の表記で受けて線形へ直す**。テクスチャは sRGB として読み込み、出力も sRGB なので、
-   * 掛け算をするのは線形の側（three.js の標準マテリアルと同じ扱い）。
+   * 色は**sRGB の表記で受けて線形へ直す**。掛け算をするのは線形の側で、sRGB へ戻すのは
+   * シェーダの最後（`FRAGMENT_SHADER`）。
+   *
+   * **`setStyle` が線形へ直すところまでやる**（`ColorManagement.enabled` の既定が true で、
+   * 既定の作業色空間が線形）。ここで `convertSRGBToLinear` を続けて呼ぶと**二重に変換**され、
+   * 白以外を選んだときだけ暗く沈む。
    */
   private applyLighting(): void {
     for (const gpu of this.meshes) {
       const uniforms = gpu.material.uniforms;
-      (uniforms.uLightColor.value as THREE.Color).setStyle(this.lightColor).convertSRGBToLinear();
+      (uniforms.uLightColor.value as THREE.Color).setStyle(this.lightColor);
       uniforms.uLightIntensity.value = this.lightIntensity;
-      (uniforms.uAmbientColor.value as THREE.Color)
-        .setStyle(this.ambientColor)
-        .convertSRGBToLinear();
+      (uniforms.uAmbientColor.value as THREE.Color).setStyle(this.ambientColor);
       uniforms.uAmbient.value = this.ambient;
     }
   }
