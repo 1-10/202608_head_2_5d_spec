@@ -1,4 +1,4 @@
-# GNM Head Studio
+# Head 2.5D
 
 正面写真 1 枚から頭部を起こし、ブラウザの中で動かして確かめるツール。写真の顔を
 [Google GNM Head](https://github.com/google/GNM) のパラメトリック頭部へフィットさせ、肌・眼球・髪の
