@@ -86,7 +86,6 @@ export class MediaPipeFaceExpressionTracker implements FaceExpressionTracker {
     return {
       scores,
       points: normalizedPoints(result.faceLandmarks?.[0]),
-      aspect: aspectOf(source),
       headMatrix: matrix === undefined ? null : Float32Array.from(matrix),
     };
   }
@@ -101,27 +100,16 @@ export class MediaPipeFaceExpressionTracker implements FaceExpressionTracker {
 }
 
 /**
- * 正規化座標（x, y, z）を平たい配列へ落とす。
+ * 正規化座標（x, y）を平たい配列へ落とす。
  *
- * **z も渡す。** 表情を点から解くので、奥行きが無いと頭の向きを落とせない（点が平面に潰れ、
- * 相似変換が面外の回転を決められない）。z の尺度は MediaPipe の申告どおり x と同じ。
+ * **z は捨てる。** 使うのは映像へ点を重ねることだけで、奥行きは絵に出ない。
  */
-function normalizedPoints(
-  landmarks: { x: number; y: number; z: number }[] | undefined,
-): Float32Array {
+function normalizedPoints(landmarks: { x: number; y: number }[] | undefined): Float32Array {
   if (landmarks === undefined) return new Float32Array(0);
-  const points = new Float32Array(landmarks.length * 3);
+  const points = new Float32Array(landmarks.length * 2);
   for (let index = 0; index < landmarks.length; index++) {
-    points[index * 3] = landmarks[index].x;
-    points[index * 3 + 1] = landmarks[index].y;
-    points[index * 3 + 2] = landmarks[index].z;
+    points[index * 2] = landmarks[index].x;
+    points[index * 2 + 1] = landmarks[index].y;
   }
   return points;
-}
-
-/** 映像の縦横比。取れないときは 1（正方形として扱う方が、0 除算より害が小さい）。 */
-function aspectOf(source: VideoFrameSource): number {
-  const width = (source as { videoWidth?: number }).videoWidth ?? 0;
-  const height = (source as { videoHeight?: number }).videoHeight ?? 0;
-  return width > 0 && height > 0 ? width / height : 1;
 }
