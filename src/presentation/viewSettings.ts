@@ -14,6 +14,11 @@ import {
 } from '../domain/preview/expression';
 import { NECK_SHARE } from '../domain/preview/pose';
 import {
+  VISEME_FADE_SECONDS,
+  VISEME_HOLD_SECONDS,
+  VisemeMode,
+} from '../domain/preview/viseme';
+import {
   AMBIENT_LIGHT,
   DEFAULT_AMBIENT_COLOR,
   DEFAULT_BACKGROUND,
@@ -30,6 +35,13 @@ export const MAXIMUM_HOLD_SECONDS = 5;
 export const MINIMUM_EXPRESSION_INTENSITY = 0;
 export const MAXIMUM_EXPRESSION_INTENSITY = 2;
 
+// 口形の連続再生は 1 音ぶんが短いので、表情の 0〜2 秒 / 0〜5 秒とは範囲を分ける（同じ範囲だと
+// スライダーの端 1/10 でしか触れない）。
+export const MINIMUM_VISEME_FADE_SECONDS = 0;
+export const MAXIMUM_VISEME_FADE_SECONDS = 0.6;
+export const MINIMUM_VISEME_HOLD_SECONDS = 0;
+export const MAXIMUM_VISEME_HOLD_SECONDS = 0.6;
+
 /** 自動再生の選べる値（GUI のドロップダウンの並び）。 */
 export const PLAY_MODES: readonly ExpressionPlayMode[] = ['off', 'sequence', 'random'];
 
@@ -38,6 +50,21 @@ export const PLAY_MODE_LABELS: Readonly<Record<ExpressionPlayMode, string>> = {
   off: '手動',
   sequence: '順番に',
   random: 'ランダム',
+};
+
+/** 口形の駆動の選べる値（GUI のドロップダウンの並び）。 */
+export const VISEME_MODES: readonly VisemeMode[] = ['off', 'manual', 'sequence'];
+
+/**
+ * 口形の駆動の日本語ラベル。
+ *
+ * `off` を「手動」と呼ばない（表情の `PLAY_MODE_LABELS` とは意味が違う）。口形の `off` は
+ * **口形を一切立てない**で、そのとき顔を駆動するのは従来どおり表情の側。
+ */
+export const VISEME_MODE_LABELS: Readonly<Record<VisemeMode, string>> = {
+  off: '使わない',
+  manual: '手動',
+  sequence: '連続再生',
 };
 
 /** 3D ビューの調整値。 */
@@ -62,6 +89,17 @@ export interface ViewSettings {
   readonly holdSeconds: number;
   readonly expressionIntensity: number;
   readonly blinkEnabled: boolean;
+  /**
+   * 口形の駆動。
+   *
+   * 口形の**量**はここに持たない。焼いたプリセット 1 本なので、手で立てるぶんは表情のスライダーと
+   * 同じ入れ物（`PanelState.expressions`）に入る — 同じものを 2 か所で持つと片方だけ古くなる。
+   */
+  readonly visemeMode: VisemeMode;
+  readonly visemeFadeSeconds: number;
+  readonly visemeHoldSeconds: number;
+  /** 連続再生を お の次に あ へ戻すか。 */
+  readonly visemeLoop: boolean;
 }
 
 export const DEFAULT_VIEW_SETTINGS: ViewSettings = {
@@ -84,4 +122,8 @@ export const DEFAULT_VIEW_SETTINGS: ViewSettings = {
   holdSeconds: HOLD_SECONDS,
   expressionIntensity: 1,
   blinkEnabled: true,
+  visemeMode: 'off',
+  visemeFadeSeconds: VISEME_FADE_SECONDS,
+  visemeHoldSeconds: VISEME_HOLD_SECONDS,
+  visemeLoop: true,
 };

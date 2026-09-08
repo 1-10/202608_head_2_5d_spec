@@ -49,6 +49,7 @@ import {
   eyeExpressionMask,
   startBlink,
 } from '../domain/preview/expression';
+import { splitPresetIndices } from '../domain/preview/viseme';
 import {
   DEGREES_PER_PIXEL,
   HeadPose,
@@ -351,6 +352,13 @@ export class Viewer {
    */
   private appliedWeights: Float64Array | null = null;
   private manualWeights: Float64Array | null = null;
+  /**
+   * 自動再生が回すプリセットの index。
+   *
+   * **口形を混ぜない。** アセットは表情と口形を 1 本の並びで持つので、`presetCount` をそのまま回すと
+   * 「表情の自動再生」が口を あ にする。分けるのは名前（`domain/preview/viseme`）。
+   */
+  private expressionIndices: readonly number[] = [];
   /** まばたきが動かす頂点（クロスフェードをこの範囲へ閉じる）。 */
   private eyeMask: Uint8Array | null = null;
   /** 今フレームのまばたき量。0（開眼）〜1（閉眼）。 */
@@ -410,6 +418,19 @@ export class Viewer {
   /** 今かかっている自動再生のプリセット名（無ければ null）。 */
   currentExpression: string | null = null;
 
+  /**
+   * 表情の重みを外から差し込む口（1 フレームぶん）。
+   *
+   * `null` なら自動再生と手のスライダーで駆動する。**重みを埋めるのは呼ばれた側**
+   * （`weights` は毎フレーム 0 で来る。長さは `presetCount`）。返り値は読み出しに出す名前。
+   *
+   * ここを口にしておくと、口形・トラッキング・録画の再生といった「別の駆動源」が
+   * ビューアーの中へ状態を増やさずに入れ替われる。
+   */
+  expressionOverride:
+    | ((weights: Float64Array, deltaSeconds: number) => string | null)
+    | null = null;
+
   /** 視点や表示状態が変わったときに呼ばれる（UI の同期用）。 */
   onViewChanged: (() => void) | null = null;
 
@@ -450,6 +471,7 @@ export class Viewer {
     this.expressionWeights = new Float64Array(animation.preview.presetCount);
     this.appliedWeights = new Float64Array(animation.preview.presetCount);
     this.manualWeights = new Float64Array(animation.preview.presetCount);
+    this.expressionIndices = splitPresetIndices(animation.preview).expressions;
     this.eyeMask = eyeExpressionMask(animation.preview);
     this.blinkAmount = 0;
     this.appliedBlinkAmount = 0;
@@ -600,6 +622,9 @@ export class Viewer {
     this.headPose = NEUTRAL_POSE;
     this.followPointer = false;
     this.manualWeights?.fill(0);
+    // **外から差した駆動源（`expressionOverride`）は外さない。** ここは「今の姿勢と手で立てた値を
+    // 初期状態へ戻す」であって、駆動のしかたを止める場所ではない — 自動再生（`playMode`）も
+    // 止めていない。差し替えるかどうかは差した側が決める。
     this.playback = IDLE_PLAYBACK;
     this.currentExpression = null;
     this.poseDirty = true;
@@ -763,7 +788,12 @@ export class Viewer {
 
     const weights = this.expressionWeights;
     weights.fill(0);
-    if (this.playMode === 'off') {
+    if (this.expressionOverride !== null) {
+      this.currentExpression = this.expressionOverride(weights, deltaSeconds);
+      for (let preset = 0; preset < weights.length; preset++) {
+        weights[preset] *= this.expressionIntensity;
+      }
+    } else if (this.playMode === 'off') {
       if (this.manualWeights !== null) {
         for (let preset = 0; preset < weights.length; preset++) {
           weights[preset] = this.manualWeights[preset] * this.expressionIntensity;
@@ -773,10 +803,11 @@ export class Viewer {
     } else {
       // 自動再生中は手のスライダーを無視する。
       // **同時に立てるのは 1 本だけ**（加算変位なので重ねると顔が壊れる）。Unity 側と同じ扱い。
+      // 回すのは表情だけで、口形は含めない（口形は別の駆動源が回す）。
       const step = advancePlayback(
         this.playback,
         this.playMode,
-        preview.presetCount,
+        this.expressionIndices.length,
         deltaSeconds,
         Math.random,
         this.fadeSeconds,
@@ -784,8 +815,9 @@ export class Viewer {
       );
       this.playback = step.playback;
       if (step.index >= 0) {
-        weights[step.index] = step.weight * this.expressionIntensity;
-        this.currentExpression = preview.expressionPresetNames[step.index];
+        const preset = this.expressionIndices[step.index];
+        weights[preset] = step.weight * this.expressionIntensity;
+        this.currentExpression = preview.expressionPresetNames[preset];
       }
     }
 
@@ -1043,6 +1075,7 @@ export class Viewer {
     this.expressionWeights = null;
     this.appliedWeights = null;
     this.manualWeights = null;
+    this.expressionIndices = [];
     this.eyeMask = null;
   }
 }

@@ -36,6 +36,7 @@ import {
   startBlink,
   weightsFor,
 } from '../src/domain/preview/expression';
+import { splitPresetIndices } from '../src/domain/preview/viseme';
 import {
   GAZE_LIMIT_DEGREES,
   NECK_SHARE,
@@ -280,9 +281,14 @@ describe('スキニングとジョイント', () => {
 });
 
 describe('表情プリセット', () => {
-  it('Unity 側と同じ 20 本', () => {
+  // 本数そのものではなく「Unity 側と同じ 20 本が入っていること」を見る。アセットは web 側で足した
+  // 口形（`viseme_*`）も同じ並びに持つので、`presetCount` を数えると 20 にならない。口形の側の
+  // 検査は `tests/viseme.test.ts`。
+  it('表情は Unity 側と同じ 20 本（口形はそこに数えない）', () => {
     const preview = loadPreview();
-    expect(preview.presetCount).toBe(20);
+    const { expressions, visemes } = splitPresetIndices(preview);
+    expect(expressions.length).toBe(20);
+    expect(expressions.length + visemes.length).toBe(preview.presetCount);
   });
 
   it('重みを立てると顔が動き、0 に戻すと元へ戻る', () => {
