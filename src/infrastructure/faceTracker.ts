@@ -14,7 +14,7 @@
 // presentation まで漏らさない。
 
 import { FaceLandmarker } from '@mediapipe/tasks-vision';
-import { FaceExpressionTracker, VideoFrameSource } from '../application/ports';
+import { FaceExpressionTracker, FaceTrackingFrame, VideoFrameSource } from '../application/ports';
 import { ModelFileNotFoundError } from '../domain/errors';
 import { FACE_LANDMARKER_MODEL_URL, visionFileset } from './mediapipeVision';
 
@@ -23,6 +23,8 @@ export class MediaPipeFaceExpressionTracker implements FaceExpressionTracker {
   private starting: Promise<void> | null = null;
   /** `detectForVideo` は単調増加する時刻を要求するので、渡した最後の値を覚える。 */
   private lastTimestampMs = -1;
+  /** `stop()` のたびに進む。取得中の `create()` が自分の世代と比べて用済みを判る。 */
+  private generation = 0;
 
   async start(): Promise<void> {
     if (this.landmarker !== null) return;
@@ -37,25 +39,34 @@ export class MediaPipeFaceExpressionTracker implements FaceExpressionTracker {
   }
 
   private async create(): Promise<void> {
+    // **取得中に `stop()` が来たら、出来上がったものをその場で閉じる。** `await` の後で無条件に
+    // 代入すると、止めたつもりのトラッカーが生き残って誰も `close()` しない（世代で見分ける）。
+    const generation = this.generation;
     try {
       const vision = await visionFileset();
-      this.landmarker = await FaceLandmarker.createFromOptions(vision, {
+      const landmarker = await FaceLandmarker.createFromOptions(vision, {
         baseOptions: { modelAssetPath: FACE_LANDMARKER_MODEL_URL, delegate: 'GPU' },
         runningMode: 'VIDEO',
         numFaces: 1,
         outputFaceBlendshapes: true,
-        outputFacialTransformationMatrixes: false,
+        // 首を動かすモードで使う（表情だけのときは読まない）。
+        outputFacialTransformationMatrixes: true,
       });
+      if (generation !== this.generation) {
+        landmarker.close();
+        return;
+      }
+      this.landmarker = landmarker;
       this.lastTimestampMs = -1;
     } catch (error) {
-      this.landmarker = null;
+      if (generation === this.generation) this.landmarker = null;
       throw new ModelFileNotFoundError(
         `表情トラッカーを初期化できません: ${String(error)}`,
       );
     }
   }
 
-  detect(source: VideoFrameSource, timestampMs: number): ReadonlyMap<string, number> | null {
+  detect(source: VideoFrameSource, timestampMs: number): FaceTrackingFrame | null {
     if (this.landmarker === null) return null;
     // 同じ時刻を 2 回渡すと MediaPipe が例外を投げる。1ms ずらして単調増加を保つ。
     const timestamp =
@@ -71,12 +82,34 @@ export class MediaPipeFaceExpressionTracker implements FaceExpressionTracker {
       if (name === '') continue;
       scores.set(name, category.score);
     }
-    return scores;
+    const matrix = result.facialTransformationMatrixes?.[0]?.data;
+    return {
+      scores,
+      points: normalizedPoints(result.faceLandmarks?.[0]),
+      headMatrix: matrix === undefined ? null : Float32Array.from(matrix),
+    };
   }
 
   stop(): void {
+    // 世代を進めると、取得中の `create()` が「自分はもう用済み」と分かる。
+    this.generation++;
     this.landmarker?.close();
     this.landmarker = null;
     this.lastTimestampMs = -1;
   }
+}
+
+/**
+ * 正規化座標（x, y）を平たい配列へ落とす。
+ *
+ * **z は捨てる。** 使うのは映像へ点を重ねることだけで、奥行きは絵に出ない。
+ */
+function normalizedPoints(landmarks: { x: number; y: number }[] | undefined): Float32Array {
+  if (landmarks === undefined) return new Float32Array(0);
+  const points = new Float32Array(landmarks.length * 2);
+  for (let index = 0; index < landmarks.length; index++) {
+    points[index * 2] = landmarks[index].x;
+    points[index * 2 + 1] = landmarks[index].y;
+  }
+  return points;
 }

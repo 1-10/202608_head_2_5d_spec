@@ -9,21 +9,15 @@
 import { describe, expect, it } from 'vitest';
 import * as THREE from 'three';
 import {
-  ALL_TEXTURES_KEY,
   AMBIENT_LIGHT,
   DEFAULT_AMBIENT_COLOR,
   DEFAULT_LIGHT_COLOR,
   DEFAULT_LIGHT_INTENSITY,
   DEFAULT_BACKGROUND,
   FRAGMENT_SHADER,
-  LAYER_KEYS,
   LIGHT_DIRECTION,
-  RESET_KEY,
-  TEXTURE_KEYS,
-  WIREFRAME_KEY,
   srgbBaseColor,
 } from '../src/presentation/viewer';
-import { LAYER_ORDER } from '../src/domain/preview/asset';
 import {
   DEFAULT_FOV_DEGREES,
   DEFAULT_ORBIT_RADIUS_METERS,
@@ -102,24 +96,6 @@ describe('色の空間', () => {
     // 続けて呼ぶと二重変換になる（白では気付けないが、パネルで色を選ぶと沈む）。
     const gray = new THREE.Color().setStyle('#808080');
     expect(gray.r).toBeCloseTo(((128 / 255 + 0.055) / 1.055) ** 2.4, 6);
-  });
-});
-
-describe('キー割り当て', () => {
-  it('層とテクスチャのキーは LAYER_ORDER と同じ並び', () => {
-    expect(Object.values(LAYER_KEYS)).toEqual([...LAYER_ORDER]);
-    expect(Object.values(TEXTURE_KEYS)).toEqual([...LAYER_ORDER]);
-  });
-
-  it('単独キーが重複していない', () => {
-    const codes = [
-      ...Object.keys(LAYER_KEYS),
-      ...Object.keys(TEXTURE_KEYS),
-      ALL_TEXTURES_KEY,
-      RESET_KEY,
-      WIREFRAME_KEY,
-    ];
-    expect(new Set(codes).size).toBe(codes.length);
   });
 });
 

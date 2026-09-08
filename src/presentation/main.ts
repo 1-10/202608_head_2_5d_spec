@@ -4,7 +4,6 @@
 // `application/exportGuest.describeFailure` が持ち、パラメータの既定値と範囲は
 // `application/settings` が持つ。ここがするのは、それを画面へ出すことだけ。
 
-import './style.css';
 import { bakeReport } from '../domain/atlas/bake';
 import { LAYER_ORDER } from '../domain/preview/asset';
 import { buildPreviewScene } from '../domain/preview/scene';
@@ -12,8 +11,13 @@ import { irisToLimbusRatio } from '../domain/eyes/bake';
 import { EYE_SIDES } from '../domain/eyes/layout';
 import { depthCoverage } from '../domain/hair/shell';
 import { PhotoRgb } from '../domain/photo';
-import { ExportOutcome, describeFailure, isPipelineError } from '../application/exportGuest';
-import { Exporter, GnmAssetBundle, buildGuestZip, createFaceExpressionTracker } from '../composition';
+import {
+  ExportOutcome,
+  STAGE_NAMES,
+  describeFailure,
+  isPipelineError,
+} from '../application/exportGuest';
+import { Exporter, GnmAssetBundle, createFaceExpressionTracker } from '../composition';
 import {
   GuiHandle,
   createPanelState,
@@ -33,14 +37,14 @@ import { parseRecording } from '../domain/preview/recording';
 const elements = {
   buttonWebcam: requireElement<HTMLButtonElement>('btn-webcam'),
   buttonUpload: requireElement<HTMLButtonElement>('btn-upload'),
-  buttonReset: requireElement<HTMLButtonElement>('btn-reset'),
-  buttonExport: requireElement<HTMLButtonElement>('btn-export'),
   fileInput: requireElement<HTMLInputElement>('file-input'),
   recordingInput: requireElement<HTMLInputElement>('recording-input'),
-  status: requireElement<HTMLElement>('status-message'),
+  statusBox: requireElement<HTMLElement>('viewport-status'),
+  statusTitle: requireElement<HTMLElement>('status-title'),
+  statusStages: requireElement<HTMLElement>('status-stages'),
+  buttonStatusClose: requireElement<HTMLButtonElement>('btn-status-close'),
   report: requireElement<HTMLElement>('report'),
   viewport: requireElement<HTMLElement>('canvas-head'),
-  viewReadout: requireElement<HTMLElement>('readout-view'),
   video: requireElement<HTMLVideoElement>('webcam-video'),
   guiExport: requireElement<HTMLElement>('gui-export'),
   guiView: requireElement<HTMLElement>('gui-view'),
@@ -119,7 +123,6 @@ const visemeDriver = new VisemeDriver();
 const recordingPlayer = new RecordingPlayer();
 
 let photo: PhotoRgb | null = null;
-let outcome: ExportOutcome | null = null;
 let bundle: GnmAssetBundle | null = null;
 let busy = false;
 /** Webカメラが表情の駆動を握っているときの差し込み口（握っていなければ `null`）。 */
@@ -143,6 +146,20 @@ const webcamPanel = new WebcamPanel(inputManager, createFaceExpressionTracker(),
   acceptPhoto: (next) => acceptPhoto(next),
   setStatus: (message, isError) => setStatus(message, isError),
   recording: recordingPlayer,
+  setHeadPose: (yawDegrees, pitchDegrees) => {
+    // **マウス追従は切る。** あちらが入ったままだと `setHeadPose` を受け付けず、カメラで首を
+    // 動かしているつもりでカーソルが向きを決め続ける（どちらが動かしているか読めなくなる）。
+    if (panelState.view.followPointer) {
+      panelState.view.followPointer = false;
+      viewer.followPointer = false;
+    }
+    viewer.setHeadPose({
+      headYawDegrees: yawDegrees,
+      headPitchDegrees: pitchDegrees,
+      gazeYawDegrees: 0,
+      gazePitchDegrees: 0,
+    });
+  },
 });
 webcamPanel.onOpenChanged = (): void => {
   elements.buttonWebcam.setAttribute('aria-pressed', String(webcamPanel.isOpen));
@@ -277,6 +294,17 @@ function toggleRecordingPlayback(): void {
 
 /** 収録した表情アニメーション（JSON）を読み込む。 */
 async function loadRecording(file: File): Promise<void> {
+  // **読み込む前に、まだ 3D ビューへ頭が出ていないなら断る。** プリセット名が空のまま
+  // `parseRecording` へ渡すと「一致する名前が 1 つも無い」枝へ落ち、**別のアセットで録った**という
+  // 嘘の理由が出る（ページを開いて最初に押すだけで踏める）。
+  if (viewer.expressionNames().length === 0) {
+    setStatus('先に写真を通してください（収録の表情を当てる頭がまだありません）。', true);
+    return;
+  }
+  // **録画中なら止めてから差し替える。** クリップの持ち主はひとつなので、差し替えただけでは
+  // Webカメラは録画を続け、読み込んだクリップの後ろへ接ぎ木される（「保存」で混ざったものが出る）。
+  stopOtherDrivers('recording');
+  webcamPanel.stopRecording();
   try {
     const loaded = parseRecording(await file.text(), viewer.expressionNames());
     recordingPlayer.setRecording(loaded.recording);
@@ -332,63 +360,181 @@ recordingPlayer.onFinished = (): void => {
 recordingPlayer.onRecordingChanged = (): void => syncPlaybackControls();
 
 viewer.onViewChanged = (): void => {
-  updateViewReadout();
   gui.syncViewControls(viewer.layerStates(), viewer.textureStates());
   gui.syncHeadPose(viewer.headPose);
   gui.syncCameraPose(viewer.cameraPose);
 };
 
-// キー操作は 3Dビューが持つ（層・テクスチャ・視点のリセット）。入力欄にフォーカスがあるときは
-// 拾わない。
+// `Esc` でオーバーレイ（検査画像・内訳）を閉じる。**それ以外のキーは持たない** — 層やテクスチャの
+// 切り替えは右パネルが入口で、同じ操作の入口を 2 つ持つと片方だけ状態が動く経路を塞ぎ続けることに
+// なる。
 window.addEventListener('keydown', (event) => {
   if (event.metaKey || event.ctrlKey || event.altKey) return;
   if (event.code === 'Escape' && !elements.overlay.hidden) {
     overlay.close();
     event.preventDefault();
-    return;
   }
-  const target = event.target as HTMLElement | null;
-  if (target !== null && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)) return;
-  if (viewer.handleKey(event.code)) event.preventDefault();
 });
 
+/**
+ * 3D ビューの中央に出す状態表示。**置き場はここだけ。**
+ *
+ * 進行（段の一覧）・完了・失敗・案内を同じ箱が出す。ツールバーの隅にも出していたが、処理の結果が
+ * 出るのは 3D ビューなので、隅だけだと「どこで何が起きているか」が結び付かない — 2 か所へ出すのも
+ * やめた（同じことを 2 か所が言うと、片方だけ古くなる）。
+ *
+ * **段の一覧は `STAGE_NAMES` から作る。** ここへ書き写すと、段が増減したとき画面だけ古くなる。
+ */
+const status = {
+  /** 段の `<li>`（一覧は 1 回だけ作る）。 */
+  items: new Map<string, HTMLElement>(),
+
+  build(): void {
+    for (const stage of STAGE_NAMES) {
+      const item = document.createElement('li');
+      item.textContent = stage;
+      item.dataset.state = 'todo';
+      elements.statusStages.appendChild(item);
+      status.items.set(stage, item);
+    }
+  },
+
+  /**
+   * 段ごとの所要（秒）。**画面に出すために測る** — どの段が重いかは、写真の大きさや実行環境で
+   * 変わるので、都度見えないと当てられない。
+   */
+  timings: [] as { stage: string; seconds: number }[],
+  /** 今の段が始まった時刻（`performance.now()`）。 */
+  startedAtMs: 0,
+  /** 今出している段（走っていなければ `null`）。経過を毎フレーム書き直すのに使う。 */
+  runningStage: null as string | null,
+  /** 書き出し全体が始まった時刻。 */
+  runStartedAtMs: 0,
+
+  /** ひとこと出す。空文字で閉じる（段の一覧も隠す）。 */
+  message(text: string, isError = false): void {
+    status.runningStage = null;
+    elements.statusTitle.textContent = text;
+    elements.statusTitle.classList.toggle('error', isError);
+    elements.statusStages.hidden = true;
+    elements.statusBox.hidden = text === '';
+  },
+
+  /** 書き出しを始める（時計を初期化する）。 */
+  beginRun(): void {
+    status.runningStage = null;
+    status.timings = [];
+    status.runStartedAtMs = performance.now();
+    status.startedAtMs = status.runStartedAtMs;
+  },
+
+  /** 今の段を出す（段の一覧つき）。前の段の所要をここで締める。 */
+  stage(stage: string): void {
+    const now = performance.now();
+    const previous = STAGE_NAMES.indexOf(stage) - 1;
+    if (previous >= 0 && status.timings.length === previous) {
+      status.timings.push({
+        stage: STAGE_NAMES[previous],
+        seconds: (now - status.startedAtMs) / 1000,
+      });
+    }
+    status.startedAtMs = now;
+    status.runningStage = stage;
+    const index = STAGE_NAMES.indexOf(stage);
+    for (const [name, item] of status.items) {
+      const at = STAGE_NAMES.indexOf(name);
+      item.textContent = name;
+      item.dataset.state = at < index ? 'done' : at === index ? 'active' : 'todo';
+    }
+    status.tick();
+    elements.statusTitle.classList.remove('error');
+    elements.statusStages.hidden = false;
+    elements.statusBox.hidden = false;
+  },
+
+  /**
+   * 経過を書き直す。**`animate` から毎フレーム呼ぶ。**
+   *
+   * 段の切り替わりでしか書かないと、重い段（推論は 30 秒かかることがある）の間ずっと同じ数が
+   * 出たままで、進んでいるのか固まったのか分からない。
+   */
+  tick(): void {
+    const stage = status.runningStage;
+    if (stage === null) return;
+    const index = STAGE_NAMES.indexOf(stage);
+    const elapsed = ((performance.now() - status.runStartedAtMs) / 1000).toFixed(1);
+    elements.statusTitle.textContent =
+      index < 0
+        ? `${stage}　経過 ${elapsed}s`
+        : `${stage}（${index + 1} / ${STAGE_NAMES.length}）　経過 ${elapsed}s`;
+  },
+
+  /**
+   * 失敗を出す。**段の一覧は出したまま**にする — どこまで進んで落ちたかが画面に残る方が原因を
+   * 追える。
+   */
+  failure(text: string): void {
+    status.runningStage = null;
+    elements.statusTitle.textContent = text;
+    elements.statusTitle.classList.add('error');
+    elements.statusBox.hidden = false;
+  },
+
+  /**
+   * 書き出しが終わったことと、かかった時間を出す。
+   *
+   * **閉じない。** 段の一覧を全部「済んだ」にして残す — どの段に時間がかかったかは、次に触る値を
+   * 決めるのに使う（重いのがアトラスなら一辺を落とす、など）。
+   */
+  finishRun(): void {
+    status.runningStage = null;
+    const now = performance.now();
+    const last = STAGE_NAMES.length - 1;
+    if (status.timings.length === last) {
+      status.timings.push({
+        stage: STAGE_NAMES[last],
+        seconds: (now - status.startedAtMs) / 1000,
+      });
+    }
+    const total = ((now - status.runStartedAtMs) / 1000).toFixed(1);
+    elements.statusTitle.textContent = `書き出し完了　${total}s`;
+    elements.statusTitle.classList.remove('error');
+    for (const [name, item] of status.items) {
+      const timing = status.timings.find((entry) => entry.stage === name);
+      item.textContent = timing === undefined ? name : `${name} ${timing.seconds.toFixed(1)}s`;
+      item.dataset.state = 'done';
+    }
+    elements.statusStages.hidden = false;
+    elements.statusBox.hidden = false;
+  },
+
+  /** 段の一覧を「まだ」へ戻して閉じる（名前も所要を外した形へ戻す）。 */
+  reset(): void {
+    for (const [name, item] of status.items) {
+      item.textContent = name;
+      item.dataset.state = 'todo';
+    }
+    status.timings = [];
+    status.message('');
+  },
+};
+
+/** 状態表示への入口（Webカメラなど外からも使う）。 */
 function setStatus(message: string, isError = false): void {
-  elements.status.textContent = message;
-  elements.status.classList.toggle('error', isError);
+  status.message(message, isError);
 }
 
-function updateViewReadout(): void {
-  const pose = viewer.headPose;
-  // **パネルと同じ言い方にする。** 右パネルの「カメラ」節に出るのと同じ位置 (m) と回転 (°) で、
-  // 別の言い換え（拡大率など）をここだけで作らない。
-  const camera = viewer.cameraPose;
-  const meters = (value: number): string => value.toFixed(3);
-  // **駆動源の名前はそのまま出す。** 表情の自動再生はプリセット名（英字）を返し、口形の連続再生は
-  // 「口形 あ」と自分で名乗る。ここで「表情」と決め打ちすると、別の駆動源が差さったときに黙って
-  // 嘘のラベルになる。
-  const expression = viewer.currentExpression === null ? '' : ` / ${viewer.currentExpression}`;
-  elements.viewReadout.textContent =
-    `カメラ 位置 ${meters(camera.position[0])}, ${meters(camera.position[1])},` +
-    ` ${meters(camera.position[2])} m /` +
-    ` 回転 X ${camera.pitchDegrees.toFixed(1)}° / Y ${camera.yawDegrees.toFixed(1)}°` +
-    ` — 首 ${pose.headYawDegrees.toFixed(1)}° / ${pose.headPitchDegrees.toFixed(1)}° /` +
-    ` 視線 ${pose.gazeYawDegrees.toFixed(1)}° / ${pose.gazePitchDegrees.toFixed(1)}°${expression}`;
-}
 
-function updateButtons(): void {
-  elements.buttonExport.disabled = busy || photo === null;
-}
 
 /** 書き出しを走らせ、3Dビューと検査画像と内訳を更新する。 */
 async function runExport(): Promise<void> {
   if (photo === null || busy) return;
   busy = true;
-  updateButtons();
+  status.beginRun();
   try {
     const result = await exporter.run(photo, toExportSettings(panelState), (stage) =>
-      setStatus(`段「${stage}」を実行しています…`),
+      status.stage(stage),
     );
-    outcome = result;
     if (bundle === null) throw new Error('アセットが読めていない');
     const source = result.previewSceneSource;
     const scene = buildPreviewScene({
@@ -443,17 +589,16 @@ async function runExport(): Promise<void> {
     webcamPanel.refresh();
     renderInspection(elements.inspection, result.inspection);
     elements.report.textContent = buildReport(result);
-    setStatus('');
+    status.finishRun();
   } catch (error) {
     console.error(error);
     const report = describeFailure(error);
     const stage = report.stage === null ? '' : `段「${report.stage}」で`;
     const remedy = report.remedy === null ? '' : `\n${report.remedy}`;
-    setStatus(`${stage}失敗しました（${report.errorType}）: ${report.cause}${remedy}`, true);
+    status.failure(`${stage}失敗しました（${report.errorType}）: ${report.cause}${remedy}`);
     if (!isPipelineError(error)) console.warn('想定外の失敗（バグの可能性）', error);
   } finally {
     busy = false;
-    updateButtons();
   }
 }
 
@@ -491,26 +636,21 @@ function buildReport(result: ExportOutcome): string {
   }
   const provider = exporter.depthNormalProvider;
   if (provider !== null) lines.push(`DAViD の実行環境: ${provider}`);
+  // 段ごとの所要も内訳へ。画面の一覧は次の書き出しで消えるが、こちらは残して見比べられる。
+  if (status.timings.length > 0) {
+    const total = status.timings.reduce((sum, entry) => sum + entry.seconds, 0);
+    lines.push(
+      `所要 ${total.toFixed(1)}s（` +
+        status.timings.map((entry) => `${entry.stage} ${entry.seconds.toFixed(1)}s`).join(' / ') +
+        '）',
+    );
+  }
   return lines.join('\n');
-}
-
-/** guest zip をダウンロードさせる。 */
-async function downloadZip(): Promise<void> {
-  if (outcome === null) return;
-  const { blob, filename } = await buildGuestZip(outcome.artifacts);
-  const anchor = document.createElement('a');
-  anchor.href = URL.createObjectURL(blob);
-  anchor.download = filename;
-  anchor.click();
-  URL.revokeObjectURL(anchor.href);
-  setStatus(`書き出し完了: ${filename}（${(blob.size / 1024 / 1024).toFixed(1)}MB）`);
 }
 
 async function acceptPhoto(next: PhotoRgb): Promise<void> {
   photo = next;
-  outcome = null;
   elements.report.textContent = '';
-  updateButtons();
   await runExport();
 }
 
@@ -536,38 +676,22 @@ elements.recordingInput.addEventListener('change', async () => {
 
 elements.buttonWebcam.addEventListener('click', () => webcamPanel.toggle());
 
-elements.buttonReset.addEventListener('click', () => {
-  webcamPanel.reset();
-  photo = null;
-  outcome = null;
-  viewer.dispose();
-  elements.inspection.replaceChildren();
-  elements.report.textContent = '';
-  overlay.close();
-  webcamPanel.refresh();
-  updateButtons();
-  setStatus('');
-});
-
-elements.buttonExport.addEventListener('click', () => {
-  if (outcome === null) void runExport().then(() => downloadZip());
-  else void downloadZip();
-});
-
 window.addEventListener('resize', () => viewer.resize());
 
 function animate(): void {
   requestAnimationFrame(animate);
   viewer.render();
   syncPlaybackControls();
+  status.tick();
 }
 
+// 済んだ表示は自分で閉じられるようにする（終わった後も残り続けるので）。
+elements.buttonStatusClose.addEventListener('click', () => status.message(''));
 elements.buttonInspection.addEventListener('click', () => overlay.toggle('inspection'));
 elements.buttonReport.addEventListener('click', () => overlay.toggle('report'));
 elements.buttonOverlayClose.addEventListener('click', () => overlay.close());
+status.build();
 overlay.syncButtons();
-updateViewReadout();
-updateButtons();
 animate();
 
 // GNM アセットは 32MB あるので、写真を待たずに落とし始める（初回の書き出しの待ちを短くする）。

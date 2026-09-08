@@ -32,25 +32,15 @@ body {
   overflow: hidden;
 }
 
+/* 見出しは持たない（画面の中身だけで用が足りる）。帯はボタンを並べるだけ。 */
 #toolbar {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 16px;
   flex-wrap: wrap;
-  padding: 10px 16px;
+  padding: 8px 16px;
   border-bottom: 1px solid var(--line);
   background: var(--panel);
-}
-
-#toolbar h1 {
-  margin: 0;
-  font-size: 15px;
-  font-weight: 600;
-}
-
-#toolbar .subtitle {
-  color: var(--muted);
-  font-weight: 400;
 }
 
 .toolbar-actions {
@@ -80,15 +70,6 @@ button:disabled {
   cursor: default;
 }
 
-.status-message {
-  font-size: 12px;
-  color: var(--muted);
-  white-space: pre-line;
-}
-
-.status-message.error {
-  color: var(--error);
-}
 
 #content-row {
   display: flex;
@@ -128,6 +109,8 @@ button:disabled {
   flex: 1 1 auto;
   min-height: 0;
   cursor: grab;
+  /* 進行表示をこの中へ絶対配置で重ねる。 */
+  position: relative;
 }
 
 .pane-canvas.dragging {
@@ -305,15 +288,115 @@ button:disabled {
  * 映像は**ミラー表示**（自分が動いた向きと画面の向きが揃っていないと合わせられない）。
  * `captureWebcamFrame` は video の画素をそのまま読むので、写真は非反転のまま — 表示だけを返す。
  */
+/*
+ * 状態表示。**3D ビューの中央に出す**（処理の結果が出るのはここなので、ツールバーの隅だけに
+ * 出しても「どこで何が起きているか」が結び付かない）。**置き場はここだけ** — 進行・完了・失敗・
+ * 案内を同じ箱が出す。`pointer-events: none` で操作は透かす（出ている間もビューを回せる）。
+ */
+#viewport-status {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  max-width: min(560px, calc(100% - 32px));
+  padding: 12px 16px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--panel) 92%, transparent);
+  text-align: center;
+  /* 箱そのものは操作を透かす（出ている間もビューを回せる）。閉じるボタンだけ受ける。 */
+  pointer-events: none;
+}
+
+/* 済んだ表示は自分で閉じられるようにする（終わった後も残り続けるので）。 */
+.status-close {
+  position: absolute;
+  top: 2px;
+  right: 4px;
+  padding: 0 4px;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.status-close:hover {
+  color: var(--text);
+}
+
+#viewport-status[hidden],
+.status-stages[hidden] {
+  display: none;
+}
+
+.status-title {
+  margin: 0 14px 0 0;
+  font-size: 12px;
+  color: var(--text);
+  white-space: pre-line;
+}
+
+.status-title.error {
+  color: var(--error);
+}
+
+.status-stages {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 4px 10px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: 11px;
+}
+
+/* 済んだ段・今の段・まだの段を色で分ける（状態は JS が `data-state` で置く）。 */
+.status-stages li[data-state='done'] {
+  color: var(--muted);
+}
+
+.status-stages li[data-state='done']::before {
+  content: '✓ ';
+}
+
+.status-stages li[data-state='active'] {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.status-stages li[data-state='todo'] {
+  color: color-mix(in srgb, var(--muted) 55%, transparent);
+}
+
+.webcam-stage {
+  position: relative;
+  display: block;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  overflow: hidden;
+  /* 映像と追跡点をまとめて反転する。**canvas 側で座標を反転しない**（二重になる）。 */
+  transform: scaleX(-1);
+}
+
 .webcam-video {
   display: block;
   width: 100%;
   aspect-ratio: 4 / 3;
-  border: 1px solid var(--line);
-  border-radius: 4px;
   background: #000;
   object-fit: cover;
-  transform: scaleX(-1);
+}
+
+/* 追えている点。映像とぴったり重ねるので、大きさは JS 側が表示画素へ合わせる。 */
+.webcam-overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
 }
 
 .webcam-row {

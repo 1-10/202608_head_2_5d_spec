@@ -3,12 +3,18 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>GNM Head Exporter (Web)</title>
+    <!-- タブの名前。リポジトリ名（202608_head_2_5d_spec）から日付と種別を落としたもの。 -->
+    <title>Head 2.5D</title>
+    <!--
+      **スタイルは head から読む。** `main.ts` の `import './style.css'` に任せると、JS の
+      モジュールグラフが解けてから注入されるので、それまで既定の白い面が一瞬出る（実際にそう
+      見えていた）。ここから読めば最初の描画の前に当たり、色の値を 2 か所に写す必要も無い。
+    -->
+    <link rel="stylesheet" href="/src/presentation/style.css" />
   </head>
   <body>
     <div id="app">
       <header id="toolbar">
-        <h1>GNM Head Exporter <span class="subtitle">(Web)</span></h1>
         <div class="toolbar-actions">
           <button id="btn-webcam" aria-pressed="false">Webカメラ</button>
           <button id="btn-upload">写真を選ぶ</button>
@@ -19,11 +25,8 @@
             ブラウザ任せになる。操作するボタンは右パネルの「表情アニメーション」にある。
           -->
           <input id="recording-input" type="file" accept="application/json,.json" hidden />
-          <button id="btn-reset">Reset</button>
-          <button id="btn-export" disabled>guest zip を書き出す</button>
           <button id="btn-inspection" aria-pressed="false">検査画像</button>
           <button id="btn-report" aria-pressed="false">内訳</button>
-          <span id="status-message" class="status-message"></span>
         </div>
       </header>
 
@@ -32,13 +35,28 @@
 
         <main id="viewport-row">
           <section class="viewport-pane">
+            <!--
+              **今の値は読み出しに出さない。** カメラの位置・回転と首・視線は右パネルが持っており、
+              同じ数を 2 か所へ出すと片方だけ古くなる（触った側しか動かない）。ここは操作の割り当て
+              だけを出す。
+            -->
             <div class="pane-label">
               3D ビュー（左ドラッグでカメラ周回 / Shift+左で首と視線 / 右ドラッグで平行移動 /
-              ホイールで拡大。1-4 で層、A/S/D/F でテクスチャ、T で全テクスチャ、W でワイヤー、
-              R で正面・無表情）
-              <span class="readouts" id="readout-view"></span>
+              ホイールで寄り引き）
             </div>
-            <div class="pane-canvas" id="canvas-head"></div>
+            <div class="pane-canvas" id="canvas-head">
+              <!--
+                **状態は 3D ビューの中央に出す。ここが唯一の置き場。** 処理の結果が出るのは
+                ここなので、ツールバーの隅に出しても「どこで何が起きているか」が結び付かない
+                （隅の表示はやめた）。進行の段の一覧は `application/exportGuest` の
+                `STAGE_NAMES` から作る（ここに写さない）。
+              -->
+              <div id="viewport-status" hidden>
+                <button id="btn-status-close" class="status-close" title="閉じる">&times;</button>
+                <p class="status-title" id="status-title"></p>
+                <ol class="status-stages" id="status-stages" hidden></ol>
+              </div>
+            </div>
           </section>
 
           <!--
@@ -70,7 +88,14 @@
               <button id="btn-webcam-close" class="overlay-close" title="閉じる">&times;</button>
             </div>
             <div class="webcam-body">
-              <video id="webcam-video" class="webcam-video" autoplay playsinline muted></video>
+              <!--
+                追えている点は映像と同じ箱へ重ねる。**canvas 側で座標を反転しない** — 箱ごと
+                CSS で左右反転するので、二重に反転すると点が合わなくなる。
+              -->
+              <div class="webcam-stage">
+                <video id="webcam-video" class="webcam-video" autoplay playsinline muted></video>
+                <canvas id="webcam-overlay" class="webcam-overlay"></canvas>
+              </div>
 
               <div class="webcam-row">
                 <button id="btn-camera">カメラ開始</button>
@@ -79,6 +104,9 @@
 
               <div class="webcam-row">
                 <button id="btn-track" aria-pressed="false" disabled>表情トラッキング</button>
+                <label class="webcam-check" title="表情に加えて首の向きも追う">
+                  <input id="chk-head" type="checkbox" />首も動かす
+                </label>
               </div>
 
               <div class="webcam-row">

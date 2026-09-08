@@ -265,3 +265,33 @@ describe('読み込みの検証', () => {
     expect(loaded.recording.frames[0].weights[0]).toBeCloseTo(0.5, 6);
   });
 });
+
+describe('時刻の丸めと単調増加', () => {
+  it('丸めると同じ時刻になるフレームは積まない（保存 → 読み込みで食い違わせない）', () => {
+    const names = ['a', 'b'];
+    let recording = startRecording(names);
+    const weights = new Float64Array([0.5, 0.25]);
+    recording = appendFrame(recording, 0.0016, weights, 0).recording;
+    recording = appendFrame(recording, 0.00201, weights, 0).recording;
+    expect(recording.frames).toHaveLength(1);
+
+    // 丸めて別の値になるものは積む。
+    recording = appendFrame(recording, 0.0031, weights, 0).recording;
+    expect(recording.frames).toHaveLength(2);
+    const times = recording.frames.map((frame) => frame.timeSeconds);
+    expect(times[1]).toBeGreaterThan(times[0]);
+  });
+
+  it('積んだ時刻は厳密に増加する（読み込みが逆行として落とさない）', () => {
+    const names = ['a'];
+    let recording = startRecording(names);
+    const weights = new Float64Array([0]);
+    for (let step = 0; step < 200; step++) {
+      recording = appendFrame(recording, step * 0.0004, weights, 0).recording;
+    }
+    const times = recording.frames.map((frame) => frame.timeSeconds);
+    for (let index = 1; index < times.length; index++) {
+      expect(times[index]).toBeGreaterThan(times[index - 1]);
+    }
+  });
+});

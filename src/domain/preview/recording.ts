@@ -84,7 +84,12 @@ export function appendFrame(
   if (timeSeconds > maximumSeconds) return { recording, full: true };
   const frames = recording.frames;
   const last = frames.length === 0 ? null : frames[frames.length - 1];
-  if (last !== null && timeSeconds <= last.timeSeconds) return { recording, full: false };
+  // **量子化した後の値で比べる。** 格納するのは丸めた時刻なので、生の値で比べると 0.0016 と
+  // 0.00201 のように「生では増えているが丸めると同じ」フレームが並び、`timeSeconds` が厳密に
+  // 増加するという契約が破れる（保存 → 読み込みで `parseRecording` が逆行として落とすため、
+  // 録ったものと読み直したものが食い違う）。
+  const quantized = quantize(timeSeconds);
+  if (last !== null && quantized <= last.timeSeconds) return { recording, full: false };
   if (weights.length !== recording.presetNames.length) {
     throw new Error(
       `重みが ${weights.length} 個（期待 ${recording.presetNames.length}）`,
@@ -97,7 +102,7 @@ export function appendFrame(
       ...recording,
       frames: [
         ...frames,
-        { timeSeconds: quantize(timeSeconds), weights: rounded, blink: quantize(clamp01(blink)) },
+        { timeSeconds: quantized, weights: rounded, blink: quantize(clamp01(blink)) },
       ],
     },
     full: false,

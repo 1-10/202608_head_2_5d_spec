@@ -30,6 +30,8 @@ import { describeFailure } from '../application/exportGuest';
 import {
   BLINK_TIME_CONSTANT_SECONDS,
   EXPRESSION_TIME_CONSTANT_SECONDS,
+  HEAD_TIME_CONSTANT_SECONDS,
+  headPoseFromMatrix,
   TrackingPlan,
   blendshapesToTargets,
   missingCategories,
@@ -40,6 +42,7 @@ import {
   strongestPreset,
 } from '../domain/preview/faceTracking';
 import { MAX_RECORDING_SECONDS, serializeRecording } from '../domain/preview/recording';
+import { isVisemePreset } from '../domain/preview/viseme';
 import { RecordingSink } from './recordingPlayer';
 import { PhotoRgb } from '../domain/photo';
 import { InputManager } from './input';
@@ -62,6 +65,13 @@ export interface WebcamPanelHost {
   acceptPhoto(photo: PhotoRgb): Promise<void>;
   /** ツールバーの状態表示。 */
   setStatus(message: string, isError?: boolean): void;
+  /**
+   * 首の向きを渡す（「首も動かす」が入っている間だけ毎フレーム呼ぶ）。
+   *
+   * **ビューアーへ直に触らせない**のは表情と同じ。視線は渡さない — 目の向きは blendshape から
+   * 素直に取れず、外すと「見ていない方を見る」顔になるので、確認用途では首だけの方が良い。
+   */
+  setHeadPose(yawDegrees: number, pitchDegrees: number): void;
   /**
    * 収録の置き場。**録る側は積むだけで、クリップは持たない。**
    *
@@ -88,6 +98,10 @@ const MODE_LABELS: Readonly<Record<WebcamMode, string>> = {
  */
 const FACE_LOST_SECONDS = 0.5;
 
+/** 追えている点の色と一辺（画素）。映像の上に出すので、暗い顔でも明るい顔でも見える色にする。 */
+const TRACKING_POINT_COLOR = '#4ade80';
+const TRACKING_POINT_SIZE = 2;
+
 export class WebcamPanel {
   private readonly input: InputManager;
   private readonly tracker: FaceExpressionTracker;
@@ -107,6 +121,11 @@ export class WebcamPanel {
   private targetBlink = 0;
   private smoothedBlink = 0;
   private faceLostSeconds = 0;
+  /** 首の追従（「首も動かす」が入っている間だけ）。 */
+  private targetHeadYaw = 0;
+  private targetHeadPitch = 0;
+  private smoothedHeadYaw = 0;
+  private smoothedHeadPitch = 0;
   /** `<video>` の同じフレームを 2 回推論しない。 */
   private lastVideoTime = -1;
   /** 対応の取りこぼしは開発者向けに 1 回だけ出す。 */
@@ -164,6 +183,20 @@ export class WebcamPanel {
     this.input.stopWebcam();
     this.cameraOn = false;
     this.lastVideoTime = -1;
+    this.drawTrackingPoints(null);
+    this.refresh();
+  }
+
+  /**
+   * 録画中なら録画だけを止める（カメラとトラッキングは続ける）。
+   *
+   * クリップの持ち主は外（`RecordingPlayer`）なので、**外がクリップを差し替えるときはここも
+   * 止めないと**録画が続いて、差し替えた先へ積み続ける。
+   */
+  stopRecording(): void {
+    if (this.mode !== 'recording') return;
+    this.mode = 'tracking';
+    this.setNote('');
     this.refresh();
   }
 
@@ -228,6 +261,15 @@ export class WebcamPanel {
     elements.camera.addEventListener('click', () => void this.toggleCamera());
     elements.capture.addEventListener('click', () => void this.capture());
     elements.track.addEventListener('click', () => void this.toggleTracking());
+    elements.head.addEventListener('change', () => {
+      // 切ったらその場で正面へ戻す。最後に追っていた向きで固まると、手のスライダーを触るまで
+      // 首が傾いたままになる。
+      this.smoothedHeadYaw = 0;
+      this.smoothedHeadPitch = 0;
+      this.targetHeadYaw = 0;
+      this.targetHeadPitch = 0;
+      if (!elements.head.checked) this.host.setHeadPose(0, 0);
+    });
     elements.record.addEventListener('click', () => this.toggleRecording());
     elements.save.addEventListener('click', () => this.save());
   }
@@ -264,6 +306,7 @@ export class WebcamPanel {
   private async toggleTracking(): Promise<void> {
     if (this.mode === 'tracking' || this.mode === 'recording') {
       this.releaseDriver('off');
+      this.drawTrackingPoints(null);
       this.refresh();
       return;
     }
@@ -331,6 +374,10 @@ export class WebcamPanel {
     this.smoothedWeights.fill(0);
     this.targetBlink = 0;
     this.smoothedBlink = 0;
+    this.targetHeadYaw = 0;
+    this.targetHeadPitch = 0;
+    this.smoothedHeadYaw = 0;
+    this.smoothedHeadPitch = 0;
     this.faceLostSeconds = 0;
     this.lastVideoTime = -1;
   }
@@ -350,10 +397,14 @@ export class WebcamPanel {
             this.plan.unknownPresets.join(', '),
         );
       }
-      if (this.plan.unmappedPresets.length > 0) {
+      // **口形（`viseme_*`）は除く。** あれは web 側で足した口の形で、カメラで駆動する対象では
+      // ない（連続再生と手のスライダーが動かす）。混ぜると「ARKit に対応が無い」という診断が
+      // 嘘になる。
+      const undriven = this.plan.unmappedPresets.filter((name) => !isVisemePreset(name));
+      if (undriven.length > 0) {
         console.info(
           'カメラでは駆動されない表情プリセット（ARKit 側に対応する項目が無い）: ' +
-            this.plan.unmappedPresets.join(', '),
+            undriven.join(', '),
         );
       }
     }
@@ -374,13 +425,22 @@ export class WebcamPanel {
     // 同じ映像フレームを 2 回推論しない（描画は 60fps、カメラは 30fps のことが多い）。
     if (this.cameraOn && video.readyState >= 2 && video.currentTime !== this.lastVideoTime) {
       this.lastVideoTime = video.currentTime;
-      const scores = this.tracker.detect(video, performance.now());
-      if (scores === null) {
+      const frame = this.tracker.detect(video, performance.now());
+      if (frame === null) {
         this.faceLostSeconds += deltaSeconds;
+        this.drawTrackingPoints(null);
       } else {
         this.faceLostSeconds = 0;
-        this.targetBlink = blendshapesToTargets(plan, scores, this.targetWeights).blink;
-        this.reportCategories(plan, scores);
+        this.targetBlink = blendshapesToTargets(plan, frame.scores, this.targetWeights).blink;
+        this.reportCategories(plan, frame.scores);
+        this.drawTrackingPoints(frame.points);
+        if (this.elements.head.checked && frame.headMatrix !== null) {
+          const head = headPoseFromMatrix(frame.headMatrix);
+          if (head !== null) {
+            this.targetHeadYaw = head.yawDegrees;
+            this.targetHeadPitch = head.pitchDegrees;
+          }
+        }
       }
     } else if (!this.cameraOn) {
       this.faceLostSeconds += deltaSeconds;
@@ -388,6 +448,9 @@ export class WebcamPanel {
     if (this.faceLostSeconds > FACE_LOST_SECONDS) {
       this.targetWeights.fill(0);
       this.targetBlink = 0;
+      // 顔を見失ったら首も正面へ戻す（最後の向きで固まると「まだ追えている」ように見える）。
+      this.targetHeadYaw = 0;
+      this.targetHeadPitch = 0;
     }
 
     smoothToward(
@@ -401,6 +464,19 @@ export class WebcamPanel {
       smoothingFactor(deltaSeconds, BLINK_TIME_CONSTANT_SECONDS),
     );
     weights.set(this.smoothedWeights);
+
+    // **首は「首も動かす」が入っているときだけ渡す。** 入っていなければ手のスライダーと
+    // マウス追従のものが残る（黙って上書きしない）。
+    if (this.elements.head.checked) {
+      const headFactor = smoothingFactor(deltaSeconds, HEAD_TIME_CONSTANT_SECONDS);
+      this.smoothedHeadYaw = smoothScalar(this.smoothedHeadYaw, this.targetHeadYaw, headFactor);
+      this.smoothedHeadPitch = smoothScalar(
+        this.smoothedHeadPitch,
+        this.targetHeadPitch,
+        headFactor,
+      );
+      this.host.setHeadPose(this.smoothedHeadYaw, this.smoothedHeadPitch);
+    }
 
     if (this.mode === 'recording') {
       this.recordSeconds += deltaSeconds;
@@ -417,6 +493,37 @@ export class WebcamPanel {
     }
     this.updateTimer(false);
     return strongestPreset(plan, this.smoothedWeights);
+  }
+
+  /**
+   * 追えている点を映像へ重ねる（`null` で消す）。
+   *
+   * **何を追えているかが見えないと、表情が合わない原因が「検出できていない」のか「対応表の
+   * 当て方」なのか分けられない。** 点は正規化座標で来るので、canvas の画素へ引き伸ばすだけ。
+   * 映像は CSS で左右反転しているので、canvas も同じ箱に重ねて一緒に反転させる（座標を自分で
+   * 反転しない — 二重に反転して合わなくなる）。
+   */
+  private drawTrackingPoints(points: Float32Array | null): void {
+    const canvas = this.elements.overlay;
+    const video = this.input.video;
+    const width = video.clientWidth;
+    const height = video.clientHeight;
+    if (width === 0 || height === 0) return;
+    // 表示の大きさが変わったときだけ作り直す（毎フレーム代入すると中身が消える）。
+    if (canvas.width !== width || canvas.height !== height) {
+      canvas.width = width;
+      canvas.height = height;
+    }
+    const context = canvas.getContext('2d');
+    if (context === null) return;
+    context.clearRect(0, 0, width, height);
+    if (points === null || points.length === 0) return;
+    context.fillStyle = TRACKING_POINT_COLOR;
+    for (let index = 0; index < points.length / 2; index++) {
+      const x = points[index * 2] * width;
+      const y = points[index * 2 + 1] * height;
+      context.fillRect(x - TRACKING_POINT_SIZE / 2, y - TRACKING_POINT_SIZE / 2, TRACKING_POINT_SIZE, TRACKING_POINT_SIZE);
+    }
   }
 
   /** 対応表が求めるカテゴリのうち返ってこなかったものを 1 回だけ出す。 */
@@ -466,11 +573,15 @@ export class WebcamPanel {
 
 interface PanelElements {
   readonly panel: HTMLElement;
+  /** 追えている点を描く先。映像と同じ箱に重ねてある。 */
+  readonly overlay: HTMLCanvasElement;
   readonly state: HTMLElement;
   readonly close: HTMLButtonElement;
   readonly camera: HTMLButtonElement;
   readonly capture: HTMLButtonElement;
   readonly track: HTMLButtonElement;
+  /** 首も動かすか。**既定は切**（表情だけを写すのが元の約束）。 */
+  readonly head: HTMLInputElement;
   readonly record: HTMLButtonElement;
   readonly save: HTMLButtonElement;
   readonly timer: HTMLElement;
@@ -480,11 +591,13 @@ interface PanelElements {
 function collectElements(): PanelElements {
   return {
     panel: requireElement<HTMLElement>('webcam-panel'),
+    overlay: requireElement<HTMLCanvasElement>('webcam-overlay'),
     state: requireElement<HTMLElement>('webcam-state'),
     close: requireElement<HTMLButtonElement>('btn-webcam-close'),
     camera: requireElement<HTMLButtonElement>('btn-camera'),
     capture: requireElement<HTMLButtonElement>('btn-capture'),
     track: requireElement<HTMLButtonElement>('btn-track'),
+    head: requireElement<HTMLInputElement>('chk-head'),
     record: requireElement<HTMLButtonElement>('btn-record'),
     save: requireElement<HTMLButtonElement>('btn-save'),
     timer: requireElement<HTMLElement>('webcam-timer'),

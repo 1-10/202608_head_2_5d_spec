@@ -21,6 +21,8 @@ import {
   smoothingFactor,
   splitBlinkAndWink,
   strongestPreset,
+  WINK_FULL_ASYMMETRY,
+  headPoseFromMatrix,
 } from '../src/domain/preview/faceTracking';
 import { loadPreview } from './asset';
 
@@ -208,11 +210,29 @@ describe('まばたきとウィンクの切り分け', () => {
     expect(split.winkLeft).toBe(0);
   });
 
-  it('片目だけ閉じたらウィンク、まばたきは残りの共通ぶんだけ', () => {
+  it('片目だけ閉じたらウィンクだけが立ち、まばたきは 0', () => {
     const split = splitBlinkAndWink(0.95, 0.05);
     expect(split.winkLeft).toBeGreaterThan(0.5);
     expect(split.winkRight).toBe(0);
-    expect(split.blink).toBeLessThan(0.2);
+    expect(split.blink).toBe(0);
+  });
+
+  // 実際に出ていた症状の検査。MediaPipe は片目を閉じたとき**開いている側にも 0.1〜0.3 を返す**
+  // ので、左右差は 1.0 に届かない。共通ぶん（min）をまばたきに残す作りだと、ここで両目が薄く
+  // 閉じたうえ、`blendBlink` の置き換えでウィンクまで弱まる。
+  it('開いている側にクロストークが乗っても両目は閉じない', () => {
+    for (const open of [0.1, 0.2, 0.3]) {
+      const split = splitBlinkAndWink(0.9, open);
+      expect(split.blink).toBe(0);
+      expect(split.winkLeft).toBeGreaterThan(0.5);
+      expect(split.winkRight).toBe(0);
+    }
+  });
+
+  it('左右差が上限に届く前にウィンクへ振り切る（1.0 を待たない）', () => {
+    const split = splitBlinkAndWink(0.5 + WINK_FULL_ASYMMETRY / 2, 0.5 - WINK_FULL_ASYMMETRY / 2);
+    expect(split.blink).toBe(0);
+    expect(split.winkLeft).toBeCloseTo(WINK_FULL_ASYMMETRY, 6);
   });
 
   it('もう片方も同じ形で立つ', () => {
@@ -290,5 +310,54 @@ describe('スムージング', () => {
   it('経過 0 では動かない（同じフレームで 2 回進めない）', () => {
     expect(smoothingFactor(0, EXPRESSION_TIME_CONSTANT_SECONDS)).toBe(0);
     expect(smoothScalar(0.4, 1, smoothingFactor(0, EXPRESSION_TIME_CONSTANT_SECONDS))).toBe(0.4);
+  });
+});
+
+describe('駆動されないプリセットの一覧', () => {
+  it('ウィンクは「駆動されない」に入らない（対応表に無いが実際に立つ）', () => {
+    const resolved = plan();
+    expect(resolved.unmappedPresets).not.toContain('wink_left');
+    expect(resolved.unmappedPresets).not.toContain('wink_right');
+  });
+});
+
+describe('頭の姿勢の取り出し', () => {
+  /** `Ry(yaw) * Rx(pitch)` を**行優先**で並べた 4x4（MediaPipe と同じ並び）。 */
+  function matrixFor(yawRadians: number, pitchRadians: number): Float32Array {
+    const cy = Math.cos(yawRadians);
+    const sy = Math.sin(yawRadians);
+    const cx = Math.cos(pitchRadians);
+    const sx = Math.sin(pitchRadians);
+    return Float32Array.from([
+      cy, sy * sx, sy * cx, 0,
+      0, cx, -sx, 0,
+      -sy, cy * sx, cy * cx, 0,
+      0, 0, 0, 1,
+    ]);
+  }
+
+  it('正面はゼロ', () => {
+    const pose = headPoseFromMatrix(matrixFor(0, 0), false);
+    expect(pose).not.toBeNull();
+    expect(pose!.yawDegrees).toBeCloseTo(0, 4);
+    expect(pose!.pitchDegrees).toBeCloseTo(0, 4);
+  });
+
+  it('yaw と pitch を分けて取り出せる', () => {
+    const pose = headPoseFromMatrix(matrixFor((20 * Math.PI) / 180, (-12 * Math.PI) / 180), false);
+    expect(pose!.yawDegrees).toBeCloseTo(20, 3);
+    expect(pose!.pitchDegrees).toBeCloseTo(-12, 3);
+  });
+
+  it('鏡にすると yaw だけ符号が返る（pitch は変わらない）', () => {
+    const direct = headPoseFromMatrix(matrixFor((20 * Math.PI) / 180, (10 * Math.PI) / 180), false);
+    const mirrored = headPoseFromMatrix(matrixFor((20 * Math.PI) / 180, (10 * Math.PI) / 180), true);
+    expect(mirrored!.yawDegrees).toBeCloseTo(-direct!.yawDegrees, 6);
+    expect(mirrored!.pitchDegrees).toBeCloseTo(direct!.pitchDegrees, 6);
+  });
+
+  it('短い配列と退化した行列は null（atan2 が 0 を返すのに任せない）', () => {
+    expect(headPoseFromMatrix(new Float32Array(4))).toBeNull();
+    expect(headPoseFromMatrix(new Float32Array(16))).toBeNull();
   });
 });

@@ -37,6 +37,7 @@ import {
   EXPRESSION_TIME_CONSTANT_SECONDS,
   MAX_TOTAL_WEIGHT,
   WINK_ASYMMETRY_THRESHOLD,
+  WINK_FULL_ASYMMETRY,
 } from '../src/domain/preview/faceTracking';
 import { MAX_RECORDING_SECONDS } from '../src/domain/preview/recording';
 import {
@@ -174,9 +175,12 @@ describe('README の Webカメラの表', () => {
     );
   });
 
-  it('ウィンクの閾値', () => {
+  it('ウィンクの閾値（振り切る側も写す）', () => {
+    expect(WINK_FULL_ASYMMETRY).toBeGreaterThan(WINK_ASYMMETRY_THRESHOLD);
+    expect(WINK_FULL_ASYMMETRY).toBeLessThan(1);
     expect(README).toContain(
-      `| ウィンクの閾値 | 左右差 ${WINK_ASYMMETRY_THRESHOLD} 超で \`wink_left\` / \`wink_right\` へ |`,
+      `| ウィンクの閾値 | 左右差 ${WINK_ASYMMETRY_THRESHOLD} 超で \`wink_left\` / \`wink_right\` へ・` +
+        `${WINK_FULL_ASYMMETRY} で振り切ってまばたきは 0 |`,
     );
   });
 
