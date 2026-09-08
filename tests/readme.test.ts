@@ -24,6 +24,14 @@ import {
 } from '../src/domain/preview/pose';
 import { FADE_SECONDS, HOLD_SECONDS } from '../src/domain/preview/expression';
 import {
+  BLINK_TIME_CONSTANT_SECONDS,
+  CATEGORY_DEADBAND,
+  EXPRESSION_TIME_CONSTANT_SECONDS,
+  MAX_TOTAL_WEIGHT,
+  WINK_ASYMMETRY_THRESHOLD,
+} from '../src/domain/preview/faceTracking';
+import { MAX_RECORDING_SECONDS } from '../src/domain/preview/recording';
+import {
   AMBIENT_LIGHT,
   DEFAULT_AMBIENT_COLOR,
   DEFAULT_BACKGROUND,
@@ -120,5 +128,35 @@ describe('README の 3D ビューの表', () => {
     expect(README).toContain(
       `立ち上がり ${FADE_SECONDS}s / 保持 ${HOLD_SECONDS}s |`,
     );
+  });
+});
+
+describe('README の Webカメラの表', () => {
+  it('雑音の切り捨て', () => {
+    expect(README).toContain(
+      `| 雑音の切り捨て | スコア ${CATEGORY_DEADBAND} 以下は 0（超えたぶんを 0〜1 へ伸ばす） |`,
+    );
+  });
+
+  it('重みの合計の上限', () => {
+    expect(README).toContain(`| 重みの合計の上限 | ${MAX_TOTAL_WEIGHT}（超えたら比例で縮める） |`);
+  });
+
+  it('時定数（表情とまばたきで違える）', () => {
+    expect(BLINK_TIME_CONSTANT_SECONDS).toBeLessThan(EXPRESSION_TIME_CONSTANT_SECONDS);
+    expect(README).toContain(
+      `| 時定数 | 表情 ${EXPRESSION_TIME_CONSTANT_SECONDS}s /` +
+        ` まばたき ${BLINK_TIME_CONSTANT_SECONDS}s |`,
+    );
+  });
+
+  it('ウィンクの閾値', () => {
+    expect(README).toContain(
+      `| ウィンクの閾値 | 左右差 ${WINK_ASYMMETRY_THRESHOLD} 超で \`wink_left\` / \`wink_right\` へ |`,
+    );
+  });
+
+  it('録画の上限', () => {
+    expect(README).toContain(`| 録画の上限 | ${MAX_RECORDING_SECONDS} 秒 |`);
   });
 });
