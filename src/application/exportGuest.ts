@@ -59,11 +59,13 @@ import {
   sampleField,
 } from '../domain/field';
 import {
+  CameraUnavailableError,
   ExporterError,
   FaceNotDetectedError,
   GpuUnavailableError,
   InputImageError,
   ModelFileNotFoundError,
+  RecordingFileError,
   SkinColorUnavailableError,
 } from '../domain/errors';
 import { EYE_SIDES, EyeSide } from '../domain/eyes/layout';
@@ -170,6 +172,15 @@ const REMEDIES: readonly [new (...args: never[]) => Error, string][] = [
   [
     ModelFileNotFoundError,
     'モデルかアセットを取得できませんでした。ネットワークを確認して読み込み直してください。',
+  ],
+  [
+    CameraUnavailableError,
+    'カメラを使えません。ブラウザのカメラの許可を確認し、他のアプリが使っていないか' +
+      '見てください（https か localhost でないとブラウザが拒否します）。',
+  ],
+  [
+    RecordingFileError,
+    '録画した表情を読めませんでした。この画面の「保存」で書き出した JSON を選んでください。',
   ],
   [
     FaceNotDetectedError,

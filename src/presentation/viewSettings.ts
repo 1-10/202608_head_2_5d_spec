@@ -89,6 +89,8 @@ export interface ViewSettings {
   readonly visemeHoldSeconds: number;
   /** 連続再生を お の次に あ へ戻すか。 */
   readonly visemeLoop: boolean;
+  /** 収録した表情アニメーションをループ再生するか。 */
+  readonly recordingLoop: boolean;
 }
 
 // シーンを読む前の姿勢（注視点は眼の高さの既定）。シーンがあるときは頭部の中心を見るので、
@@ -122,4 +124,5 @@ export const DEFAULT_VIEW_SETTINGS: ViewSettings = {
   visemeFadeSeconds: VISEME_FADE_SECONDS,
   visemeHoldSeconds: VISEME_HOLD_SECONDS,
   visemeLoop: true,
+  recordingLoop: false,
 };

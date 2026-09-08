@@ -6,7 +6,7 @@
 // **写真そのものの解像度を落とさない。** 肌アトラスの解像度は写真の顔の大きさで決まるので、入力で
 // 縮めると戻せない情報を捨てることになる。大きすぎる写真は `MAX_PHOTO_PIXELS` で落とす。
 
-import { InputImageError } from '../domain/errors';
+import { CameraUnavailableError, InputImageError } from '../domain/errors';
 import { PhotoRgb } from '../domain/photo';
 import { imageDataToPhotoRgb } from '../infrastructure/imaging';
 
@@ -20,11 +20,22 @@ import { imageDataToPhotoRgb } from '../infrastructure/imaging';
 export const MAX_PHOTO_PIXELS = 80_000_000;
 
 export class InputManager {
-  private readonly video: HTMLVideoElement;
+  private readonly source: HTMLVideoElement;
   private stream: MediaStream | null = null;
 
   constructor(video: HTMLVideoElement) {
-    this.video = video;
+    this.source = video;
+  }
+
+  /**
+   * 表示している `<video>`。
+   *
+   * リアルタイム表情トラッカーは**毎フレーム `<video>` そのものを見る**（画素を写してから渡すと
+   * その ぶんだけ遅れる）ので、要素を外へ出す。`PhotoRgb` へ落とすのはここの仕事のままで、
+   * **画素を読む経路が増えたわけではない**。
+   */
+  get video(): HTMLVideoElement {
+    return this.source;
   }
 
   get isWebcamActive(): boolean {
@@ -33,15 +44,21 @@ export class InputManager {
 
   async startWebcam(): Promise<void> {
     if (this.stream !== null) return;
-    this.stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 960 } },
-      audio: false,
-    });
-    this.video.srcObject = this.stream;
-    await this.video.play();
-    if (this.video.readyState < 2) {
+    // 拒否・未接続・他のアプリが掴んでいる、はどれも「写真を変えても直らない」失敗。素の
+    // `DOMException` のままだと UI がブラウザの権限の話として案内できない。
+    try {
+      this.stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 960 } },
+        audio: false,
+      });
+    } catch (error) {
+      throw new CameraUnavailableError(`カメラを使えません: ${String(error)}`);
+    }
+    this.source.srcObject = this.stream;
+    await this.source.play();
+    if (this.source.readyState < 2) {
       await new Promise<void>((resolve) => {
-        this.video.onloadedmetadata = (): void => resolve();
+        this.source.onloadedmetadata = (): void => resolve();
       });
     }
   }
@@ -51,12 +68,12 @@ export class InputManager {
       for (const track of this.stream.getTracks()) track.stop();
       this.stream = null;
     }
-    this.video.srcObject = null;
+    this.source.srcObject = null;
   }
 
   /** 正面撮影のプレビューはミラー表示だが、写真は非反転の実画像として扱う。 */
   captureWebcamFrame(): PhotoRgb {
-    return drawToPhoto(this.video, this.video.videoWidth, this.video.videoHeight);
+    return drawToPhoto(this.source, this.source.videoWidth, this.source.videoHeight);
   }
 
   async loadFromFile(file: File): Promise<PhotoRgb> {

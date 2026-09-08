@@ -133,6 +133,7 @@ export interface PanelState {
     visemeFadeSeconds: number;
     visemeHoldSeconds: number;
     visemeLoop: boolean;
+    recordingLoop: boolean;
   };
   /**
    * 手で立てるプリセットの重み（プリセット名 → 0〜1）。アセットを読むまで空。
@@ -220,6 +221,10 @@ export interface GuiCallbacks {
   onExpressionChanged: (name: string, weight: number) => void;
   /** 口形の連続再生の再生 / 停止が押された。 */
   onVisemePlayToggled: () => void;
+  /** 収録した表情アニメーションの再生 / 停止が押された。 */
+  onRecordingPlayToggled: () => void;
+  /** 収録した表情アニメーションの読み込みが押された。 */
+  onRecordingLoad: () => void;
 }
 
 export interface GuiHandle {
@@ -239,6 +244,13 @@ export interface GuiHandle {
    * ラベルを決めると止まった後も「停止」のまま残る。正本は `VisemeDriver.isPlaying`。
    */
   syncVisemePlayback(playing: boolean): void;
+  /**
+   * 収録した表情アニメーションのボタンと状態表示を合わせる。
+   *
+   * `syncVisemePlayback` と同じ理由で押した側が持たない — 終端で自分から止まるので、正本は
+   * `RecordingPlayer.isPlaying`。`summary` は「未収録 / 3.4 秒・204 フレーム」のような 1 行。
+   */
+  syncRecording(playing: boolean, summary: string): void;
   /**
    * アセットを読んだ後にプリセットのスライダーを作る（名前はアセットが正本）。
    *
@@ -476,6 +488,18 @@ export function setupGui(
     .onChange(pushView);
   play.add(state.view, 'visemeLoop').name('ループ').onChange(pushView);
 
+  // **Webカメラのパネルには置かない。** 読み込みと再生は `<video>` を一切見ない（カメラが繋がって
+  // いなくても動く）ので、カメラの箱に置くと「カメラの機能」に見える。録るのはあちら、持つのと
+  // 再生するのはここ、という分け方。
+  const recording = view.addFolder('表情アニメーション');
+  const recordingSummary = { 状態: '未収録' };
+  const recordingSummaryController = recording.add(recordingSummary, '状態').disable();
+  const recordingPlayController = recording
+    .add({ 再生: (): void => callbacks.onRecordingPlayToggled() }, '再生')
+    .name('再生');
+  recording.add(state.view, 'recordingLoop').name('ループ').onChange(pushView);
+  recording.add({ 読み込み: (): void => callbacks.onRecordingLoad() }, '読み込み');
+
   const layerControllers = new Map<string, ReturnType<typeof view.add>>();
   const textureControllers = new Map<string, ReturnType<typeof view.add>>();
   const layerKeyOf = (layer: string): string =>
@@ -532,6 +556,11 @@ export function setupGui(
       state.view.cameraPitchDegrees = pose_.pitchDegrees;
       state.view.cameraYawDegrees = pose_.yawDegrees;
       for (const controller of cameraControllers) controller.updateDisplay();
+    },
+    syncRecording(playing, summary) {
+      recordingPlayController.name(playing ? '停止' : '再生');
+      recordingSummary.状態 = summary;
+      recordingSummaryController.updateDisplay();
     },
     syncHeadPose(pose_) {
       state.view.headYawDegrees = pose_.headYawDegrees;

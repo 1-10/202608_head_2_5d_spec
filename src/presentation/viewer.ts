@@ -427,6 +427,9 @@ export class Viewer {
     | ((weights: Float64Array, deltaSeconds: number) => string | null)
     | null = null;
 
+  /** まばたき量（0〜1）を外から差し込む口。`null` なら自動まばたき。 */
+  blinkOverride: (() => number) | null = null;
+
   /** 視点や表示状態が変わったときに呼ばれる（UI の同期用）。 */
   onViewChanged: (() => void) | null = null;
 
@@ -839,7 +842,9 @@ export class Viewer {
       }
     }
 
-    if (this.blinkEnabled) {
+    if (this.blinkOverride !== null) {
+      this.blinkAmount = Math.min(1, Math.max(0, this.blinkOverride()));
+    } else if (this.blinkEnabled) {
       const step = advanceBlink(this.blink, deltaSeconds);
       this.blink = step.state;
       this.blinkAmount = step.weight;

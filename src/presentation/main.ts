@@ -13,7 +13,7 @@ import { EYE_SIDES } from '../domain/eyes/layout';
 import { depthCoverage } from '../domain/hair/shell';
 import { PhotoRgb } from '../domain/photo';
 import { ExportOutcome, describeFailure, isPipelineError } from '../application/exportGuest';
-import { Exporter, GnmAssetBundle, buildGuestZip } from '../composition';
+import { Exporter, GnmAssetBundle, buildGuestZip, createFaceExpressionTracker } from '../composition';
 import {
   GuiHandle,
   createPanelState,
@@ -25,7 +25,10 @@ import { InputManager } from './input';
 import { renderInspection } from './inspectionView';
 import { Viewer } from './viewer';
 import { ViewSettings } from './viewSettings';
+import { RecordingPlayer } from './recordingPlayer';
 import { VisemeDriver } from './visemeDriver';
+import { ExpressionDriver, WebcamPanel } from './webcamPanel';
+import { parseRecording } from '../domain/preview/recording';
 
 const elements = {
   buttonWebcam: requireElement<HTMLButtonElement>('btn-webcam'),
@@ -33,6 +36,7 @@ const elements = {
   buttonReset: requireElement<HTMLButtonElement>('btn-reset'),
   buttonExport: requireElement<HTMLButtonElement>('btn-export'),
   fileInput: requireElement<HTMLInputElement>('file-input'),
+  recordingInput: requireElement<HTMLInputElement>('recording-input'),
   status: requireElement<HTMLElement>('status-message'),
   report: requireElement<HTMLElement>('report'),
   viewport: requireElement<HTMLElement>('canvas-head'),
@@ -110,11 +114,39 @@ const viewer = new Viewer(elements.viewport);
 // 口形の連続再生。手で立てるぶんは表情と同じ経路（`setManualExpression`）を通るので、ここが持つのは
 // 「時間で切り替える」ぶんだけ。
 const visemeDriver = new VisemeDriver();
+// 収録した表情アニメーションの持ち主。**Webカメラは録って積むだけ** — 再生と読み込みは
+// カメラを使わない操作なので、右パネルの「表情アニメーション」から動かす。
+const recordingPlayer = new RecordingPlayer();
 
 let photo: PhotoRgb | null = null;
 let outcome: ExportOutcome | null = null;
 let bundle: GnmAssetBundle | null = null;
 let busy = false;
+/** Webカメラが表情の駆動を握っているときの差し込み口（握っていなければ `null`）。 */
+let webcamDriver: ExpressionDriver | null = null;
+
+/**
+ * Webカメラ（映像・写真の取り込み・表情トラッキング・録画・再生）。
+ *
+ * **判断はパネル側が持つ。** ここは「表情の駆動を誰が握るか」の口を渡すだけ — ビューアーへ直に
+ * 触らせないので、駆動源が増えても配線の形は変わらない。
+ */
+const webcamPanel = new WebcamPanel(inputManager, createFaceExpressionTracker(), {
+  presetNames: () => viewer.expressionNames(),
+  setExpressionDriver: (driver) => {
+    webcamDriver = driver;
+    // カメラが顔を取ったら他の駆動源は止める（**駆動源はひとつだけ**）。黙って無視すると、
+    // 再生ボタンが「停止」のままそちらが出ない状態になる。
+    if (driver !== null) stopOtherDrivers('webcam');
+    applyExpressionDriver();
+  },
+  acceptPhoto: (next) => acceptPhoto(next),
+  setStatus: (message, isError) => setStatus(message, isError),
+  recording: recordingPlayer,
+});
+webcamPanel.onOpenChanged = (): void => {
+  elements.buttonWebcam.setAttribute('aria-pressed', String(webcamPanel.isOpen));
+};
 
 /** ビューの値をまとめてビューアーへ移す。**片方だけ適用する経路を作らない。** */
 function applyViewSettings(view: ViewSettings): void {
@@ -146,16 +178,126 @@ function applyViewSettings(view: ViewSettings): void {
   viewer.expressionIntensity = view.expressionIntensity;
   viewer.blinkEnabled = view.blinkEnabled;
   visemeDriver.apply(view);
-  // 連続再生していないときは `null` へ戻す（顔を駆動するのは手のスライダーと表情の自動再生）。
+  recordingPlayer.setLoop(view.recordingLoop);
+  applyExpressionDriver();
+}
+
+/**
+ * 表情とまばたきの駆動を誰が握るかを決める。**ここが唯一の決め所。**
+ *
+ * 駆動源は Webカメラのトラッキング・収録した表情アニメーションの再生・口形の連続再生の 3 つあり、
+ * **同時には動かない**。
+ * ビューアーの口（`expressionOverride` / `blinkOverride`）へ各々が勝手に差すと、あとから
+ * `applyViewSettings` が走っただけでカメラの駆動が黙って外れる（実際にそうなっていた）。
+ *
+ * 順は**カメラが先**。カメラは利用者が今まさに顔を映しているもので、再生より意図が強い。ただし
+ * 取り合いにはしない — **新しく始めるものが、他を止めてから取る**（後から押した方が勝つ）ので、
+ * ここへ来る時点で動いているのは 1 つだけ。順は取りこぼしへの保険。
+ */
+function applyExpressionDriver(): void {
+  const driver = webcamDriver ?? (recordingPlayer.isPlaying ? recordingPlayer : null);
+  if (driver !== null) {
+    viewer.expressionOverride = (weights, delta) => driver.expression(weights, delta);
+    viewer.blinkOverride = () => driver.blink();
+    return;
+  }
+  // 連続再生していなければ `null`（顔を駆動するのは手のスライダーと表情の自動再生）。
   viewer.expressionOverride = visemeDriver.frame;
+  viewer.blinkOverride = null;
+}
+
+/**
+ * これから顔を駆動するもの以外を止める。
+ *
+ * **止めるだけでなく画面も戻す。** 止めた側のボタンが「停止」のまま残ると、押しても何も起きない
+ * ボタンになる。
+ */
+function stopOtherDrivers(next: 'webcam' | 'recording' | 'viseme'): void {
+  if (next !== 'webcam') webcamPanel.stopDriving();
+  if (next !== 'recording' && recordingPlayer.isPlaying) recordingPlayer.stop();
+  if (next !== 'viseme' && visemeDriver.isPlaying) visemeDriver.stop();
+  syncPlaybackControls();
+}
+
+/**
+ * 再生系のボタンと状態表示を、今の駆動の状態へ合わせる。
+ *
+ * **毎フレーム呼ぶ**（`animate`）。録画中は秒数が増え、再生中は位置が進み、どちらも終端で自分から
+ * 止まるので、押した瞬間だけ合わせても追いつかない。**変わったときだけ DOM へ書く** — lil-gui の
+ * `listen()` は毎フレーム読みに行くので、増える表示のたびに使うと数が増えるほど重くなる。
+ */
+let shownPlayback = '';
+function syncPlaybackControls(): void {
+  const summary = recordingSummary();
+  const key = `${visemeDriver.isPlaying}|${recordingPlayer.isPlaying}|${summary}`;
+  if (key === shownPlayback) return;
+  shownPlayback = key;
+  gui.syncVisemePlayback(visemeDriver.isPlaying);
+  gui.syncRecording(recordingPlayer.isPlaying, summary);
+}
+
+/** 「表情アニメーション」の状態表示（1 行）。 */
+function recordingSummary(): string {
+  if (!recordingPlayer.hasRecording) return '未収録';
+  const duration = recordingPlayer.durationSeconds().toFixed(1);
+  const frames = recordingPlayer.frameCount();
+  if (recordingPlayer.isPlaying) {
+    return `再生 ${recordingPlayer.positionSeconds.toFixed(1)} / ${duration} s`;
+  }
+  return `${duration} s / ${frames} フレーム`;
 }
 
 /** 口形の連続再生を切り替え、ビューアーの駆動とボタンのラベルを合わせる。 */
 function toggleVisemePlayback(): void {
-  if (visemeDriver.isPlaying) visemeDriver.stop();
-  else visemeDriver.play();
-  applyViewSettings(toViewSettings(panelState));
-  gui.syncVisemePlayback(visemeDriver.isPlaying);
+  if (visemeDriver.isPlaying) {
+    visemeDriver.stop();
+  } else {
+    stopOtherDrivers('viseme');
+    visemeDriver.play();
+  }
+  applyExpressionDriver();
+  syncPlaybackControls();
+}
+
+/** 収録した表情アニメーションの再生を切り替える。 */
+function toggleRecordingPlayback(): void {
+  if (recordingPlayer.isPlaying) {
+    recordingPlayer.stop();
+  } else {
+    stopOtherDrivers('recording');
+    if (!recordingPlayer.play()) {
+      setStatus('再生できる収録がありません。Webカメラで録画するか、読み込んでください。', true);
+      syncPlaybackControls();
+      return;
+    }
+  }
+  applyExpressionDriver();
+  syncPlaybackControls();
+}
+
+/** 収録した表情アニメーション（JSON）を読み込む。 */
+async function loadRecording(file: File): Promise<void> {
+  try {
+    const loaded = parseRecording(await file.text(), viewer.expressionNames());
+    recordingPlayer.setRecording(loaded.recording);
+    applyExpressionDriver();
+    const notes = [
+      `収録を読み込みました（${loaded.recording.frames.length} フレーム）。`,
+    ];
+    if (loaded.droppedPresets.length > 0) {
+      notes.push(`今のアセットに無い表情を落としました: ${loaded.droppedPresets.join(', ')}`);
+    }
+    if (loaded.truncated) notes.push('上限を超えるぶんは切りました。');
+    if (loaded.droppedFrames > 0) {
+      notes.push(`時刻が逆行した ${loaded.droppedFrames} フレームを落としました。`);
+    }
+    setStatus(notes.join(' '));
+  } catch (error) {
+    console.error(error);
+    const report = describeFailure(error);
+    setStatus(report.remedy === null ? report.cause : `${report.cause} ${report.remedy}`, true);
+  }
+  syncPlaybackControls();
 }
 
 const gui: GuiHandle = setupGui(
@@ -171,14 +313,23 @@ const gui: GuiHandle = setupGui(
     onViewSettingsChanged: (view) => applyViewSettings(view),
     onExpressionChanged: (name, weight) => viewer.setManualExpression(name, weight),
     onVisemePlayToggled: () => toggleVisemePlayback(),
+    onRecordingPlayToggled: () => toggleRecordingPlayback(),
+    onRecordingLoad: () => elements.recordingInput.click(),
   },
 );
 
 // ループ無しの連続再生は終端で自分から止まる。ボタンのラベルはそのときにも合わせ直す。
 visemeDriver.onFinished = (): void => {
-  viewer.expressionOverride = visemeDriver.frame;
-  gui.syncVisemePlayback(visemeDriver.isPlaying);
+  applyExpressionDriver();
+  syncPlaybackControls();
 };
+
+// 収録の再生も終端で自分から止まる。録り直し・読み込みで中身が変われば状態表示も変える。
+recordingPlayer.onFinished = (): void => {
+  applyExpressionDriver();
+  syncPlaybackControls();
+};
+recordingPlayer.onRecordingChanged = (): void => syncPlaybackControls();
 
 viewer.onViewChanged = (): void => {
   updateViewReadout();
@@ -288,6 +439,8 @@ async function runExport(): Promise<void> {
     for (const [name, weight] of Object.entries(panelState.expressions)) {
       viewer.setManualExpression(name, weight);
     }
+    // 3D ビューに頭が出て初めてトラッキングと再生が使える（重みを当てる先がある）。
+    webcamPanel.refresh();
     renderInspection(elements.inspection, result.inspection);
     elements.report.textContent = buildReport(result);
     setStatus('');
@@ -365,10 +518,7 @@ elements.buttonUpload.addEventListener('click', () => elements.fileInput.click()
 elements.fileInput.addEventListener('change', async () => {
   const file = elements.fileInput.files?.[0];
   if (file === undefined) return;
-  if (inputManager.isWebcamActive) {
-    inputManager.stopWebcam();
-    elements.buttonWebcam.textContent = 'Webcam';
-  }
+  webcamPanel.stopCamera();
   try {
     await acceptPhoto(await inputManager.loadFromFile(file));
   } catch (error) {
@@ -377,34 +527,24 @@ elements.fileInput.addEventListener('change', async () => {
   elements.fileInput.value = '';
 });
 
-elements.buttonWebcam.addEventListener('click', async () => {
-  try {
-    if (!inputManager.isWebcamActive) {
-      setStatus('Webcam を起動しています…');
-      await inputManager.startWebcam();
-      elements.buttonWebcam.textContent = 'Capture';
-      setStatus('正面を向いて Capture を押してください。');
-      return;
-    }
-    const captured = inputManager.captureWebcamFrame();
-    inputManager.stopWebcam();
-    elements.buttonWebcam.textContent = 'Webcam';
-    await acceptPhoto(captured);
-  } catch (error) {
-    console.error(error);
-    setStatus('Webcam にアクセスできませんでした。', true);
-  }
+elements.recordingInput.addEventListener('change', async () => {
+  const file = elements.recordingInput.files?.[0];
+  elements.recordingInput.value = '';
+  if (file === undefined) return;
+  await loadRecording(file);
 });
 
+elements.buttonWebcam.addEventListener('click', () => webcamPanel.toggle());
+
 elements.buttonReset.addEventListener('click', () => {
-  inputManager.stopWebcam();
-  elements.buttonWebcam.textContent = 'Webcam';
+  webcamPanel.reset();
   photo = null;
   outcome = null;
   viewer.dispose();
   elements.inspection.replaceChildren();
   elements.report.textContent = '';
   overlay.close();
+  webcamPanel.refresh();
   updateButtons();
   setStatus('');
 });
@@ -419,6 +559,7 @@ window.addEventListener('resize', () => viewer.resize());
 function animate(): void {
   requestAnimationFrame(animate);
   viewer.render();
+  syncPlaybackControls();
 }
 
 elements.buttonInspection.addEventListener('click', () => overlay.toggle('inspection'));
@@ -436,6 +577,6 @@ void exporter
     bundle = loaded;
     visemeDriver.setPreview(loaded.preview);
     gui.setExpressionPresets(loaded.preview.expressionPresetNames);
-    setStatus('写真を選んでください（ファイル / Webcam）。');
+    setStatus('写真を選んでください（写真を選ぶ / Webカメラ）。');
   })
   .catch((error) => setStatus(describeFailure(error).cause, true));
