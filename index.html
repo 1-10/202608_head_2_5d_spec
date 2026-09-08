@@ -4,6 +4,12 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>GNM Head Exporter (Web)</title>
+    <!--
+      **スタイルは head から読む。** `main.ts` の `import './style.css'` に任せると、JS の
+      モジュールグラフが解けてから注入されるので、それまで既定の白い面が一瞬出る（実際にそう
+      見えていた）。ここから読めば最初の描画の前に当たり、色の値を 2 か所に写す必要も無い。
+    -->
+    <link rel="stylesheet" href="/src/presentation/style.css" />
   </head>
   <body>
     <div id="app">
@@ -38,7 +44,17 @@
               R で正面・無表情）
               <span class="readouts" id="readout-view"></span>
             </div>
-            <div class="pane-canvas" id="canvas-head"></div>
+            <div class="pane-canvas" id="canvas-head">
+              <!--
+                **進行は 3D ビューの中に出す。** 処理の結果が出るのはここなので、ツールバーの
+                隅だけに出しても「どこで何が起きているか」が結び付かない。段の一覧は
+                `application/exportGuest` の `STAGE_NAMES` から作る（ここに写さない）。
+              -->
+              <div id="viewport-progress" hidden>
+                <p class="progress-title" id="progress-title"></p>
+                <ol class="progress-stages" id="progress-stages"></ol>
+              </div>
+            </div>
           </section>
 
           <!--

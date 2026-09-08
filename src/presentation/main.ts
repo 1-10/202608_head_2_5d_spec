@@ -4,7 +4,6 @@
 // `application/exportGuest.describeFailure` が持ち、パラメータの既定値と範囲は
 // `application/settings` が持つ。ここがするのは、それを画面へ出すことだけ。
 
-import './style.css';
 import { bakeReport } from '../domain/atlas/bake';
 import { LAYER_ORDER } from '../domain/preview/asset';
 import { buildPreviewScene } from '../domain/preview/scene';
@@ -12,7 +11,12 @@ import { irisToLimbusRatio } from '../domain/eyes/bake';
 import { EYE_SIDES } from '../domain/eyes/layout';
 import { depthCoverage } from '../domain/hair/shell';
 import { PhotoRgb } from '../domain/photo';
-import { ExportOutcome, describeFailure, isPipelineError } from '../application/exportGuest';
+import {
+  ExportOutcome,
+  STAGE_NAMES,
+  describeFailure,
+  isPipelineError,
+} from '../application/exportGuest';
 import { Exporter, GnmAssetBundle, buildGuestZip, createFaceExpressionTracker } from '../composition';
 import {
   GuiHandle,
@@ -40,6 +44,9 @@ const elements = {
   status: requireElement<HTMLElement>('status-message'),
   report: requireElement<HTMLElement>('report'),
   viewport: requireElement<HTMLElement>('canvas-head'),
+  progress: requireElement<HTMLElement>('viewport-progress'),
+  progressTitle: requireElement<HTMLElement>('progress-title'),
+  progressStages: requireElement<HTMLElement>('progress-stages'),
   viewReadout: requireElement<HTMLElement>('readout-view'),
   video: requireElement<HTMLVideoElement>('webcam-video'),
   guiExport: requireElement<HTMLElement>('gui-export'),
@@ -377,6 +384,52 @@ window.addEventListener('keydown', (event) => {
   if (viewer.handleKey(event.code)) event.preventDefault();
 });
 
+/**
+ * 3D ビューの中の進行表示。
+ *
+ * **段の一覧は `STAGE_NAMES` から作る。** ここへ書き写すと、段が増減したとき画面だけ古くなる。
+ * 済んだ段・今の段・まだの段を `data-state` で示し、色は CSS が持つ。
+ */
+const progress = {
+  /** 段の `<li>`（一覧は 1 回だけ作る）。 */
+  items: new Map<string, HTMLElement>(),
+
+  build(): void {
+    for (const stage of STAGE_NAMES) {
+      const item = document.createElement('li');
+      item.textContent = stage;
+      item.dataset.state = 'todo';
+      elements.progressStages.appendChild(item);
+      progress.items.set(stage, item);
+    }
+  },
+
+  /** 今の段を出す。`null` で閉じる。 */
+  show(stage: string | null): void {
+    if (stage === null) {
+      elements.progress.hidden = true;
+      return;
+    }
+    elements.progress.hidden = false;
+    const index = STAGE_NAMES.indexOf(stage);
+    elements.progressTitle.textContent =
+      index < 0
+        ? stage
+        : `${stage}（${index + 1} / ${STAGE_NAMES.length}）`;
+    for (const [name, item] of progress.items) {
+      const at = STAGE_NAMES.indexOf(name);
+      item.dataset.state = at < index ? 'done' : at === index ? 'active' : 'todo';
+    }
+  },
+
+  /** 次の書き出しのために全部「まだ」へ戻す。 */
+  reset(): void {
+    for (const item of progress.items.values()) item.dataset.state = 'todo';
+    elements.progressTitle.textContent = '';
+    elements.progress.hidden = true;
+  },
+};
+
 function setStatus(message: string, isError = false): void {
   elements.status.textContent = message;
   elements.status.classList.toggle('error', isError);
@@ -410,9 +463,10 @@ async function runExport(): Promise<void> {
   busy = true;
   updateButtons();
   try {
-    const result = await exporter.run(photo, toExportSettings(panelState), (stage) =>
-      setStatus(`段「${stage}」を実行しています…`),
-    );
+    const result = await exporter.run(photo, toExportSettings(panelState), (stage) => {
+      setStatus(`段「${stage}」を実行しています…`);
+      progress.show(stage);
+    });
     outcome = result;
     if (bundle === null) throw new Error('アセットが読めていない');
     const source = result.previewSceneSource;
@@ -468,6 +522,7 @@ async function runExport(): Promise<void> {
     webcamPanel.refresh();
     renderInspection(elements.inspection, result.inspection);
     elements.report.textContent = buildReport(result);
+    progress.reset();
     setStatus('');
   } catch (error) {
     console.error(error);
@@ -475,6 +530,8 @@ async function runExport(): Promise<void> {
     const stage = report.stage === null ? '' : `段「${report.stage}」で`;
     const remedy = report.remedy === null ? '' : `\n${report.remedy}`;
     setStatus(`${stage}失敗しました（${report.errorType}）: ${report.cause}${remedy}`, true);
+    // **失敗した段を出したまま閉じる。** どこまで進んで落ちたかが画面に残る方が原因を追える。
+    elements.progressTitle.textContent = `失敗: ${report.cause}`;
     if (!isPipelineError(error)) console.warn('想定外の失敗（バグの可能性）', error);
   } finally {
     busy = false;
@@ -568,6 +625,7 @@ elements.buttonReset.addEventListener('click', () => {
   viewer.dispose();
   elements.inspection.replaceChildren();
   elements.report.textContent = '';
+  progress.reset();
   overlay.close();
   webcamPanel.refresh();
   updateButtons();
@@ -590,6 +648,7 @@ function animate(): void {
 elements.buttonInspection.addEventListener('click', () => overlay.toggle('inspection'));
 elements.buttonReport.addEventListener('click', () => overlay.toggle('report'));
 elements.buttonOverlayClose.addEventListener('click', () => overlay.close());
+progress.build();
 overlay.syncButtons();
 updateViewReadout();
 updateButtons();

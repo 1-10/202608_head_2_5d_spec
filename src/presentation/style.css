@@ -128,6 +128,8 @@ button:disabled {
   flex: 1 1 auto;
   min-height: 0;
   cursor: grab;
+  /* 進行表示をこの中へ絶対配置で重ねる。 */
+  position: relative;
 }
 
 .pane-canvas.dragging {
@@ -305,6 +307,61 @@ button:disabled {
  * 映像は**ミラー表示**（自分が動いた向きと画面の向きが揃っていないと合わせられない）。
  * `captureWebcamFrame` は video の画素をそのまま読むので、写真は非反転のまま — 表示だけを返す。
  */
+/*
+ * 書き出しの進行。**3D ビューの中に出す**（処理の結果が出るのはここなので、ツールバーの隅だけに
+ * 出しても「どこで何が起きているか」が結び付かない）。ビューを覆わないよう、下寄せの小さな箱。
+ */
+#viewport-progress {
+  position: absolute;
+  left: 50%;
+  bottom: 16px;
+  transform: translateX(-50%);
+  max-width: min(560px, calc(100% - 32px));
+  padding: 10px 14px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--panel) 88%, transparent);
+  pointer-events: none;
+}
+
+#viewport-progress[hidden] {
+  display: none;
+}
+
+.progress-title {
+  margin: 0 0 6px;
+  font-size: 12px;
+  color: var(--text);
+}
+
+.progress-stages {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 11px;
+}
+
+/* 済んだ段・今の段・まだの段を色で分ける（状態は JS が `data-state` で置く）。 */
+.progress-stages li[data-state='done'] {
+  color: var(--muted);
+}
+
+.progress-stages li[data-state='done']::before {
+  content: '✓ ';
+}
+
+.progress-stages li[data-state='active'] {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.progress-stages li[data-state='todo'] {
+  color: color-mix(in srgb, var(--muted) 55%, transparent);
+}
+
 .webcam-stage {
   position: relative;
   display: block;
