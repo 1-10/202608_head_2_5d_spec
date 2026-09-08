@@ -48,11 +48,12 @@ import {
   FADE_SECONDS,
   HOLD_SECONDS,
   IDLE_PLAYBACK,
+  PresetDisplacementCache,
   addExpression,
-  addPresetCoefficients,
+  addPresetDisplacement,
   advanceBlink,
   advancePlayback,
-  blendBlinkCoefficients,
+  buildPresetDisplacementCache,
   startBlink,
   zeroCoefficients,
 } from '../domain/preview/expression';
@@ -325,6 +326,14 @@ export class Viewer {
   private expressionCoefficients: Float64Array | null = null;
   /** 前のフレームで当てた係数（変わったかの判定用）。 */
   private appliedCoefficients: Float64Array | null = null;
+  /**
+   * プリセットの変位の控え。**重みで駆動されている間はこちらを使う。**
+   *
+   * 係数経路は 383 成分ぶんを常に舐めるので実測 3.7ms かかる。プリセットの重みで表せるなら
+   * 「立っている本数 × 頂点数」で済む（実測 0.1〜0.9ms）。トラッキング中は毎フレーム作り直すので、
+   * この差がそのまま滑らかさに出る。**出る顔は同じ**（`tests/preview.test.ts` が縛っている）。
+   */
+  private presetCache: PresetDisplacementCache | null = null;
   /** `addExpression` が使う作業領域（係数 × スケールを畳む）。 */
   private basisScratch: Float64Array | null = null;
   /**
@@ -336,6 +345,8 @@ export class Viewer {
   private expressionIndices: readonly number[] = [];
   /** 今フレームのまばたき量。0（開眼）〜1（閉眼）。 */
   private blinkAmount = 0;
+  /** 前のフレームで当てたまばたき量（変わったかの判定用）。 */
+  private appliedBlinkAmount = 0;
 
   private hidden = new Set<string>();
   /** テクスチャを**外している**層。`hidden` と同じ「除外集合」の持ち方に揃える。 */
@@ -393,15 +404,14 @@ export class Viewer {
   /**
    * 表情の係数を外から差し込む口（1 フレームぶん）。
    *
-   * `null` なら自動再生と手のスライダーで駆動する。**係数を埋めるのは呼ばれた側**
-   * （毎フレーム 0 で来る。長さは表情基底の成分数 383）。返り値は読み出しに出す名前。
+   * `null` なら自動再生と手のスライダーで駆動する。**埋めるのは呼ばれた側**（毎フレーム 0 で
+   * 来る）。返り値は読み出しに出す名前。
    *
    * ここを口にしておくと、口形・トラッキング・録画の再生といった「別の駆動源」が
    * ビューアーの中へ状態を増やさずに入れ替われる。
    */
-  expressionOverride:
-    | ((weights: Float64Array, deltaSeconds: number) => string | null)
-    | null = null;
+  expressionOverride: ((slots: ExpressionSlots, deltaSeconds: number) => string | null) | null =
+    null;
 
   /** まばたき量（0〜1）を外から差し込む口。`null` なら自動まばたき。 */
   blinkOverride: (() => number) | null = null;
@@ -448,6 +458,8 @@ export class Viewer {
     this.manualWeights = new Float64Array(animation.preview.presetCount);
     this.expressionIndices = splitPresetIndices(animation.preview).expressions;
     this.expressionCoefficients = zeroCoefficients(animation.preview);
+    this.presetCache = buildPresetDisplacementCache(animation.preview);
+    this.appliedBlinkAmount = 0;
     this.appliedCoefficients = zeroCoefficients(animation.preview);
     this.basisScratch = zeroCoefficients(animation.preview);
     this.blinkAmount = 0;
@@ -770,9 +782,7 @@ export class Viewer {
     const weights = this.expressionWeights;
     weights.fill(0);
     if (this.expressionOverride !== null) {
-      // **差し込み口は係数を受ける。** プリセットの重みへ寄せない — 口形もトラッキングも録画も
-      // 383 成分の係数で来る（重みを渡していたときは長さ違いで駆動源が黙って何もしなかった）。
-      this.currentExpression = this.expressionOverride(coefficients, deltaSeconds);
+      this.currentExpression = this.expressionOverride({ weights, coefficients }, deltaSeconds);
     } else if (this.playMode === 'off') {
       if (this.manualWeights !== null) weights.set(this.manualWeights);
       this.currentExpression = null;
@@ -807,27 +817,39 @@ export class Viewer {
       this.blinkAmount = 0;
     }
 
-    // 手のスライダーと自動再生だけプリセットの重みを経由する。強さはここで 1 回だけ掛ける。
-    if (this.expressionOverride === null) {
-      addPresetCoefficients(preview, coefficients, weights);
-    }
+    // 強さはここで 1 回だけ掛ける（重みでも係数でも同じ意味になる）。
     if (this.expressionIntensity !== 1) {
-      for (let component = 0; component < coefficients.length; component++) {
-        coefficients[component] *= this.expressionIntensity;
+      for (let index = 0; index < weights.length; index++) weights[index] *= this.expressionIntensity;
+      for (let index = 0; index < coefficients.length; index++) {
+        coefficients[index] *= this.expressionIntensity;
       }
     }
-    // まばたきは**加算ではなく目の成分の置き換え**。係数の側で混ぜるので、以降は係数 1 本で足りる。
-    blendBlinkCoefficients(preview, coefficients, this.blinkAmount);
 
-    for (let component = 0; component < coefficients.length; component++) {
-      if (coefficients[component] !== this.appliedCoefficients[component]) {
-        this.poseDirty = true;
-        break;
+    // **「変わったか」は重みと係数とまばたきの前後比較で決める。** 立てたときだけ dirty にすると、
+    // まばたきや自動再生が 0 へ戻るフレームで作り直しが走らず、目が半分閉じたまま固まる。
+    let changed = this.blinkAmount !== this.appliedBlinkAmount;
+    if (!changed && this.appliedWeights !== null) {
+      for (let index = 0; index < weights.length; index++) {
+        if (weights[index] !== this.appliedWeights[index]) {
+          changed = true;
+          break;
+        }
       }
     }
+    if (!changed) {
+      for (let index = 0; index < coefficients.length; index++) {
+        if (coefficients[index] !== this.appliedCoefficients[index]) {
+          changed = true;
+          break;
+        }
+      }
+    }
+    if (changed) this.poseDirty = true;
     if (!this.poseDirty) return;
     this.poseDirty = false;
+    this.appliedWeights?.set(weights);
     this.appliedCoefficients.set(coefficients);
+    this.appliedBlinkAmount = this.blinkAmount;
     this.updateGeometry();
   }
 
@@ -846,7 +868,19 @@ export class Viewer {
     }
     const preview = this.animation.preview;
     this.workingVertices.set(this.animation.restVertices);
-    if (this.expressionCoefficients !== null) {
+    // **プリセットの重みで表せるぶんは控えから当てる**（係数経路は 383 成分ぶんを常に舐めるので
+    // 毎フレームでは重い）。まばたきの置き換えも控え側で畳んである。
+    if (this.expressionWeights !== null && this.presetCache !== null) {
+      addPresetDisplacement(
+        preview,
+        this.presetCache,
+        this.workingVertices,
+        this.expressionWeights,
+        this.blinkAmount,
+      );
+    }
+    // 表せないぶん（録画の再生など）は係数のまま当てる。
+    if (this.expressionCoefficients !== null && hasNonZero(this.expressionCoefficients)) {
       addExpression(
         preview,
         this.workingVertices,
@@ -1068,6 +1102,27 @@ export class Viewer {
     this.expressionIndices = [];
     this.expressionCoefficients = null;
     this.appliedCoefficients = null;
+    this.presetCache = null;
     this.basisScratch = null;
   }
+}
+
+/**
+ * 表情の駆動源が 1 フレームで埋める枠。**どちらか一方だけを埋める。**
+ *
+ * プリセットの重みで表せるものは `weights`（速い経路）、表せないものは `coefficients`
+ * （録画の再生が使う）。**同じ `Float64Array` を 2 つ渡さない** — 一度それで長さ違いに気付けず、
+ * 駆動源が黙って何もしない状態を作った。名前の付いた枠にして取り違えを防ぐ。
+ */
+export interface ExpressionSlots {
+  /** プリセットごとの重み（長さ `presetCount`）。 */
+  readonly weights: Float64Array;
+  /** 表情基底の係数（長さ `componentCount`）。 */
+  readonly coefficients: Float64Array;
+}
+
+/** 1 つでも 0 でない値があるか（係数経路を走らせるかの判定）。 */
+function hasNonZero(values: Float64Array): boolean {
+  for (const value of values) if (value !== 0) return true;
+  return false;
 }

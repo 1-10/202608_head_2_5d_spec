@@ -52,13 +52,14 @@ import { PITCH_LIMIT_DEGREES, YAW_LIMIT_DEGREES } from '../domain/preview/pose';
 import { MAX_RECORDING_SECONDS, serializeRecording } from '../domain/preview/recording';
 import { isVisemePreset } from '../domain/preview/viseme';
 import { RecordingSink } from './recordingPlayer';
+import { ExpressionSlots } from './viewer';
 import { PhotoRgb } from '../domain/photo';
 import { InputManager } from './input';
 
 /** ビューアーの表情とまばたきを占有する駆動源。 */
 export interface ExpressionDriver {
-  /** 1 フレームぶんの係数（表情基底 383 成分）を埋める。返り値は読み出しに出す名前。 */
-  expression(coefficients: Float64Array, deltaSeconds: number): string | null;
+  /** 1 フレームぶんの枠を埋める。返り値は読み出しに出す名前。 */
+  expression(slots: ExpressionSlots, deltaSeconds: number): string | null;
   /** まばたき量（0〜1）。 */
   blink(): number;
 }
@@ -174,15 +175,15 @@ export class WebcamPanel {
   private lastWinkRight = 0;
 
   private recordSeconds = 0;
+  /** 録画へ積む係数（毎フレーム作らない）。 */
+  private recordCoefficients: Float64Array | null = null;
   /** 画面の書き換えを毎フレーム行わないための直近値。 */
   private shownTimer = '';
   private shownDiagnostics = '';
 
   private readonly driver: ExpressionDriver = {
-    expression: (coefficients, deltaSeconds) => this.advance(coefficients, deltaSeconds),
-    // **まばたきは返さない。** 係数へ混ぜ終わっているので、ここで返すと二重に掛かる
-    // （自動まばたきもトラッキング中は止まる）。
-    blink: () => 0,
+    expression: (slots, deltaSeconds) => this.advance(slots, deltaSeconds),
+    blink: () => this.smoothedBlink,
   };
 
   /** パネルの開閉が変わったときに呼ばれる（ツールバーのボタンの同期）。 */
@@ -487,21 +488,20 @@ export class WebcamPanel {
   }
 
   /** ビューアーから毎フレーム呼ばれる。 */
-  private advance(coefficients: Float64Array, deltaSeconds: number): string | null {
+  private advance(slots: ExpressionSlots, deltaSeconds: number): string | null {
     if (this.mode !== 'tracking' && this.mode !== 'recording') return null;
-    return this.advanceTracking(coefficients, deltaSeconds);
+    return this.advanceTracking(slots, deltaSeconds);
   }
 
-  private advanceTracking(coefficients: Float64Array, deltaSeconds: number): string | null {
+  private advanceTracking(slots: ExpressionSlots, deltaSeconds: number): string | null {
     const target = this.host.expressionTarget();
     if (target === null) return null;
     const plan = this.ensurePlan();
     // **長さ違いは黙って諦めない。** 諦めると「点も出ず顔も動かない」だけが見え、原因が
     // 「検出できていない」のか「配線」なのか分けられない（実際にそれで詰まった）。
-    if (coefficients.length !== target.componentNames.length) {
+    if (slots.weights.length !== plan.presetCount) {
       throw new Error(
-        `駆動口が受けた係数が ${coefficients.length} 個` +
-          `（期待 ${target.componentNames.length}）`,
+        `駆動口が受けた重みが ${slots.weights.length} 個（期待 ${plan.presetCount}）`,
       );
     }
 
@@ -566,9 +566,7 @@ export class WebcamPanel {
       this.targetBlink,
       smoothingFactor(deltaSeconds, BLINK_TIME_CONSTANT_SECONDS),
     );
-    // **プリセットの重みは中で閉じる。** 外へ出すのは係数だけ（録画も Unity もそれを受ける）。
-    target.toCoefficients(this.smoothedWeights, coefficients);
-    target.blendBlink(coefficients, this.smoothedBlink);
+    slots.weights.set(this.smoothedWeights);
 
     // **首は「首も動かす」が入っているときだけ渡す。** 入っていなければ手のスライダーと
     // マウス追従のものが残る（黙って上書きしない）。
@@ -585,7 +583,12 @@ export class WebcamPanel {
 
     if (this.mode === 'recording') {
       this.recordSeconds += deltaSeconds;
-      const full = this.host.recording.append(this.recordSeconds, coefficients);
+      // **録画は係数で残す**（Unity で再生できる形）。まばたきも混ぜてから積む — 混ぜる前だと
+      // 録画から瞼が落ちる。
+      this.recordCoefficients ??= new Float64Array(target.componentNames.length);
+      target.toCoefficients(this.smoothedWeights, this.recordCoefficients);
+      target.blendBlink(this.recordCoefficients, this.smoothedBlink);
+      const full = this.host.recording.append(this.recordSeconds, this.recordCoefficients);
       if (full) {
         this.mode = 'tracking';
         this.setNote(`${MAX_RECORDING_SECONDS} 秒に達したので録画を止めました。`);

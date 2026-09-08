@@ -31,9 +31,11 @@ import {
   HOLD_SECONDS,
   addExpression,
   addPresetCoefficients,
+  addPresetDisplacement,
   advanceBlink,
   advancePlayback,
   blendBlinkCoefficients,
+  buildPresetDisplacementCache,
   envelope,
   startBlink,
   weightsFor,
@@ -459,6 +461,42 @@ describe('表情プリセット', () => {
     }
     // mm 単位で下がる（0 なら置き換えが効いていない）。
     expect(drop).toBeGreaterThan(0.001);
+  });
+
+  // **控えの経路と係数の経路が同じ顔を出すこと。** 控えは「同じ計算を毎フレームやり直さない」
+  // ためだけのもので、出る顔が変わったら意味が無い。まばたきは重みに対して線形でないので、
+  // 展開の仕方（目の成分ぶんを差し引いて足し直す）が合っているかもここで見る。
+  it('プリセットの控えは係数経路と同じ顔を出す（まばたき込み）', () => {
+    const { asset, preview } = loadBundle();
+    const rest = verticesOf(asset, new Float64Array(asset.vertexIdentityBasis.componentCount));
+    const cache = buildPresetDisplacementCache(preview);
+
+    const cases: (readonly [string, number])[][] = [
+      [['smile_wide', 1]],
+      [['surprise', 1]],
+      [['viseme_a', 0.7]],
+      [['smile_wide', 0.4], ['pucker', 0.3], ['wink_left', 0.6]],
+    ];
+    for (const entries of cases) {
+      for (const blink of [0, 0.4, 1]) {
+        const weights = weightsFor(preview, entries);
+        const coefficients = zeroCoefficients(preview);
+        addPresetCoefficients(preview, coefficients, weights);
+        blendBlinkCoefficients(preview, coefficients, blink);
+        const viaCoefficients = Float64Array.from(rest);
+        addExpression(preview, viaCoefficients, coefficients);
+
+        const viaCache = Float64Array.from(rest);
+        addPresetDisplacement(preview, cache, viaCache, weights, blink);
+
+        let worst = 0;
+        for (let index = 0; index < viaCache.length; index++) {
+          worst = Math.max(worst, Math.abs(viaCache[index] - viaCoefficients[index]));
+        }
+        // 控えは float32 なので厳密一致はしない。1 マイクロメートル未満なら画面では同じ。
+        expect(worst, `${JSON.stringify(entries)} / blink ${blink}`).toBeLessThan(1e-6);
+      }
+    }
   });
 
   it('まばたきが置き換える区間は目の 2 領域そのもの', () => {
