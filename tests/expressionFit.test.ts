@@ -12,7 +12,8 @@ import { loadBundle } from './asset';
 import { verticesOf } from '../src/domain/gnm/model';
 import { addExpression, addPresetCoefficients, zeroCoefficients } from '../src/domain/preview/expression';
 import {
-  RIGID_ANCHORS,
+  ANCHOR_MOTION_LIMIT_METERS,
+  MINIMUM_ANCHOR_COUNT,
   buildExpressionFitPlan,
   captureNeutralResidual,
   createExpressionFitScratch,
@@ -98,11 +99,38 @@ describe('相似変換（3D）', () => {
 });
 
 describe('表情フィット', () => {
-  it('相似変換に使う点は全部密対応が付いている', () => {
-    const { asset } = loadBundle();
-    const covered = new Set(Array.from(asset.dense.mediapipeIndices));
-    for (const landmark of RIGID_ANCHORS) {
-      expect(covered.has(landmark), `MediaPipe ${landmark}`).toBe(true);
+  // **手で選ぶと外れる。** 一度 14 点を手書きしたが、そのうち 8 点は表情で数 mm 動いていた
+  // （目尻・額・鼻先）。笑うとそこが動き、相似変換が頭の動きと解釈して顔全体を歪めた。
+  it('相似変換に使う点は、表情で動かない点だけ（基底から選ぶ）', () => {
+    const bundle = loadBundle();
+    const { asset, preview } = bundle;
+    const rest = verticesOf(asset, new Float64Array(asset.vertexIdentityBasis.componentCount));
+    const plan = buildExpressionFitPlan(asset, preview, rest);
+    expect(plan.anchorSlots.length).toBeGreaterThanOrEqual(MINIMUM_ANCHOR_COUNT);
+    // 全点の 1/3 未満（顔の大半は表情で動くので、そこは姿勢に使えない）。
+    expect(plan.anchorSlots.length).toBeLessThan(plan.pointIndices.length / 3);
+
+    // 選ばれた点は、どのプリセットを立てても閾値より動かない。
+    for (const name of preview.expressionPresetNames) {
+      const truth = zeroCoefficients(preview);
+      const weights = new Float64Array(preview.presetCount);
+      weights[preview.expressionPresetNames.indexOf(name)] = 1;
+      addPresetCoefficients(preview, truth, weights);
+      const moved = Float64Array.from(rest);
+      addExpression(preview, moved, truth);
+      const before = landmarksFrom(bundle, rest);
+      const after = landmarksFrom(bundle, moved);
+      for (const slot of plan.anchorSlots) {
+        const landmark = plan.pointIndices[slot];
+        const distance = Math.hypot(
+          after[landmark * 3] - before[landmark * 3],
+          after[landmark * 3 + 1] - before[landmark * 3 + 1],
+          after[landmark * 3 + 2] - before[landmark * 3 + 2],
+        );
+        expect(distance, `${name} / MediaPipe ${landmark}`).toBeLessThan(
+          ANCHOR_MOTION_LIMIT_METERS,
+        );
+      }
     }
   });
 
@@ -132,7 +160,7 @@ describe('表情フィット', () => {
     const scratch = createExpressionFitScratch(plan);
     const solved = zeroCoefficients(preview);
 
-    for (const name of ['smile_wide', 'pucker', 'stretch_face']) {
+    for (const name of ['smile_wide', 'pucker', 'stretch_face', 'wink_left', 'mouth_left']) {
       const truth = zeroCoefficients(preview);
       const weights = new Float64Array(preview.presetCount);
       weights[preview.expressionPresetNames.indexOf(name)] = 1;
@@ -164,8 +192,9 @@ describe('表情フィット', () => {
         }
       }
       const error = relativeError(Float64Array.from(visibleGot), Float64Array.from(visibleWanted));
-      // オフライン検証（σ=0 で中央値 3.4%）と同じ桁。ここはノイズ無しなので更に良い。
-      expect(error, name).toBeLessThan(0.2);
+      // 事前分布がプリセットの部分空間なので、プリセットそのものはよく戻る。**ここを緩めると
+      // 錨の選び方が壊れても気付けない**（手書きの 14 点だったときは wink_left が 56% だった）。
+      expect(error, name).toBeLessThan(0.15);
     }
   });
 

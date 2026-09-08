@@ -11,8 +11,8 @@
 // ## 解く空間
 //
 // **すべて GNM 空間（メートル）で解く。** MediaPipe の点は正規化画像座標なので、毎フレーム相似変換で
-// GNM 空間へ持ってくる。相似変換は**動かない所の点だけ**から解く（`RIGID_ANCHORS`）— 全点から解くと
-// 口を開けたときに重心がずれ、表情が頭の動きへ吸われる。
+// GNM 空間へ持ってくる。相似変換は**表情で動かない点だけ**から解く（`ANCHOR_MOTION_LIMIT_METERS`。
+// どの点かは基底から選ぶ）— 全点から解くと、口を開けたときに重心がずれて表情が頭の動きへ吸われる。
 //
 // ## 無表情を基準にする
 //
@@ -20,44 +20,51 @@
 // 差を表情として解くと、無表情のときから顔が歪む。**だから追い始めに「無表情での残差」を取り、
 // 以降はそこからの差を解く。** 表情は「その人の素の顔からの変化」なので、これが定義とも合う。
 //
+// ## 解を「表情らしい方向」へ縛る
+//
+// **成分ごとに独立な正則化（対角の事前分布）では顔が壊れる。** 383 成分の各方向は領域ごとの統計的な
+// 方向で、表情としての意味を持たない。独立に伸ばせるようにすると、点のふらつきを当てはめた解が
+// 「人がしない顔」へ寄る — 実機で**顔全体がぐにゃぐにゃ動いて**見えた。
+//
+// だから事前分布を**プリセット 25 本が張る部分空間**にする。解は「プリセットの連続な混ぜ合わせ」に
+// なるので、顔らしさが保たれる。旧実装（対応表で 20 本のどれか 1 本を立てる）と違い、
+// **混ぜ合わせなので `wink_left` だけ・`mouth_left` だけといった非対称も出る。**
+//
+// それだけだと 25 方向に閉じてしまうので、成分ごとに小さな余裕（`PRIOR_FLOOR_RATIO`）も足す。
+// プリセットで表せない動きもそのぶんは拾えるが、大きくは動けない。
+//
 // ## 何が解けて何が解けないか
 //
-// `tools/experiments/expression_fit_feasibility.py` がオフラインで測った値が判断の根拠:
+// `tools/experiments/expression_fit_feasibility.py` がオフラインで測った値（対角の事前分布での上限）:
 //
-// - 舌 32 成分と瞳 1 成分は**原理的に解けない**（顔の表面に出ない）。正則化で 0 に落ちる
+// - 舌 32 成分と瞳 1 成分は**原理的に解けない**（顔の表面に出ない）
 // - 目は弱い（片目 100 成分に対し実質 6 前後）。ウィンクの再現が苦手なのはここ
 // - 下顔面 150 成分は実質 20 前後
 //
-// つまり 383 成分のうち実質 30〜45 自由度ぶんしか情報が無い。**それを正則化に決めさせる** —
-// 「何成分まで使う」という切り方を持たない（公式の並びは寄与の降順ではないので切れない）。
+// つまり 383 成分のうち実質 30〜45 自由度ぶんしか情報が無い。部分空間に縛るのは、その情報量を
+// 「顔らしい方向」へ振り向ける操作でもある。
 
 import { GnmHeadAsset, splitIndexOf } from '../gnm/model';
 import { GnmPreviewAsset } from './asset';
 
 /**
- * 相似変換を解くのに使う MediaPipe の点（頭の動きだけを拾う）。
+ * 相似変換に使う点を選ぶ上限（メートル）。**表情でこれ以上動く点は姿勢に使わない。**
  *
- * **表情で動かない所だけを選ぶ。** 全点から解くと、口を開けた瞬間に重心と尺度がずれて、表情が
- * 「頭が動いた」として吸われる（そのぶん表情の残差が消える）。
+ * 全点から解くと、口を開けた瞬間に重心と尺度がずれて表情が「頭が動いた」として吸われる。
  *
- * 選んだのは 3 群:
+ * **一覧を手で書いてはいけない。** 一度書いたが、選んだ 14 点のうち 8 点が実際には表情で動いて
+ * いた（目尻 5.2mm・額 3.6mm・鼻先 2.3mm）。笑うとその点が動き、相似変換が頭の動きと解釈して
+ * 顔全体を歪めて補償する — 実機で**ぐにゃぐにゃ動いて**見えたのがこれ。**基底そのものから選ぶ。**
  *
- * - **耳の前と頬骨の外側**（顎ラインの両端）: 表情筋の外
- * - **鼻梁**: 骨の上。表情でほとんど動かない
- * - **目尻の外側**: 瞼は動くが、目尻そのものの位置は動きが小さい
- *
- * index は `domain/gnm/fit.MEDIAPIPE_IBUG68` と同じ MediaPipe 顔メッシュの番号。
+ * 閾値は「その点が全プリセットを通じてどれだけ動くか」の分布から採る。**緩めても厳しくしても悪化
+ * する**: 緩めると表情が姿勢へ漏れ、厳しくすると点が減って検出のふらつきに負ける（実測で 0.5mm =
+ * 14 点まで絞ると、1mm のノイズで誤差が 10 倍になった）。実際に何点残ったかは
+ * `ExpressionFitPlan.anchorSlots`。
  */
-export const RIGID_ANCHORS: readonly number[] = [
-  // 顎ラインの両端（耳の前 → 頬骨）
-  162, 234, 389, 454, 127, 356,
-  // 鼻梁
-  168, 197, 6, 4,
-  // 目尻の外側
-  33, 263,
-  // 額の中央（眉より上）
-  10, 151,
-];
+export const ANCHOR_MOTION_LIMIT_METERS = 0.001;
+
+/** 相似変換を解くのに要る最小の点数（これを割ったら閾値の決め方が壊れている）。 */
+export const MINIMUM_ANCHOR_COUNT = 12;
 
 /** 観測に使う軸。MediaPipe の z は x, y ほど信用できないので既定では捨てる。 */
 export type ObservationAxes = 'xy' | 'xyz';
@@ -71,8 +78,20 @@ export type ObservationAxes = 'xy' | 'xyz';
  */
 export const DEFAULT_OBSERVATION_NOISE_METERS = 0.001;
 
-/** 係数の時定数（秒）。点のふらつきを均す。旧実装の表情の時定数と同じ。 */
+/** 係数の時定数（秒）。点のふらつきを均す。 */
 export const COEFFICIENT_TIME_CONSTANT_SECONDS = 0.06;
+
+/**
+ * プリセットの部分空間の外に許す余裕（成分ごとの散らばりに対する比）。
+ *
+ * 0 にすると解はプリセット 25 本の混ぜ合わせだけになる。大きくすると成分ごとに自由に伸びて、
+ * **顔が壊れる方向へも解ける**（それが元のぐにゃぐにゃ）。**小さく持つのが要点** — プリセットで
+ * 表せない動きを少しだけ拾い、大きくは動けない。
+ *
+ * 0.5 は「ノイズだけを渡したときに顔が動く量」が最小になる所（掃きは PR に残した）。上げると
+ * 検出のふらつきに弱くなり、下げると表情の再現が粗くなる。
+ */
+export const PRIOR_FLOOR_RATIO = 0.5;
 
 /** 解く準備（guest ごとに 1 回作る）。 */
 export interface ExpressionFitPlan {
@@ -87,10 +106,17 @@ export interface ExpressionFitPlan {
    * 値は「係数を 1 動かしたとき、その点が GNM 空間で何メートル動くか」。
    */
   readonly design: Float64Array;
-  /** 成分ごとの事前分布の標準偏差（プリセットの散らばりから取る）。 */
-  readonly priorStd: Float64Array;
-  /** `design × priorStd` の正規方程式の Cholesky 下三角 (成分数, 成分数)。 */
+  /**
+   * 事前分布の方向 (方向数, 成分数)。**解はこの方向の線形結合だけ**。
+   *
+   * 前半がプリセットの係数の行、後半が成分ごとの小さな余裕（`PRIOR_FLOOR_RATIO`）。
+   */
+  readonly priorDirections: Float64Array;
+  readonly priorCount: number;
+  /** `design × prior` の正規方程式の Cholesky 下三角 (方向数, 方向数)。 */
   readonly factor: Float64Array;
+  /** `design × prior` (方向数, 点数 × 軸数)。毎フレームの投影に使う。 */
+  readonly weighted: Float64Array;
   /** 無表情の点の位置 (点数, 3) GNM 空間・メートル。 */
   readonly restPoints: Float64Array;
   /** 相似変換に使う点の、`pointIndices` の中での位置。 */
@@ -115,6 +141,8 @@ export function buildExpressionFitPlan(
   options: {
     axes?: ObservationAxes;
     noiseMeters?: number;
+    floorRatio?: number;
+    anchorMotionLimitMeters?: number;
   } = {},
 ): ExpressionFitPlan {
   const axes = options.axes ?? 'xy';
@@ -132,8 +160,9 @@ export function buildExpressionFitPlan(
     corners[index] = splitIndexOf(asset.mesh, dense.vertexIndices[index]);
   }
 
-  // 領域ブロックは「動く頂点だけ」を持つので、頂点 → 領域内の位置を引く表を作る。
-  const design = new Float64Array(componentCount * pointCount * axisCount);
+  // 表情基底を密対応の点の上へ落とす (成分数, 点数, 3)。設計行列と錨選びの両方がここから作られる。
+  // 領域ブロックは「動く頂点だけ」を持つので、頂点 → 領域内の位置を引く表を作って引く。
+  const pointBasis = new Float64Array(componentCount * pointCount * 3);
   const slotOf = new Int32Array(preview.vertexCount);
   for (const region of preview.expressionBasisRegions) {
     slotOf.fill(-1);
@@ -150,18 +179,27 @@ export function buildExpressionFitPlan(
         for (let local = 0; local < region.componentCount; local++) {
           const component = region.componentOffset + local;
           const factor = (weight * preview.expressionBasisScales[component]) / 32767;
-          const row = component * pointCount * axisCount + point * axisCount;
-          for (let axis = 0; axis < axisCount; axis++) {
-            design[row + axis] += preview.expressionBasisQ[from + local * 3 + axis] * factor;
+          const row = (component * pointCount + point) * 3;
+          for (let axis = 0; axis < 3; axis++) {
+            pointBasis[row + axis] += preview.expressionBasisQ[from + local * 3 + axis] * factor;
           }
         }
       }
     }
   }
 
-  // 事前分布はプリセットの散らばりから取る（写しを持たない）。舌や瞳のように解けない成分も
-  // ここでは普通の広さを持つ — 落とすのは正則化の仕事で、こちらで切らない。
-  const priorStd = new Float64Array(componentCount);
+  // 観測に使う軸だけ切り出す（`xy` なら z を捨てる）。
+  const design = new Float64Array(componentCount * pointCount * axisCount);
+  for (let component = 0; component < componentCount; component++) {
+    for (let point = 0; point < pointCount; point++) {
+      const from = (component * pointCount + point) * 3;
+      const to = component * pointCount * axisCount + point * axisCount;
+      for (let axis = 0; axis < axisCount; axis++) design[to + axis] = pointBasis[from + axis];
+    }
+  }
+
+  // 成分ごとの散らばり（余裕の大きさの基準）。プリセットの行から取る — 写しを持たない。
+  const spread = new Float64Array(componentCount);
   for (let component = 0; component < componentCount; component++) {
     let sum = 0;
     let squares = 0;
@@ -171,23 +209,41 @@ export function buildExpressionFitPlan(
       squares += value * value;
     }
     const mean = sum / preview.presetCount;
-    priorStd[component] = Math.sqrt(Math.max(0, squares / preview.presetCount - mean * mean));
+    spread[component] = Math.sqrt(Math.max(0, squares / preview.presetCount - mean * mean));
   }
   let widest = 0;
-  for (const value of priorStd) widest = Math.max(widest, value);
+  for (const value of spread) widest = Math.max(widest, value);
   if (!(widest > 0)) throw new Error('プリセットの係数が全部同じで事前分布を作れない');
-  // 0 のままだと正規方程式が特異になる。下限は「一番広い成分の 1/1000」。
-  for (let component = 0; component < componentCount; component++) {
-    priorStd[component] = Math.max(priorStd[component], widest / 1000);
+  const floorRatio = options.floorRatio ?? PRIOR_FLOOR_RATIO;
+  if (!(floorRatio >= 0)) throw new Error(`余裕の比が ${floorRatio}`);
+
+  // 事前分布の方向: プリセットの行 + 成分ごとの余裕。**解はこの線形結合だけ。**
+  const priorCount = preview.presetCount + (floorRatio > 0 ? componentCount : 0);
+  const priorDirections = new Float64Array(priorCount * componentCount);
+  for (let preset = 0; preset < preview.presetCount; preset++) {
+    for (let component = 0; component < componentCount; component++) {
+      priorDirections[preset * componentCount + component] =
+        preview.expressionPresetCoefficients[preset * componentCount + component];
+    }
+  }
+  if (floorRatio > 0) {
+    for (let component = 0; component < componentCount; component++) {
+      const row = preview.presetCount + component;
+      // 0 のままだと正規方程式が特異になる。下限は「一番広い成分の 1/1000」。
+      priorDirections[row * componentCount + component] =
+        Math.max(spread[component], widest / 1000) * floorRatio;
+    }
   }
 
-  const factor = choleskyOfNormalEquations(
+  const observationCount = pointCount * axisCount;
+  const weighted = projectDesign(
     design,
-    priorStd,
+    priorDirections,
     componentCount,
-    pointCount * axisCount,
-    noise,
+    priorCount,
+    observationCount,
   );
+  const factor = choleskyOfNormalEquations(weighted, priorCount, observationCount, noise);
 
   const restPoints = new Float64Array(pointCount * 3);
   for (let point = 0; point < pointCount; point++) {
@@ -200,17 +256,37 @@ export function buildExpressionFitPlan(
     }
   }
 
-  const positionOf = new Map<number, number>();
-  for (let point = 0; point < pointCount; point++) {
-    positionOf.set(dense.mediapipeIndices[point], point);
+  // 相似変換に使う点を**基底から選ぶ**。各点が全プリセットを通じてどれだけ動くかを測り、
+  // 動かない点だけを姿勢に使う。プリセットは実際の表情そのものなので、これが「表情で動かない所」の
+  // 定義になる。
+  const anchorLimit = options.anchorMotionLimitMeters ?? ANCHOR_MOTION_LIMIT_METERS;
+  const motion = new Float64Array(pointCount);
+  for (let preset = 0; preset < preview.presetCount; preset++) {
+    for (let point = 0; point < pointCount; point++) {
+      let x = 0;
+      let y = 0;
+      let z = 0;
+      for (let component = 0; component < componentCount; component++) {
+        const coefficient =
+          preview.expressionPresetCoefficients[preset * componentCount + component];
+        if (coefficient === 0) continue;
+        const from = (component * pointCount + point) * 3;
+        x += pointBasis[from] * coefficient;
+        y += pointBasis[from + 1] * coefficient;
+        z += pointBasis[from + 2] * coefficient;
+      }
+      motion[point] = Math.max(motion[point], Math.hypot(x, y, z));
+    }
   }
   const anchors: number[] = [];
-  for (const landmark of RIGID_ANCHORS) {
-    const slot = positionOf.get(landmark);
-    if (slot === undefined) {
-      throw new Error(`相似変換に使う点 ${landmark} に密対応が無い`);
-    }
-    anchors.push(slot);
+  for (let point = 0; point < pointCount; point++) {
+    if (motion[point] < anchorLimit) anchors.push(point);
+  }
+  if (anchors.length < MINIMUM_ANCHOR_COUNT) {
+    throw new Error(
+      `相似変換に使える点が ${anchors.length} 個（${anchorLimit * 1000}mm 未満）。` +
+        `${MINIMUM_ANCHOR_COUNT} 個は要る`,
+    );
   }
 
   return {
@@ -218,8 +294,10 @@ export function buildExpressionFitPlan(
     pointIndices: Int32Array.from(dense.mediapipeIndices),
     axisCount,
     design,
-    priorStd,
+    priorDirections,
+    priorCount,
     factor,
+    weighted,
     restPoints,
     anchorSlots: Int32Array.from(anchors),
   };
@@ -448,7 +526,7 @@ export function createExpressionFitScratch(plan: ExpressionFitPlan): ExpressionF
   return {
     aligned: new Float64Array(pointCount * 3),
     observation: new Float64Array(pointCount * plan.axisCount),
-    projected: new Float64Array(plan.componentCount),
+    projected: new Float64Array(plan.priorCount),
   };
 }
 
@@ -546,49 +624,86 @@ export function smoothCoefficients(
 }
 
 /**
- * `design × priorStd` の正規方程式 + σ²I を Cholesky 分解する。
+ * 設計行列を事前分布の方向へ写す（(方向数, 観測数)）。
  *
- * 事前分布で列を伸ばしてから単位行列を足すので、正則化の強さが**成分ごとの散らばりに比例**する
- * （素の λI だと、散らばりの小さい成分ほど強く縛られる）。
+ * 後半の余裕の行は「成分 1 本を定数倍したもの」なので、掛け算ではなく設計行列の行の写しで済む
+ * （素直に行列積を書くと 400 × 383 × 936 になり、準備が数倍遅くなる）。
+ */
+function projectDesign(
+  design: Float64Array,
+  directions: Float64Array,
+  componentCount: number,
+  priorCount: number,
+  observationCount: number,
+): Float64Array {
+  const weighted = new Float64Array(priorCount * observationCount);
+  const floorOffset = priorCount - componentCount;
+  for (let row = 0; row < priorCount; row++) {
+    const target = row * observationCount;
+    const directionBase = row * componentCount;
+    // 余裕の行（対角 1 本だけ非ゼロ）は写しで済ませる。
+    const diagonal = row >= floorOffset && floorOffset > 0 ? row - floorOffset : -1;
+    if (diagonal >= 0) {
+      const scale = directions[directionBase + diagonal];
+      const source = diagonal * observationCount;
+      for (let index = 0; index < observationCount; index++) {
+        weighted[target + index] = design[source + index] * scale;
+      }
+      continue;
+    }
+    for (let component = 0; component < componentCount; component++) {
+      const scale = directions[directionBase + component];
+      if (scale === 0) continue;
+      const source = component * observationCount;
+      for (let index = 0; index < observationCount; index++) {
+        weighted[target + index] += design[source + index] * scale;
+      }
+    }
+  }
+  return weighted;
+}
+
+/**
+ * 写した設計行列の正規方程式 + σ²I を Cholesky 分解する。
+ *
+ * 事前分布で方向を伸ばしてから単位行列を足すので、正則化の強さが**その方向の広さに比例**する
+ * （素の λI だと、広さの小さい方向ほど強く縛られる）。
  */
 function choleskyOfNormalEquations(
-  design: Float64Array,
-  priorStd: Float64Array,
-  componentCount: number,
+  weighted: Float64Array,
+  priorCount: number,
   observationCount: number,
   noise: number,
 ): Float64Array {
-  const gram = new Float64Array(componentCount * componentCount);
-  for (let row = 0; row < componentCount; row++) {
+  const gram = new Float64Array(priorCount * priorCount);
+  for (let row = 0; row < priorCount; row++) {
     const rowBase = row * observationCount;
-    const rowScale = priorStd[row];
-    for (let column = row; column < componentCount; column++) {
+    for (let column = row; column < priorCount; column++) {
       const columnBase = column * observationCount;
       let total = 0;
       for (let index = 0; index < observationCount; index++) {
-        total += design[rowBase + index] * design[columnBase + index];
+        total += weighted[rowBase + index] * weighted[columnBase + index];
       }
-      const value = total * rowScale * priorStd[column];
-      gram[row * componentCount + column] = value;
-      gram[column * componentCount + row] = value;
+      gram[row * priorCount + column] = total;
+      gram[column * priorCount + row] = total;
     }
-    gram[row * componentCount + row] += noise * noise;
+    gram[row * priorCount + row] += noise * noise;
   }
 
-  const factor = new Float64Array(componentCount * componentCount);
-  for (let row = 0; row < componentCount; row++) {
+  const factor = new Float64Array(priorCount * priorCount);
+  for (let row = 0; row < priorCount; row++) {
     for (let column = 0; column <= row; column++) {
-      let total = gram[row * componentCount + column];
+      let total = gram[row * priorCount + column];
       for (let index = 0; index < column; index++) {
-        total -= factor[row * componentCount + index] * factor[column * componentCount + index];
+        total -= factor[row * priorCount + index] * factor[column * priorCount + index];
       }
       if (row === column) {
         if (!(total > 0)) {
           throw new Error(`Cholesky 分解できない（対角 ${total} が正でない）`);
         }
-        factor[row * componentCount + column] = Math.sqrt(total);
+        factor[row * priorCount + column] = Math.sqrt(total);
       } else {
-        factor[row * componentCount + column] = total / factor[column * componentCount + column];
+        factor[row * priorCount + column] = total / factor[column * priorCount + column];
       }
     }
   }
@@ -602,34 +717,41 @@ function solveWithFactor(
   out: Float64Array,
   projected: Float64Array,
 ): void {
-  const count = plan.componentCount;
+  const count = plan.priorCount;
   const observationCount = observation.length;
-  // A_s^T d（A_s = design × priorStd）。
   for (let row = 0; row < count; row++) {
     const base = row * observationCount;
     let total = 0;
     for (let index = 0; index < observationCount; index++) {
-      total += plan.design[base + index] * observation[index];
+      total += plan.weighted[base + index] * observation[index];
     }
-    projected[row] = total * plan.priorStd[row];
+    projected[row] = total;
   }
-  // 前進代入 L y = b。
+  // 前進代入 L y = b（`projected` を潰しながら使う）。
   for (let row = 0; row < count; row++) {
     let total = projected[row];
     const base = row * count;
-    for (let index = 0; index < row; index++) total -= plan.factor[base + index] * out[index];
-    out[row] = total / plan.factor[base + row];
+    for (let index = 0; index < row; index++) total -= plan.factor[base + index] * projected[index];
+    projected[row] = total / plan.factor[base + row];
   }
   // 後退代入 L^T x = y。
   for (let row = count - 1; row >= 0; row--) {
-    let total = out[row];
+    let total = projected[row];
     for (let index = row + 1; index < count; index++) {
-      total -= plan.factor[index * count + row] * out[index];
+      total -= plan.factor[index * count + row] * projected[index];
     }
-    out[row] = total / plan.factor[row * count + row];
+    projected[row] = total / plan.factor[row * count + row];
   }
-  // 事前分布で伸ばした空間から戻す。
-  for (let row = 0; row < count; row++) out[row] *= plan.priorStd[row];
+  // 方向の線形結合として成分の空間へ戻す。
+  out.fill(0);
+  for (let row = 0; row < count; row++) {
+    const weight = projected[row];
+    if (weight === 0) continue;
+    const base = row * plan.componentCount;
+    for (let component = 0; component < plan.componentCount; component++) {
+      out[component] += plan.priorDirections[base + component] * weight;
+    }
+  }
 }
 
 /**
