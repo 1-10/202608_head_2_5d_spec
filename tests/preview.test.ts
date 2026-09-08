@@ -19,6 +19,8 @@ import {
   UNASSIGNED_REGION,
   classifyTriangles,
   evaluateSelector,
+  expressionBasisValue,
+  presetDisplacement,
 } from '../src/domain/preview/asset';
 import {
   BLINK_DURATION_MAX_MS,
@@ -442,6 +444,84 @@ describe('表情プリセット', () => {
       }
     }
     expect(outside).toBeLessThanOrEqual(step);
+  });
+});
+
+// 表情基底はプリセットと違って**係数を解くための材料**。MediaPipe の点から表情を解く経路が読む。
+// ここで見るのは「領域ブロックが基底を余さず持っているか」と「領域を分けて解いてはいけないこと」。
+describe('表情基底', () => {
+  it('領域は成分を隙間なく覆う（解かれない成分が残らない）', () => {
+    const preview = loadPreview();
+    let expected = 0;
+    for (const region of preview.expressionBasisRegions) {
+      expect(region.componentOffset).toBe(expected);
+      expect(region.componentCount).toBeGreaterThan(0);
+      expected += region.componentCount;
+    }
+    expect(expected).toBe(preview.expressionComponentNames.length);
+  });
+
+  it('領域の名前は成分名の頭そのまま（写しを持たない）', () => {
+    const preview = loadPreview();
+    for (const region of preview.expressionBasisRegions) {
+      for (let index = 0; index < region.componentCount; index++) {
+        const name = preview.expressionComponentNames[region.componentOffset + index];
+        expect(name.slice(0, name.lastIndexOf('_'))).toBe(region.name);
+      }
+    }
+  });
+
+  it('成分ごとのスケールは、その成分の最大変位そのもの', () => {
+    const preview = loadPreview();
+    for (const region of preview.expressionBasisRegions) {
+      for (let index = 0; index < region.componentCount; index++) {
+        const component = region.componentOffset + index;
+        let peak = 0;
+        for (let slot = 0; slot < region.vertexCount; slot++) {
+          for (let axis = 0; axis < 3; axis++) {
+            peak = Math.max(peak, Math.abs(expressionBasisValue(preview, region, component, slot, axis)));
+          }
+        }
+        // int16 の丸めぶんは許す（32767 が 1 目盛りで飽和する側）。
+        expect(peak).toBeCloseTo(preview.expressionBasisScales[component], 10);
+      }
+    }
+  });
+
+  // プリセットは基底の線形結合なので、**プリセットが動かす頂点は必ず領域ブロックの中にある**。
+  // 2 つの配列が別々に作られているので、片方の詰め方を間違えるとここで割れる。
+  it('プリセットが動かす頂点は領域ブロックの外に無い', () => {
+    const preview = loadPreview();
+    const inside = new Uint8Array(preview.vertexCount);
+    for (const vertex of preview.expressionBasisVertices) inside[vertex] = 1;
+
+    for (let preset = 0; preset < preview.presetCount; preset++) {
+      const step = preview.expressionPresetScales[preset] / 32767;
+      let outside = 0;
+      for (let vertex = 0; vertex < preview.vertexCount; vertex++) {
+        if (inside[vertex] !== 0) continue;
+        for (let axis = 0; axis < 3; axis++) {
+          outside = Math.max(outside, Math.abs(presetDisplacement(preview, preset, vertex, axis)));
+        }
+      }
+      expect(outside).toBeLessThanOrEqual(step);
+    }
+  });
+
+  // **これが割れたら「領域ごとに分けて解く」実装が正しくなってしまう。** 分けて解いてよいのは
+  // 領域が頂点を共有しないときだけで、実際には共有している。
+  it('領域は頂点を共有する（だから分けて解けない）', () => {
+    const preview = loadPreview();
+    const seen = new Uint8Array(preview.vertexCount);
+    let shared = 0;
+    for (const region of preview.expressionBasisRegions) {
+      for (let slot = 0; slot < region.vertexCount; slot++) {
+        const vertex = preview.expressionBasisVertices[region.vertexOffset + slot];
+        if (seen[vertex] !== 0) shared++;
+        seen[vertex] = 1;
+      }
+    }
+    expect(shared).toBeGreaterThan(0);
   });
 });
 

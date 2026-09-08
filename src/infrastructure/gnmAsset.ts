@@ -14,7 +14,7 @@
 
 import { ModelFileNotFoundError } from '../domain/errors';
 import { GnmHeadAsset, GnmHeadMesh } from '../domain/gnm/model';
-import { GnmPreviewAsset } from '../domain/preview/asset';
+import { ExpressionBasisRegion, GnmPreviewAsset } from '../domain/preview/asset';
 import { GNMB_CONTENT_HEAD_ASSET, readGnmbContainer, requireArray } from './gnmb';
 
 /** 既定の配置先（`tools/export_gnm_assets.py` の出力先と揃える）。 */
@@ -241,6 +241,19 @@ function parsePreview(
   const jointIdentityBasis = requireArray(container, 'jointIdentityBasis', Float32Array);
   const skinJointIndices = requireArray(container, 'skinJointIndices', Uint8Array);
   const skinJointWeights = requireArray(container, 'skinJointWeights', Float32Array);
+  const expressionComponentNames = requireStringArray(header, 'expression_component_names');
+  const expressionBasisScales = Float64Array.from(
+    requireNumberArray(header, 'expression_basis_scales'),
+  );
+  if (expressionBasisScales.length !== expressionComponentNames.length) {
+    throw new Error('expression_basis_scales と expression_component_names の数が合わない');
+  }
+  const expressionBasisRegions = parseExpressionBasisRegions(
+    header,
+    expressionComponentNames.length,
+  );
+  const expressionBasisVertices = requireArray(container, 'expressionBasisVertices', Int32Array);
+  const expressionBasisQ = requireArray(container, 'expressionBasisQ', Int16Array);
   const expressionPresetBasisQ = requireArray(container, 'expressionPresetBasisQ', Int16Array);
   const blinkBasisQ = requireArray(container, 'blinkBasisQ', Int16Array);
   const blinkScale = requireNumber(header, 'blink_scale');
@@ -262,6 +275,19 @@ function parsePreview(
     ['skinJointWeights', skinJointWeights.length, vertexCount * 2],
     ['expressionPresetBasisQ', expressionPresetBasisQ.length, presetCount * vertexCount * 3],
     ['blinkBasisQ', blinkBasisQ.length, vertexCount * 3],
+    [
+      'expressionBasisVertices',
+      expressionBasisVertices.length,
+      expressionBasisRegions.reduce((total, region) => total + region.vertexCount, 0),
+    ],
+    [
+      'expressionBasisQ',
+      expressionBasisQ.length,
+      expressionBasisRegions.reduce(
+        (total, region) => total + region.componentCount * region.vertexCount * 3,
+        0,
+      ),
+    ],
   ] as const) {
     if (actual !== expected) {
       throw new Error(`${name} の要素数が ${actual}（期待 ${expected}）`);
@@ -276,6 +302,11 @@ function parsePreview(
   }
   for (const index of skinJointIndices) {
     if (index >= jointCount) throw new Error('skinJointIndices がジョイント数の範囲外を指している');
+  }
+  for (const index of expressionBasisVertices) {
+    if (index < 0 || index >= vertexCount) {
+      throw new Error(`expressionBasisVertices が頂点数の範囲外 (${index}) を指している`);
+    }
   }
 
   return {
@@ -293,10 +324,80 @@ function parsePreview(
     blinkBasisQ,
     blinkScale,
     eyeExpressionGroups,
+    expressionComponentNames,
+    expressionBasisScales,
+    expressionBasisRegions,
+    expressionBasisVertices,
+    expressionBasisQ,
     vertexCount,
     jointCount,
     presetCount,
   };
+}
+
+/**
+ * 表情基底の領域ブロックの切り出しを読む。
+ *
+ * **成分の範囲が隙間なく 0 から全成分を覆うことを検査する。** 領域は解くときの分割の単位なので、
+ * 抜けや重なりがあると「解いていない成分」が黙って生まれる。
+ */
+function parseExpressionBasisRegions(
+  header: Record<string, unknown>,
+  componentCount: number,
+): ExpressionBasisRegion[] {
+  const value = header['expression_basis_regions'];
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new Error('GNMB header の expression_basis_regions が空か配列でない');
+  }
+  const regions = value.map((item, index) => {
+    if (typeof item !== 'object' || item === null) {
+      throw new Error(`expression_basis_regions[${index}] が object でない`);
+    }
+    const record = item as Record<string, unknown>;
+    const numberOf = (key: string): number => {
+      const found = record[key];
+      if (typeof found !== 'number' || !Number.isInteger(found) || found < 0) {
+        throw new Error(`expression_basis_regions[${index}] の ${key} が非負整数でない`);
+      }
+      return found;
+    };
+    const name = record['name'];
+    if (typeof name !== 'string' || name.length === 0) {
+      throw new Error(`expression_basis_regions[${index}] の name が文字列でない`);
+    }
+    return {
+      name,
+      componentOffset: numberOf('component_offset'),
+      componentCount: numberOf('component_count'),
+      vertexOffset: numberOf('vertex_offset'),
+      vertexCount: numberOf('vertex_count'),
+      quantizedOffset: numberOf('quantized_offset'),
+    };
+  });
+
+  let expectedComponent = 0;
+  let expectedVertex = 0;
+  let expectedQuantized = 0;
+  for (const region of regions) {
+    if (region.componentOffset !== expectedComponent) {
+      throw new Error(
+        `領域 ${region.name} の成分が ${region.componentOffset} から始まっている` +
+          `（期待 ${expectedComponent}）。領域の並びに隙間か重なりがある`,
+      );
+    }
+    if (region.vertexOffset !== expectedVertex || region.quantizedOffset !== expectedQuantized) {
+      throw new Error(`領域 ${region.name} のブロックの頭が連結の順と合わない`);
+    }
+    expectedComponent += region.componentCount;
+    expectedVertex += region.vertexCount;
+    expectedQuantized += region.componentCount * region.vertexCount * 3;
+  }
+  if (expectedComponent !== componentCount) {
+    throw new Error(
+      `領域が覆う成分が ${expectedComponent} 本（期待 ${componentCount}）。解けない成分が残る`,
+    );
+  }
+  return regions;
 }
 
 function requireString(header: Record<string, unknown>, key: string): string {
