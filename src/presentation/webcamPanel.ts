@@ -496,7 +496,13 @@ export class WebcamPanel {
     const source = this.ensureSource();
     const scratch = this.fitScratch;
     if (source === null || scratch === null) return null;
-    if (coefficients.length !== source.plan.componentCount) return null;
+    // **長さ違いは黙って諦めない。** 諦めると「点も出ず顔も動かない」だけが見え、原因が
+    // 「検出できていない」のか「配線」なのか分けられない（実際にそれで詰まった）。
+    if (coefficients.length !== source.plan.componentCount) {
+      throw new Error(
+        `駆動口が受けた係数が ${coefficients.length} 個（期待 ${source.plan.componentCount}）`,
+      );
+    }
 
     const video = this.input.video;
     // 同じ映像フレームを 2 回推論しない（描画は 60fps、カメラは 30fps のことが多い）。
