@@ -391,10 +391,10 @@ export class Viewer {
   currentExpression: string | null = null;
 
   /**
-   * 表情の重みを外から差し込む口（1 フレームぶん）。
+   * 表情の係数を外から差し込む口（1 フレームぶん）。
    *
-   * `null` なら自動再生と手のスライダーで駆動する。**重みを埋めるのは呼ばれた側**
-   * （`weights` は毎フレーム 0 で来る。長さは `presetCount`）。返り値は読み出しに出す名前。
+   * `null` なら自動再生と手のスライダーで駆動する。**係数を埋めるのは呼ばれた側**
+   * （毎フレーム 0 で来る。長さは表情基底の成分数 383）。返り値は読み出しに出す名前。
    *
    * ここを口にしておくと、口形・トラッキング・録画の再生といった「別の駆動源」が
    * ビューアーの中へ状態を増やさずに入れ替われる。
@@ -648,6 +648,11 @@ export class Viewer {
   /** プリセット名の一覧（GUI がスライダーを作るのに使う）。 */
   expressionNames(): readonly string[] {
     return this.animation === null ? [] : this.animation.preview.expressionPresetNames;
+  }
+
+  /** 表情基底の成分名（録画の中身の意味の正本）。シーンが無ければ空。 */
+  componentNames(): readonly string[] {
+    return this.animation === null ? [] : this.animation.preview.expressionComponentNames;
   }
 
   /** 層の表示を切り替える。シーンに無い層でも状態は持つ（消えたら効かないだけ）。 */
