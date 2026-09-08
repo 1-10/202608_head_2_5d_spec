@@ -15,27 +15,28 @@ import {
   DEFAULT_LIGHT_COLOR,
   DEFAULT_LIGHT_INTENSITY,
   DEFAULT_BACKGROUND,
-  DEFAULT_DISTANCE_METERS,
-  DEFAULT_FOV_DEGREES,
   FRAGMENT_SHADER,
   LAYER_KEYS,
   LIGHT_DIRECTION,
-  MAXIMUM_ZOOM,
-  MINIMUM_ZOOM,
   RESET_KEY,
-  TARGET_HEIGHT_METERS,
   TEXTURE_KEYS,
   WIREFRAME_KEY,
   srgbBaseColor,
 } from '../src/presentation/viewer';
 import { LAYER_ORDER } from '../src/domain/preview/asset';
+import {
+  DEFAULT_FOV_DEGREES,
+  DEFAULT_ORBIT_RADIUS_METERS,
+  MAXIMUM_ORBIT_RADIUS_METERS,
+  MINIMUM_ORBIT_RADIUS_METERS,
+  TARGET_HEIGHT_METERS,
+  cameraPoseAt,
+} from '../src/domain/preview/camera';
 import { DEFAULT_VIEW_SETTINGS } from '../src/presentation/viewSettings';
 
 describe('Unity 側から写したカメラと光', () => {
-  it('カメラは Viewer.unity の MainCamera と同じ', () => {
-    expect(DEFAULT_FOV_DEGREES).toBe(20);
-    expect(DEFAULT_DISTANCE_METERS).toBeCloseTo(1.3, 10);
-    expect(TARGET_HEIGHT_METERS).toBeCloseTo(0.297, 10);
+  it('背景は Viewer.unity の MainCamera と同じ', () => {
+    // カメラの姿勢そのもの（画角・距離・注視点の高さ）は `tests/camera.test.ts` が見る。
     expect(DEFAULT_BACKGROUND).toBe('#26292e');
   });
 
@@ -64,9 +65,11 @@ describe('Unity 側から写したカメラと光', () => {
     expect(AMBIENT_LIGHT + DEFAULT_LIGHT_INTENSITY * (1 - AMBIENT_LIGHT)).toBeCloseTo(1, 10);
   });
 
-  it('拡大率の範囲は 0.3〜5.0', () => {
-    expect(MINIMUM_ZOOM).toBe(0.3);
-    expect(MAXIMUM_ZOOM).toBe(5.0);
+  // 旧実装は「距離 0.35〜3m」と「拡大 0.3〜5 倍」を別々にクランプしていた。周回半径へ畳んだ後も
+  // 寄れる所・引ける所は同じ（0.35/5 〜 3/0.3）。
+  it('周回半径の範囲は旧実装の 距離 × 拡大率 で届いた範囲のまま', () => {
+    expect(MINIMUM_ORBIT_RADIUS_METERS).toBeCloseTo(0.35 / 5, 10);
+    expect(MAXIMUM_ORBIT_RADIUS_METERS).toBeCloseTo(3 / 0.3, 10);
   });
 });
 
@@ -121,10 +124,15 @@ describe('キー割り当て', () => {
 });
 
 describe('3D ビューの既定値', () => {
-  it('カメラの既定は Unity 側の値そのまま', () => {
+  it('カメラの既定は Unity 側の値そのまま（注視点の正面 1.3m・正対）', () => {
     expect(DEFAULT_VIEW_SETTINGS.fovDegrees).toBe(DEFAULT_FOV_DEGREES);
-    expect(DEFAULT_VIEW_SETTINGS.distanceMeters).toBe(DEFAULT_DISTANCE_METERS);
     expect(DEFAULT_VIEW_SETTINGS.background).toBe(DEFAULT_BACKGROUND);
+    const expected = cameraPoseAt([0, TARGET_HEIGHT_METERS, 0]);
+    expect(DEFAULT_VIEW_SETTINGS.cameraPositionX).toBe(expected.position[0]);
+    expect(DEFAULT_VIEW_SETTINGS.cameraPositionY).toBeCloseTo(TARGET_HEIGHT_METERS, 10);
+    expect(DEFAULT_VIEW_SETTINGS.cameraPositionZ).toBeCloseTo(DEFAULT_ORBIT_RADIUS_METERS, 10);
+    expect(DEFAULT_VIEW_SETTINGS.cameraPitchDegrees).toBe(0);
+    expect(DEFAULT_VIEW_SETTINGS.cameraYawDegrees).toBe(0);
   });
 
   it('ライトの既定はビューアーの定数そのまま', () => {

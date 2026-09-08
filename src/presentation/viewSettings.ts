@@ -5,8 +5,13 @@
 //
 // 既定値の正本は Unity 側（1-10/2607_Obayashi_Avatar_Mockup_3DGS の `Assets/Sandbox/Ooba/GNM`）で、
 // カメラは `Scenes/Viewer.unity`、首と視線は `Viewer/GnmHeadPoseController`、表情の自動再生は
-// `Viewer/GnmExpressionPlayer`。まばたきと背景色と FOV / 距離の調整は旧 web 版から残したもの。
+// `Viewer/GnmExpressionPlayer`。まばたきと背景色と FOV の調整は旧 web 版から残したもの。
 
+import {
+  DEFAULT_FOV_DEGREES,
+  TARGET_HEIGHT_METERS,
+  cameraPoseAt,
+} from '../domain/preview/camera';
 import {
   FADE_SECONDS,
   ExpressionPlayMode,
@@ -18,8 +23,6 @@ import {
   AMBIENT_LIGHT,
   DEFAULT_AMBIENT_COLOR,
   DEFAULT_BACKGROUND,
-  DEFAULT_DISTANCE_METERS,
-  DEFAULT_FOV_DEGREES,
   DEFAULT_LIGHT_COLOR,
   DEFAULT_LIGHT_INTENSITY,
 } from './viewer';
@@ -51,7 +54,13 @@ export const PLAY_MODE_LABELS: Readonly<Record<ExpressionPlayMode, string>> = {
 /** 3D ビューの調整値。 */
 export interface ViewSettings {
   readonly fovDegrees: number;
-  readonly distanceMeters: number;
+  // カメラの位置と回転（ワールド）。**周回半径はここに持たない** — パネルに出ない値で、正本は
+  // `Viewer.cameraPose`（ホイールと「注視点を見る」だけが変える）。
+  readonly cameraPositionX: number;
+  readonly cameraPositionY: number;
+  readonly cameraPositionZ: number;
+  readonly cameraPitchDegrees: number;
+  readonly cameraYawDegrees: number;
   readonly background: string;
   /** 平行光の色（CSS の色表記）。 */
   readonly lightColor: string;
@@ -82,9 +91,17 @@ export interface ViewSettings {
   readonly visemeLoop: boolean;
 }
 
+// シーンを読む前の姿勢（注視点は眼の高さの既定）。シーンがあるときは頭部の中心を見るので、
+// `Viewer.resetView` が同じ形で作り直す。**ここに座標を書き写さない。**
+const DEFAULT_CAMERA_POSE = cameraPoseAt([0, TARGET_HEIGHT_METERS, 0]);
+
 export const DEFAULT_VIEW_SETTINGS: ViewSettings = {
   fovDegrees: DEFAULT_FOV_DEGREES,
-  distanceMeters: DEFAULT_DISTANCE_METERS,
+  cameraPositionX: DEFAULT_CAMERA_POSE.position[0],
+  cameraPositionY: DEFAULT_CAMERA_POSE.position[1],
+  cameraPositionZ: DEFAULT_CAMERA_POSE.position[2],
+  cameraPitchDegrees: DEFAULT_CAMERA_POSE.pitchDegrees,
+  cameraYawDegrees: DEFAULT_CAMERA_POSE.yawDegrees,
   background: DEFAULT_BACKGROUND,
   lightColor: DEFAULT_LIGHT_COLOR,
   lightIntensity: DEFAULT_LIGHT_INTENSITY,

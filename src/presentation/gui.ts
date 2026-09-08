@@ -38,6 +38,13 @@ import {
   TEXTURE_SIZE_CHOICES,
 } from '../application/settings';
 import { LAYER_ORDER } from '../domain/preview/asset';
+import {
+  CameraPose,
+  MAXIMUM_FOV_DEGREES,
+  MAXIMUM_PITCH_DEGREES,
+  MAXIMUM_YAW_DEGREES,
+  MINIMUM_FOV_DEGREES,
+} from '../domain/preview/camera';
 import { ExpressionPlayMode } from '../domain/preview/expression';
 import { isVisemePreset, visemeLabel } from '../domain/preview/viseme';
 import {
@@ -50,12 +57,8 @@ import {
   ALL_TEXTURES_KEY,
   LAYER_KEYS,
   MAXIMUM_AMBIENT,
-  MAXIMUM_DISTANCE_METERS,
-  MAXIMUM_FOV_DEGREES,
   MAXIMUM_LIGHT_INTENSITY,
   MINIMUM_AMBIENT,
-  MINIMUM_DISTANCE_METERS,
-  MINIMUM_FOV_DEGREES,
   MINIMUM_LIGHT_INTENSITY,
   RESET_KEY,
   TEXTURE_KEYS,
@@ -105,7 +108,11 @@ export interface PanelState {
   /** 3D ビューの調整値（書き出しには影響しない）。 */
   view: {
     fovDegrees: number;
-    distanceMeters: number;
+    cameraPositionX: number;
+    cameraPositionY: number;
+    cameraPositionZ: number;
+    cameraPitchDegrees: number;
+    cameraYawDegrees: number;
     background: string;
     lightColor: string;
     lightIntensity: number;
@@ -203,6 +210,8 @@ export interface GuiCallbacks {
   onLayerTextureChanged: (layer: string, enabled: boolean) => void;
   onAllTexturesToggled: () => void;
   onResetView: () => void;
+  /** カメラを注視点（頭部の中心）へ向け直す。 */
+  onLookAtTarget: () => void;
   /** ビューの値が変わった（まとめて適用する）。 */
   onViewSettingsChanged: (view: ViewSettings) => void;
   /** 手で立てるプリセット（表情・口形とも）の重みが変わった。 */
@@ -219,6 +228,8 @@ export interface GuiHandle {
   ): void;
   /** ドラッグやマウス追従で動いた首と視線をスライダーへ戻す。 */
   syncHeadPose(pose: HeadPose): void;
+  /** ドラッグ・ホイール・「注視点を見る」で動いたカメラを入力欄へ戻す。 */
+  syncCameraPose(pose: CameraPose): void;
   /**
    * 口形の連続再生のボタンを今の状態に合わせる。
    *
@@ -316,15 +327,30 @@ export function setupGui(
 
   const view = new GUI({ container: containers.viewPanel, title: '3D ビュー', width: 280 });
 
+  // カメラはフリーカメラ。**ワールドの transform をそのまま出して、そのまま打てる**（周回半径は
+  // 出さない — ホイールと「注視点を見る」だけが変える導出向けの値で、パネルに出すと位置・回転と
+  // 同じことを二重に持つことになる）。可動域と既定は `domain/preview/camera`。
   const camera = view.addFolder('カメラ');
   camera
     .add(state.view, 'fovDegrees', MINIMUM_FOV_DEGREES, MAXIMUM_FOV_DEGREES, 1)
     .name('画角 (°)')
     .onChange(pushView);
+  const cameraControllers = [
+    camera.add(state.view, 'cameraPositionX').step(0.001).name('位置 X (m)').onChange(pushView),
+    camera.add(state.view, 'cameraPositionY').step(0.001).name('位置 Y (m)').onChange(pushView),
+    camera.add(state.view, 'cameraPositionZ').step(0.001).name('位置 Z (m)').onChange(pushView),
+    camera
+      .add(state.view, 'cameraPitchDegrees', -MAXIMUM_PITCH_DEGREES, MAXIMUM_PITCH_DEGREES, 0.1)
+      .name('回転 X (°)')
+      .onChange(pushView),
+    camera
+      .add(state.view, 'cameraYawDegrees', -MAXIMUM_YAW_DEGREES, MAXIMUM_YAW_DEGREES, 0.1)
+      .name('回転 Y (°)')
+      .onChange(pushView),
+  ];
   camera
-    .add(state.view, 'distanceMeters', MINIMUM_DISTANCE_METERS, MAXIMUM_DISTANCE_METERS, 0.05)
-    .name('距離 (m)')
-    .onChange(pushView);
+    .add({ 注視点: callbacks.onLookAtTarget }, '注視点')
+    .name('注視点（頭部中心）を見る');
   camera.addColor(state.view, 'background').name('背景色').onChange(pushView);
 
   // 既定は Unity 側 `DirectionalLight` の `m_Color` / `m_Intensity`。環境光の量は旧 web 版の
@@ -493,6 +519,14 @@ export function setupGui(
     },
     syncVisemePlayback(playing) {
       playbackController.name(playing ? '停止' : '再生');
+    },
+    syncCameraPose(pose_) {
+      state.view.cameraPositionX = pose_.position[0];
+      state.view.cameraPositionY = pose_.position[1];
+      state.view.cameraPositionZ = pose_.position[2];
+      state.view.cameraPitchDegrees = pose_.pitchDegrees;
+      state.view.cameraYawDegrees = pose_.yawDegrees;
+      for (const controller of cameraControllers) controller.updateDisplay();
     },
     syncHeadPose(pose_) {
       state.view.headYawDegrees = pose_.headYawDegrees;

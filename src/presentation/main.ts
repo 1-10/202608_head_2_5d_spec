@@ -119,7 +119,11 @@ let busy = false;
 /** ビューの値をまとめてビューアーへ移す。**片方だけ適用する経路を作らない。** */
 function applyViewSettings(view: ViewSettings): void {
   viewer.fovDegrees = view.fovDegrees;
-  viewer.distanceMeters = view.distanceMeters;
+  viewer.setCameraTransform(
+    [view.cameraPositionX, view.cameraPositionY, view.cameraPositionZ],
+    view.cameraPitchDegrees,
+    view.cameraYawDegrees,
+  );
   viewer.setBackground(view.background);
   viewer.setLighting({
     lightColor: view.lightColor,
@@ -162,6 +166,7 @@ const gui: GuiHandle = setupGui(
     onLayerTextureChanged: (layer, enabled) => viewer.setLayerTextureEnabled(layer, enabled),
     onAllTexturesToggled: () => viewer.toggleAllTextures(),
     onResetView: () => viewer.resetView(),
+    onLookAtTarget: () => viewer.lookAtTarget(),
     onViewSettingsChanged: (view) => applyViewSettings(view),
     onExpressionChanged: (name, weight) => viewer.setManualExpression(name, weight),
     onVisemePlayToggled: () => toggleVisemePlayback(),
@@ -178,6 +183,7 @@ viewer.onViewChanged = (): void => {
   updateViewReadout();
   gui.syncViewControls(viewer.layerStates(), viewer.textureStates());
   gui.syncHeadPose(viewer.headPose);
+  gui.syncCameraPose(viewer.cameraPose);
 };
 
 // キー操作は 3Dビューが持つ（層・テクスチャ・視点のリセット）。入力欄にフォーカスがあるときは
@@ -200,15 +206,19 @@ function setStatus(message: string, isError = false): void {
 }
 
 function updateViewReadout(): void {
-  const degrees = (radians: number): string => ((radians * 180) / Math.PI).toFixed(1);
   const pose = viewer.headPose;
+  // **パネルと同じ言い方にする。** 右パネルの「カメラ」節に出るのと同じ位置 (m) と回転 (°) で、
+  // 別の言い換え（拡大率など）をここだけで作らない。
+  const camera = viewer.cameraPose;
+  const meters = (value: number): string => value.toFixed(3);
   // **駆動源の名前はそのまま出す。** 表情の自動再生はプリセット名（英字）を返し、口形の連続再生は
   // 「口形 あ」と自分で名乗る。ここで「表情」と決め打ちすると、別の駆動源が差さったときに黙って
   // 嘘のラベルになる。
   const expression = viewer.currentExpression === null ? '' : ` / ${viewer.currentExpression}`;
   elements.viewReadout.textContent =
-    `カメラ Yaw ${degrees(viewer.orbitYaw)}° / Pitch ${degrees(viewer.orbitPitch)}° /` +
-    ` Zoom ${viewer.zoom.toFixed(2)}x` +
+    `カメラ 位置 ${meters(camera.position[0])}, ${meters(camera.position[1])},` +
+    ` ${meters(camera.position[2])} m /` +
+    ` 回転 X ${camera.pitchDegrees.toFixed(1)}° / Y ${camera.yawDegrees.toFixed(1)}°` +
     ` — 首 ${pose.headYawDegrees.toFixed(1)}° / ${pose.headPitchDegrees.toFixed(1)}° /` +
     ` 視線 ${pose.gazeYawDegrees.toFixed(1)}° / ${pose.gazePitchDegrees.toFixed(1)}°${expression}`;
 }

@@ -26,14 +26,16 @@ import {
 } from '../src/domain/preview/pose';
 import { FADE_SECONDS, HOLD_SECONDS } from '../src/domain/preview/expression';
 import {
+  DEFAULT_FOV_DEGREES,
+  DEFAULT_ORBIT_RADIUS_METERS,
+  TARGET_HEIGHT_METERS,
+} from '../src/domain/preview/camera';
+import {
   AMBIENT_LIGHT,
   DEFAULT_AMBIENT_COLOR,
   DEFAULT_BACKGROUND,
-  DEFAULT_DISTANCE_METERS,
-  DEFAULT_FOV_DEGREES,
   DEFAULT_LIGHT_COLOR,
   DEFAULT_LIGHT_INTENSITY,
-  TARGET_HEIGHT_METERS,
 } from '../src/presentation/viewer';
 
 const README = readFileSync(resolve(__dirname, '..', 'README.md'), 'utf-8');
@@ -77,7 +79,7 @@ describe('README の調整パラメータの表', () => {
 describe('README の 3D ビューの表', () => {
   it('カメラ（Unity 側 MainCamera の写し）', () => {
     expect(README).toContain(
-      `| 投影 | 透視 FOV ${DEFAULT_FOV_DEGREES}° / 距離 ${DEFAULT_DISTANCE_METERS}m |`,
+      `| 投影 | 透視 FOV ${DEFAULT_FOV_DEGREES}° / 距離 ${DEFAULT_ORBIT_RADIUS_METERS}m |`,
     );
     expect(README).toContain(`| 背景 | \`${DEFAULT_BACKGROUND}\` |`);
   });
