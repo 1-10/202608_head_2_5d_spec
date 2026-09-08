@@ -31,8 +31,8 @@ import { Viewer } from './viewer';
 import { ViewSettings } from './viewSettings';
 import { RecordingPlayer } from './recordingPlayer';
 import { VisemeDriver } from './visemeDriver';
-import { ExpressionDriver, TrackingSource, WebcamPanel } from './webcamPanel';
-import { buildExpressionFitPlan } from '../domain/preview/expressionFit';
+import { ExpressionDriver, ExpressionTarget, WebcamPanel } from './webcamPanel';
+import { addPresetCoefficients, blendBlinkCoefficients } from '../domain/preview/expression';
 import { coefficientQuanta, parseRecording } from '../domain/preview/recording';
 
 const elements = {
@@ -126,12 +126,12 @@ const recordingPlayer = new RecordingPlayer();
 let photo: PhotoRgb | null = null;
 let bundle: GnmAssetBundle | null = null;
 /**
- * カメラから表情を解く準備。**頭が出るたびに作り直す**（密対応と無表情の点が identity で決まる）。
+ * 表情を当てる先。**頭が出るたびに作り直す**（プリセットの並びと成分の並びがアセットで決まる）。
  *
- * 作るのに 0.1 秒ほどかかる（383×383 の正規方程式と Cholesky）ので、毎フレームではなく書き出しが
- * 終わった所で 1 回だけ組む。
+ * ここで組むのは、プリセットの重みから係数への畳み込みをアセット側の知識として閉じ込めるため
+ * （Webカメラのパネルへアセットを渡さない）。
  */
-let trackingSource: TrackingSource | null = null;
+let expressionTarget: ExpressionTarget | null = null;
 let busy = false;
 /** Webカメラが表情の駆動を握っているときの差し込み口（握っていなければ `null`）。 */
 let webcamDriver: ExpressionDriver | null = null;
@@ -143,7 +143,7 @@ let webcamDriver: ExpressionDriver | null = null;
  * 触らせないので、駆動源が増えても配線の形は変わらない。
  */
 const webcamPanel = new WebcamPanel(inputManager, createFaceExpressionTracker(), {
-  trackingSource: () => trackingSource,
+  expressionTarget: () => expressionTarget,
   setExpressionDriver: (driver) => {
     webcamDriver = driver;
     // カメラが顔を取ったら他の駆動源は止める（**駆動源はひとつだけ**）。黙って無視すると、
@@ -585,10 +585,16 @@ async function runExport(): Promise<void> {
       triangles: source.asset.mesh.triangles,
       uvSplitSource: source.asset.mesh.uvSplitSource,
     });
-    trackingSource = {
-      plan: buildExpressionFitPlan(source.asset, bundle.preview, source.vertices),
-      componentNames: bundle.preview.expressionComponentNames,
-      quanta: coefficientQuanta(bundle.preview.expressionBasisScales),
+    const preview = bundle.preview;
+    expressionTarget = {
+      presetNames: preview.expressionPresetNames,
+      componentNames: preview.expressionComponentNames,
+      quanta: coefficientQuanta(preview.expressionBasisScales),
+      toCoefficients: (weights, out) => {
+        out.fill(0);
+        addPresetCoefficients(preview, out, weights);
+      },
+      blendBlink: (coefficients, amount) => blendBlinkCoefficients(preview, coefficients, amount),
     };
     // シーンを差し替えると表示状態と姿勢が初期化されるので、パネルを合わせ直す。
     for (const layer of LAYER_ORDER) {

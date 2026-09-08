@@ -9,7 +9,8 @@
 // - 口形 5 本: 正本は web 側の `tools/viseme_presets.json`（上の 20 本の係数行の線形結合）。
 //   表情と口形の切り分けは `viseme.ts`。**このファイルは本数を持たない**
 // - まばたき: `wink_left` + `wink_right` の係数を目の成分だけ残したもの
-// - トラッキング: MediaPipe の点から係数を解く（`expressionFit.ts`）
+// - トラッキング: MediaPipe の blendshape スコアからプリセットの重みを作り、係数へ畳む
+//   （`faceTracking.ts`。**点から係数を直接解く形も試したが実機で負けた** — 経緯は git log）
 //
 // 自動再生のしかたは Unity 側 `Viewer/GnmExpressionPlayer`。**同時に立てるのは 1 本だけ** —
 // 係数は足せるが、確認用途では「今どのプリセットか」が分かる方が役に立つ。

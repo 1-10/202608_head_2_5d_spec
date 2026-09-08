@@ -58,39 +58,31 @@ export interface FaceLandmarkDetector {
 export type VideoFrameSource = HTMLVideoElement | HTMLCanvasElement | ImageBitmap;
 
 /**
- * 動画から**顔の点**を取り続ける能力。
+ * 動画から**表情の強さ**（blendshape）を取り続ける能力。
  *
  * **`FaceLandmarkDetector` と別の port にする。** あちらは書き出しのための「静止画 1 枚から
  * 478 点」で、主役の選定と二段検出という別の関心を持つ。同じ検出器へ相乗りさせると、リアルタイムの
- * 都合（1 顔・毎フレーム）が書き出しの経路を歪める。
+ * 都合（1 顔・毎フレーム・blendshape）が書き出しの経路を歪める。
  *
- * 顔が写っていなければ `null`。
+ * 返すのは**カテゴリ名 → スコア**（0〜1）と、**画面へ描くための点**だけ。カテゴリ名の一覧は実行時に
+ * 返ってくるものが正本なので、契約に焼かない。顔が写っていなければ `null`。
  */
 export interface FaceTrackingFrame {
+  /** blendshape のカテゴリ名 → スコア（0〜1）。表情を駆動するのはこちら。 */
+  readonly scores: ReadonlyMap<string, number>;
   /**
-   * (点数, 3) の正規化座標（x, y は 0〜1・左上原点。z は x と同じ尺度の相対奥行き）。
+   * (点数, 2) の正規化座標（0〜1・左上原点）。
    *
-   * **表情を駆動するのはこちら。** GNM の表情基底 383 成分をこの点から解く
-   * （`domain/preview/expressionFit`）。映像へ重ねて描くのにも同じ配列を使う。
-   *
-   * **x と z は `aspect` を掛けてから使う。** 正規化座標は x を幅、y を高さで割ったものなので、
-   * 正方形でない映像ではそのまま使うと顔が横に潰れる。点数はモデルの版で変わるので契約に焼かない。
+   * **表情の駆動には使わない。** 何を追えているかを映像へ重ねて見せるためだけのもの（形の
+   * フィットは書き出し側の `FaceLandmarkDetector` が別に取る）。点数はモデルの版で変わるので
+   * 契約に焼かない。
    */
   readonly points: Float32Array;
-  /** 映像の幅 ÷ 高さ。`points` の x, z を等方な尺度へ戻すのに使う。 */
-  readonly aspect: number;
-  /**
-   * blendshape のカテゴリ名 → スコア（0〜1）。
-   *
-   * **表情の駆動には使わない**（点から解く）。画面の診断に出して「検出そのものが拾えていない」
-   * のか「解き方」なのかを分けるために持つ。カテゴリ名の一覧は実行時に返ってくるものが正本。
-   */
-  readonly scores: ReadonlyMap<string, number>;
   /**
    * 頭の姿勢（4x4・列優先）。取れなければ `null`。
    *
    * **首を動かすモードでだけ使う。** 表情だけを写すのが既定で、向きを混ぜると「今どちらが向きを
-   * 決めているか」が画面から読めなくなる（`domain/preview/headTracking` の冒頭）。角度の取り出しは
+   * 決めているか」が画面から読めなくなる（`domain/preview/faceTracking` の冒頭）。角度の取り出しは
    * ドメインの純関数が持つ — ここは行列をそのまま渡すだけ。
    */
   readonly headMatrix: Float32Array | null;
