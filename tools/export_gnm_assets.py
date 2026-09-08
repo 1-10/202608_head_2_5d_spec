@@ -744,7 +744,12 @@ def build_expression_basis_blocks(
 
         scales[columns[0] : columns[-1] + 1] = region_scales
         vertex_blocks.append(vertices)
-        quantized_blocks.append(np.ascontiguousarray(quantized).reshape(-1))
+        # **並びは (頂点, 成分, xyz)。** 当てるときは頂点ごとに全成分を足し込むので、この並びなら
+        # 読みが連番になり、頂点への書き戻しも 1 頂点 1 回で済む。成分優先にすると 1 頂点あたり
+        # 成分数ぶん書き戻すことになり、実測で 2 倍以上遅い。
+        quantized_blocks.append(
+            np.ascontiguousarray(quantized.transpose(1, 0, 2)).reshape(-1)
+        )
         regions.append(
             {
                 "name": region,
@@ -872,20 +877,10 @@ def build_preview_arrays(
             f" expression_basis {expression_basis.shape[0]} と合わない"
         )
     flat = expression_basis.reshape(expression_basis.shape[0], -1).astype(np.float64)
-    displacement = (coefficients @ flat).reshape(-1, expression_basis.shape[1], 3)[:, source]
-
-    preset_scales = np.abs(displacement).max(axis=(1, 2))
-    preset_scales[preset_scales == 0.0] = 1.0
-    preset_q = np.rint(displacement / preset_scales[:, None, None] * 32767.0).astype(np.int16)
-    preset_error = float(
-        np.abs(
-            preset_q.astype(np.float64) * preset_scales[:, None, None] / 32767.0 - displacement
-        ).max()
-    )
 
     # --- まばたき ---------------------------------------------------------
-    # 旧 web 版と同じ作り方: WINK_LEFT + WINK_RIGHT の係数を**目領域の成分だけ**残して基底へ当てる。
-    # 表情プリセットの 1 本として持たない — まばたきは他の表情へ加算するのではなく、目領域だけ
+    # 旧 web 版と同じ作り方: WINK_LEFT + WINK_RIGHT の係数を**目領域の成分だけ**残す。
+    # 表情プリセットの 1 本として持たない — まばたきは他の表情へ加算するのではなく、目の成分だけ
     # **置き換える**（加算だと surprise のような開瞼系と打ち消し合い、閉じ切らずに眼球が瞼を貫く）。
     expression_names = names_of(npz["expression_names"])
     eye_components = [
@@ -904,25 +899,18 @@ def build_preview_arrays(
     for name in BLINK_PRESET_CLASSES:
         row = coefficients[preset_names.index(name)]
         blink_coefficients[eye_components] += row[eye_components]
-    blink = (blink_coefficients @ flat).reshape(expression_basis.shape[1], 3)[source]
 
-    eye_region = np.zeros(npz["vertex_groups"].shape[1], dtype=bool)
-    for name in EYE_EXPRESSION_GROUPS:
-        if name not in vertex_group_names:
-            raise SystemExit(f"vertex group '{name}' が npz に無い")
-        eye_region |= npz["vertex_groups"][vertex_group_names.index(name)] > GROUP_THRESHOLD
-    blink_scale = float(np.abs(blink).max()) or 1.0
-    # **判定は int16 の 1 目盛りで行う。** 目領域の境目は重み 1e-4 で切っているので、外側にも基底の
-    # ごく小さな値が残る。1 目盛り未満なら量子化で 0 に落ちる = 送る値としては存在しない。
-    outside = float(np.abs(blink[~eye_region[source]]).max())
-    step = blink_scale / 32767.0
-    if outside > step:
+    # **クロスフェードする範囲は成分の連続した 1 区間であること。** 置き換えは「この区間の係数を
+    # まばたきの係数へ寄せる」という 1 手だけで済ませたい。飛び飛びだと TS 側が index の一覧を
+    # 持つことになり、公式の並びが変わったとき黙って古くなる。
+    if eye_components != list(range(eye_components[0], eye_components[-1] + 1)):
         raise SystemExit(
-            f"まばたきの変位が目領域の外へ {outside * 1e6:.3f} um 出ている"
-            f"（int16 の 1 目盛り {step * 1e6:.3f} um より大きい）。"
-            "クロスフェードを目領域へ閉じられないので、範囲の決め方を見直すこと"
+            f"目領域の成分が連続していない（{eye_components[0]}〜{eye_components[-1]} の間に"
+            "他の領域が混ざっている）。まばたきの置き換え範囲を区間で表せない"
         )
-    blink_q = np.rint(blink / blink_scale * 32767.0).astype(np.int16)
+    blink_displacement = float(
+        np.abs((blink_coefficients @ flat).reshape(expression_basis.shape[1], 3)[source]).max()
+    )
 
     basis_arrays, basis_metadata, basis_report = build_expression_basis_blocks(
         expression_basis, source, expression_names
@@ -936,8 +924,10 @@ def build_preview_arrays(
         "jointIdentityBasis": joint_identity,
         "skinJointIndices": skin_indices,
         "skinJointWeights": skin_weights,
-        "expressionPresetBasisQ": np.ascontiguousarray(preset_q),
-        "blinkBasisQ": np.ascontiguousarray(blink_q),
+        # プリセットもまばたきも**係数の行**として持つ。変位に潰して焼かない — 潰すと
+        # 「基底 × 係数」という GNM 本来の形が web の中だけで消え、Unity へ持って行けなくなる。
+        "expressionPresetCoefficients": np.ascontiguousarray(coefficients, dtype=np.float32),
+        "blinkCoefficients": np.ascontiguousarray(blink_coefficients, dtype=np.float32),
         **basis_arrays,
     }
     metadata: dict[str, Any] = {
@@ -946,14 +936,14 @@ def build_preview_arrays(
         "vertex_group_threshold": GROUP_THRESHOLD,
         "joint_names": list(joint_names),
         "expression_preset_names": list(preset_names),
-        "expression_preset_scales": [float(value) for value in preset_scales],
-        "blink_scale": blink_scale,
+        # まばたきのクロスフェードが置き換える成分の区間（目領域の成分そのもの）。
+        "blink_component_offset": eye_components[0],
+        "blink_component_count": len(eye_components),
         "blink_source": (
             "WINK_LEFT + WINK_RIGHT の係数を "
             + "/".join(EYE_EXPRESSION_COMPONENT.pattern.split("|"))
             + " の成分だけ残したもの（正本は旧 web 版 main.buildBlinkVector）"
         ),
-        "eye_expression_groups": list(EYE_EXPRESSION_GROUPS),
         "expression_presets_source": (
             "1-10/2607_Obayashi_Avatar_Mockup_3DGS"
             " Assets/Sandbox/Ooba/GNM/Tools/export_expression_presets.py"
@@ -970,12 +960,9 @@ def build_preview_arrays(
         "group_count": float(groups.shape[0]),
         "preset_count": float(len(preset_names)),
         "viseme_count": float(len(viseme_names)),
-        "preset_max_displacement": float(np.abs(displacement).max()),
-        "preset_error": preset_error,
         "joint_identity_max": float(np.abs(joint_identity).max()),
-        "blink_max_displacement": float(np.linalg.norm(blink, axis=1).max()),
-        "blink_outside_micrometers": outside * 1e6,
-        "eye_region_vertices": float(eye_region[source].sum()),
+        "blink_max_displacement": blink_displacement,
+        "blink_component_count": float(len(eye_components)),
     }
     return arrays, metadata, report
 
@@ -1128,11 +1115,9 @@ def main() -> None:
         f" ジョイント {len(EXPECTED_JOINT_NAMES)} 本"
         f"（identity で最大 {preview_report['joint_identity_max'] * 1000:.1f} mm 動く）/"
         f" 表情プリセット {int(preview_report['preset_count'])} 本"
-        f"（うち口形 {int(preview_report['viseme_count'])} 本 /"
-        f" 最大変位 {preview_report['preset_max_displacement'] * 1000:.1f} mm /"
-        f" int16 量子化の最大誤差 {preview_report['preset_error'] * 1e6:.1f} um）\n"
+        f"（うち口形 {int(preview_report['viseme_count'])} 本 / 係数の行として持つ）\n"
         f"  まばたき: 最大変位 {preview_report['blink_max_displacement'] * 1000:.2f} mm /"
-        f" 目領域 {int(preview_report['eye_region_vertices']):,} 頂点\n"
+        f" 置き換える成分 {int(preview_report['blink_component_count'])} 本\n"
         f"  表情基底: 領域ブロック {int(preview_report['expression_basis_vertices']):,} 頂点 /"
         f" {preview_report['expression_basis_bytes'] / 1e6:.1f} MB"
         f"（int16 量子化の最大誤差 {preview_report['expression_basis_error'] * 1e9:.1f} nm）\n"

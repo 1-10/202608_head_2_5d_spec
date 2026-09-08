@@ -1,32 +1,30 @@
 // 表情プリセットとまばたき。3D ビューだけが使う。
 //
-// **表情プリセットの正本は Unity 側の `Tools/export_expression_presets.py`**（公式 CVAE デコーダを
-// latent 0 = クラス条件付き平均で回して 20 本に焼いたもの）。自動再生のしかたは
-// `Viewer/GnmExpressionPlayer`。
+// **表情はすべて「383 成分の係数」で表す。** GNM の表情基底は identity 基底と同じ「係数 × 基底」の
+// 形なので、プリセットも口形もまばたきもトラッキングも、行き先は 1 本の係数ベクトルになる。
+// 変位に潰した形を持たない — 潰すと GNM 本来の形が web の中だけで消え、Unity へ持って行けない。
 //
-// **公式 383 成分をそのまま出さない。** 成分名は領域ごとの統計方向で、表情としての意味を持たない。
-// 旧 web 版は 383 成分の一部を領域で切って合成していたが、その領域分割は公式に無い操作だった。
-// 焼いた 20 本だけを持つ方が Unity と同じ絵になる。
+// - プリセット 20 本: 正本は Unity 側の `Tools/export_expression_presets.py`（公式 CVAE デコーダを
+//   latent 0 = クラス条件付き平均で回したもの）。アセットには**係数の行**として入っている
+// - 口形 5 本: 正本は web 側の `tools/viseme_presets.json`（上の 20 本の係数行の線形結合）。
+//   表情と口形の切り分けは `viseme.ts`。**このファイルは本数を持たない**
+// - まばたき: `wink_left` + `wink_right` の係数を目の成分だけ残したもの
+// - トラッキング: MediaPipe の点から係数を解く（`expressionFit.ts`）
 //
-// **加算変位なので同時に立てるのは 1 本だけ。** 重ねると顔が壊れるうえ、確認用途では「今どれか」が
-// 分かる方が役に立つ。
+// 自動再生のしかたは Unity 側 `Viewer/GnmExpressionPlayer`。**同時に立てるのは 1 本だけ** —
+// 係数は足せるが、確認用途では「今どのプリセットか」が分かる方が役に立つ。
 //
-// **アセットにはこの 20 本の後ろに、web 側で足した口形（`viseme_*`）が焼いてある。** あれも同じ
-// 加算変位の 1 本なので、上の原則はそのまま当てはまる（だから実行時合成にせず焼いた）。表情と口形の
-// 切り分けと、正本がここだけ web 側になる理由は `viseme.ts`。**このファイルは本数を持たない** —
-// `presetCount` をそのまま「表情の本数」として使うと、口形を巻き込む。
-//
-// ## まばたきは加算ではなく「目領域だけ置き換え」
+// ## まばたきは加算ではなく「目の成分だけ置き換え」
 //
 // 正本は旧 web 版（`blink.ts` の波形と `gnmHeadMesh` のクロスフェード）。**加算にすると surprise の
 // ような開瞼系と打ち消し合い、まばたき中も瞼が閉じ切らずに眼球が瞼を貫いて見える。**
 //
-// 旧 web 版は公式 383 成分のうち名前が `left_eye*` / `right_eye*` の成分を置き換えていた。こちらは
-// 焼いた 20 本しか持たないので成分では切れないが、**目領域の成分の変位は
-// `expression_basis_{left,right}_eye` の外で厳密に 0**（アセット生成時に毎回検査している）なので、
-// その頂点範囲でのクロスフェードが同じ結果になる。
+// 置き換えは**係数の側**で行う（旧実装は頂点の側だった）。目領域の成分は連続した 1 区間なので
+// 区間の係数を寄せるだけで済み、結果が 1 本の係数ベクトルに収まる — だから録画にもそのまま乗り、
+// Unity 側にまばたき専用の経路が要らない。頂点の側で混ぜると、目と口が共有する頂点で口の寄与まで
+// 薄まってしまう（領域の支持は重なっている）。
 
-import { GnmPreviewAsset, evaluateSelector } from './asset';
+import { GnmPreviewAsset } from './asset';
 
 /** 自動再生のしかた。 */
 export type ExpressionPlayMode = 'off' | 'sequence' | 'random';
@@ -44,11 +42,6 @@ export const BLINK_PERIOD_MAX_SECONDS = 5;
 /** まばたき 1 回の長さ（ミリ秒）。旧 web 版 `blinkDurationMinMs` / `blinkDurationMaxMs`。 */
 export const BLINK_DURATION_MIN_MS = 150;
 export const BLINK_DURATION_MAX_MS = 250;
-
-/** まばたきが動かす頂点。`blendBlink` のクロスフェードをこの範囲へ閉じる。 */
-export function eyeExpressionMask(preview: GnmPreviewAsset): Uint8Array {
-  return evaluateSelector(preview, preview.eyeExpressionGroups);
-}
 
 /** 台形エンベロープ。0 → 1 → 1 → 0 で、両端は smoothstep で丸める。 */
 export function envelope(elapsedSeconds: number, fadeSeconds = FADE_SECONDS, holdSeconds = HOLD_SECONDS): number {
@@ -180,59 +173,102 @@ function lerp(low: number, high: number, t: number): number {
   return low + (high - low) * Math.min(1, Math.max(0, t));
 }
 
+/** 表情の係数ベクトル（長さ `componentCount`）を作る。 */
+export function zeroCoefficients(preview: GnmPreviewAsset): Float64Array {
+  return new Float64Array(preview.componentCount);
+}
+
 /**
- * 表情の重みを頂点へ加算する（`vertices` を破壊的に更新）。
+ * プリセットごとの重みを係数ベクトルへ足し込む（`coefficients` を破壊的に更新）。
  *
  * @param weights プリセットごとの重み。長さは `preview.presetCount`
  */
-export function addExpression(
+export function addPresetCoefficients(
   preview: GnmPreviewAsset,
-  vertices: Float64Array,
+  coefficients: Float64Array,
   weights: Float64Array,
 ): void {
   if (weights.length !== preview.presetCount) {
     throw new Error(`表情の重みが ${weights.length} 個（期待 ${preview.presetCount}）`);
   }
-  const stride = preview.vertexCount * 3;
+  if (coefficients.length !== preview.componentCount) {
+    throw new Error(`係数が ${coefficients.length} 個（期待 ${preview.componentCount}）`);
+  }
+  const count = preview.componentCount;
   for (let preset = 0; preset < preview.presetCount; preset++) {
     const weight = weights[preset];
     if (weight === 0) continue;
-    const factor = (weight * preview.expressionPresetScales[preset]) / 32767;
-    const base = preset * stride;
-    for (let index = 0; index < stride; index++) {
-      vertices[index] += preview.expressionPresetBasisQ[base + index] * factor;
+    const base = preset * count;
+    for (let component = 0; component < count; component++) {
+      coefficients[component] += preview.expressionPresetCoefficients[base + component] * weight;
     }
   }
 }
 
 /**
- * まばたきを当てる（`vertices` を破壊的に更新）。
+ * まばたきを係数へ混ぜる（`coefficients` を破壊的に更新）。
  *
- * 目領域だけ「プリセット由来の変位」と「まばたきの変位」をクロスフェードする。**加算しない** —
+ * 目の成分だけ「表情由来の係数」と「まばたきの係数」をクロスフェードする。**加算しない** —
  * 開瞼系の表情と打ち消し合って瞼が閉じ切らなくなる。
  *
- * @param vertices `addExpression` まで済んだ頂点
- * @param restVertices 無表情の頂点（変位を取り出すのに要る）
  * @param amount 0（開眼）〜1（閉眼）
  */
-export function blendBlink(
+export function blendBlinkCoefficients(
   preview: GnmPreviewAsset,
-  vertices: Float64Array,
-  restVertices: Float64Array,
+  coefficients: Float64Array,
   amount: number,
-  eyeMask: Uint8Array,
 ): void {
   if (amount <= 0) return;
   const blend = Math.min(1, amount);
-  const factor = preview.blinkScale / 32767;
-  for (let vertex = 0; vertex < preview.vertexCount; vertex++) {
-    if (eyeMask[vertex] === 0) continue;
-    for (let axis = 0; axis < 3; axis++) {
-      const index = vertex * 3 + axis;
-      const rest = restVertices[index];
-      const expression = vertices[index] - rest;
-      const blink = preview.blinkBasisQ[index] * factor;
-      vertices[index] = rest + expression * (1 - blend) + blink * blend;
+  const end = preview.blinkComponentOffset + preview.blinkComponentCount;
+  for (let component = preview.blinkComponentOffset; component < end; component++) {
+    const blink = preview.blinkCoefficients[component];
+    coefficients[component] = coefficients[component] * (1 - blend) + blink * blend;
+  }
+}
+
+/**
+ * 係数ベクトルを頂点へ加算する（`vertices` を破壊的に更新）。
+ *
+ * **毎フレーム走る所なので、ブロックの並び（頂点, 成分, xyz）に沿って頂点優先で回す。** 内側の
+ * 読みが連番になり、頂点への書き戻しが 1 頂点 1 回で済む。成分優先だと同じ演算数でも 2 倍以上遅い。
+ *
+ * 係数に 0 を掛ける演算は残す。**分岐で飛ばすと遅くなる** — 内側は 1 頂点あたり成分数ぶん回るので、
+ * 分岐予測の外れる方が乗算より高い。呼び側で係数を間引くのは自由（`factors` が 0 なら無害）。
+ */
+export function addExpression(
+  preview: GnmPreviewAsset,
+  vertices: Float64Array,
+  coefficients: Float64Array,
+  scratch = new Float64Array(preview.componentCount),
+): void {
+  if (coefficients.length !== preview.componentCount) {
+    throw new Error(`係数が ${coefficients.length} 個（期待 ${preview.componentCount}）`);
+  }
+  const quantized = preview.expressionBasisQ;
+  const blockVertices = preview.expressionBasisVertices;
+  // 係数 × 量子化スケールを先に畳む（内側で毎回掛けない）。
+  for (let component = 0; component < coefficients.length; component++) {
+    scratch[component] = (coefficients[component] * preview.expressionBasisScales[component]) / 32767;
+  }
+  for (const region of preview.expressionBasisRegions) {
+    const { componentOffset, componentCount, vertexOffset, vertexCount } = region;
+    let from = region.quantizedOffset;
+    for (let slot = 0; slot < vertexCount; slot++) {
+      let x = 0;
+      let y = 0;
+      let z = 0;
+      for (let local = 0; local < componentCount; local++) {
+        const factor = scratch[componentOffset + local];
+        x += quantized[from] * factor;
+        y += quantized[from + 1] * factor;
+        z += quantized[from + 2] * factor;
+        from += 3;
+      }
+      const to = blockVertices[vertexOffset + slot] * 3;
+      vertices[to] += x;
+      vertices[to + 1] += y;
+      vertices[to + 2] += z;
     }
   }
 }

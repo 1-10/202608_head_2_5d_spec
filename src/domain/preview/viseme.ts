@@ -1,11 +1,11 @@
 // あいうえおの口形（viseme）。3D ビューだけが使う。
 //
-// **口形はアセットへ焼いた 1 本のプリセット。** 実行時に複数のプリセットを重ねて作るのではない。
-// 焼く段は `tools/export_gnm_assets.py`、混ぜ方の定義は `tools/viseme_presets.json`（そこが正本）。
+// **口形は表情プリセットと同じ「係数の行」1 本。** 実行時に複数のプリセットを重ねて作るのではない。
+// 行を作る段は `tools/export_gnm_assets.py`、混ぜ方の定義は `tools/viseme_presets.json`（そこが正本）。
 // 中身は公式 20 クラスの**係数行の線形結合**なので、実行時に 2 本重ねるのと数値的に同一 —
-// **それでも焼くのは、口形が 1 本のプリセットになると `expression.ts` の「同時に立てるのは 1 本だけ」を
-// 壊さずに済むから。** 実行時合成にすると、口形を出すためだけに「重ねてよい経路」をビューアーへ
-// 作ることになり、原則が例外だらけになる。
+// **それでも 1 本の行にするのは、`expression.ts` の「同時に立てるのは 1 本だけ」を壊さずに済むから。**
+// 実行時合成にすると、口形を出すためだけに「重ねてよい経路」をビューアーへ作ることになり、
+// 原則が例外だらけになる。
 //
 // **正本の向きがここだけ逆になる。** 表情 20 本の正本は Unity 側（`Tools/export_expression_presets.py`）
 // だが、**口形 5 本の正本は web 側**。Unity 側は 20 本しか持たないので、これは既知の乖離である
@@ -40,8 +40,8 @@ export const VISEME_PREFIX = 'viseme_';
 /**
  * 口形の日本語ラベル。
  *
- * **アセットに焼いた名前を鍵にする。** ここに無い口形が焼かれたら `visemeLabel` は名前をそのまま
- * 返すので画面からは消えない（テストが「ラベルの無い口形」を落とす）。
+ * **アセットの名前を鍵にする。** ここに無い口形が増えても `visemeLabel` は名前をそのまま返すので
+ * 画面からは消えない（テストが「ラベルの無い口形」を落とす）。
  */
 export const VISEME_LABELS: Readonly<Record<string, string>> = {
   viseme_a: 'あ',
@@ -56,7 +56,7 @@ export function isVisemePreset(name: string): boolean {
   return name.startsWith(VISEME_PREFIX);
 }
 
-/** 画面に出す名前。ラベルを持たない口形は焼いた名前のまま出す（黙って消さない）。 */
+/** 画面に出す名前。ラベルを持たない口形はアセットの名前のまま出す（黙って消さない）。 */
 export function visemeLabel(name: string): string {
   return VISEME_LABELS[name] ?? name;
 }
@@ -65,14 +65,14 @@ export function visemeLabel(name: string): string {
 export interface PresetSplit {
   /** 表情（口形でないもの）。自動再生が回すのはこちらだけ。 */
   readonly expressions: readonly number[];
-  /** 口形。連続再生が回すのはこちら。並びは焼いた順 = あいうえお。 */
+  /** 口形。連続再生が回すのはこちら。並びはアセットの順 = あいうえお。 */
   readonly visemes: readonly number[];
 }
 
 /**
  * プリセットを表情と口形へ分ける。
  *
- * **並びはアセットが正本。** 連続再生の順（あ→い→う→え→お）もアセットへ焼いた順そのもので、
+ * **並びはアセットが正本。** 連続再生の順（あ→い→う→え→お）もアセットの並びそのもので、
  * ここで並べ直さない（並べ直すと `tools/viseme_presets.json` を触ったときに黙ってズレる）。
  */
 export function splitPresetIndices(preview: GnmPreviewAsset): PresetSplit {
