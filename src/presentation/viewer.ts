@@ -154,38 +154,6 @@ const WIREFRAME_COLOR = 0x66ff99;
 /** 不透明メッシュは重心を持たない（並べ替えないので計算する理由が無い）。 */
 const EMPTY_CENTROIDS = new Float32Array(0);
 
-/**
- * 数字キー → 表示を切り替える層。並びは `LAYER_ORDER`。
- */
-export const LAYER_KEYS: Readonly<Record<string, string>> = {
-  Digit1: LAYER_ORDER[0],
-  Digit2: LAYER_ORDER[1],
-  Digit3: LAYER_ORDER[2],
-  Digit4: LAYER_ORDER[3],
-};
-
-/**
- * キー → テクスチャを切り替える層。並びは `LAYER_ORDER`（数字キーと同じ順）。
- *
- * **修飾キー（Shift + 数字）にしない。** キーボード配列によって Shift + 1 が届く形が変わるので、
- * 配列に依らない単独キーにする。
- */
-export const TEXTURE_KEYS: Readonly<Record<string, string>> = {
-  KeyA: LAYER_ORDER[0],
-  KeyS: LAYER_ORDER[1],
-  KeyD: LAYER_ORDER[2],
-  KeyF: LAYER_ORDER[3],
-};
-
-/** 全部のテクスチャをまとめて切り替えるキー。 */
-export const ALL_TEXTURES_KEY = 'KeyT';
-
-/** 正面・既定の距離・無表情に戻すキー。 */
-export const RESET_KEY = 'KeyR';
-
-/** ワイヤーフレームを切り替えるキー。 */
-export const WIREFRAME_KEY = 'KeyW';
-
 const VERTEX_SHADER = `
 varying vec2 vUv;
 varying vec3 vNormal;
@@ -728,31 +696,6 @@ export class Viewer {
   textureStates(): [string, boolean][] {
     if (this.previewScene === null) return [];
     return sceneLayerNames(this.previewScene).map((layer) => [layer, !this.untextured.has(layer)]);
-  }
-
-  /** キー操作。層・テクスチャ・視点のリセットを扱い、それ以外は false を返す。 */
-  handleKey(code: string): boolean {
-    if (code in LAYER_KEYS) {
-      this.toggleLayer(LAYER_KEYS[code]);
-      return true;
-    }
-    if (code in TEXTURE_KEYS) {
-      this.toggleLayerTexture(TEXTURE_KEYS[code]);
-      return true;
-    }
-    if (code === ALL_TEXTURES_KEY) {
-      this.toggleAllTextures();
-      return true;
-    }
-    if (code === WIREFRAME_KEY) {
-      this.setWireframe(!this.showWireframe);
-      return true;
-    }
-    if (code === RESET_KEY) {
-      this.resetView();
-      return true;
-    }
-    return false;
   }
 
   private applyVisibility(): void {

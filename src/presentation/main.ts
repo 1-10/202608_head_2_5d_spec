@@ -42,6 +42,7 @@ const elements = {
   statusBox: requireElement<HTMLElement>('viewport-status'),
   statusTitle: requireElement<HTMLElement>('status-title'),
   statusStages: requireElement<HTMLElement>('status-stages'),
+  buttonStatusClose: requireElement<HTMLButtonElement>('btn-status-close'),
   report: requireElement<HTMLElement>('report'),
   viewport: requireElement<HTMLElement>('canvas-head'),
   video: requireElement<HTMLVideoElement>('webcam-video'),
@@ -364,18 +365,15 @@ viewer.onViewChanged = (): void => {
   gui.syncCameraPose(viewer.cameraPose);
 };
 
-// キー操作は 3Dビューが持つ（層・テクスチャ・視点のリセット）。入力欄にフォーカスがあるときは
-// 拾わない。
+// `Esc` でオーバーレイ（検査画像・内訳）を閉じる。**それ以外のキーは持たない** — 層やテクスチャの
+// 切り替えは右パネルが入口で、同じ操作の入口を 2 つ持つと片方だけ状態が動く経路を塞ぎ続けることに
+// なる。
 window.addEventListener('keydown', (event) => {
   if (event.metaKey || event.ctrlKey || event.altKey) return;
   if (event.code === 'Escape' && !elements.overlay.hidden) {
     overlay.close();
     event.preventDefault();
-    return;
   }
-  const target = event.target as HTMLElement | null;
-  if (target !== null && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)) return;
-  if (viewer.handleKey(event.code)) event.preventDefault();
 });
 
 /**
@@ -408,11 +406,14 @@ const status = {
   timings: [] as { stage: string; seconds: number }[],
   /** 今の段が始まった時刻（`performance.now()`）。 */
   startedAtMs: 0,
+  /** 今出している段（走っていなければ `null`）。経過を毎フレーム書き直すのに使う。 */
+  runningStage: null as string | null,
   /** 書き出し全体が始まった時刻。 */
   runStartedAtMs: 0,
 
   /** ひとこと出す。空文字で閉じる（段の一覧も隠す）。 */
   message(text: string, isError = false): void {
+    status.runningStage = null;
     elements.statusTitle.textContent = text;
     elements.statusTitle.classList.toggle('error', isError);
     elements.statusStages.hidden = true;
@@ -421,6 +422,7 @@ const status = {
 
   /** 書き出しを始める（時計を初期化する）。 */
   beginRun(): void {
+    status.runningStage = null;
     status.timings = [];
     status.runStartedAtMs = performance.now();
     status.startedAtMs = status.runStartedAtMs;
@@ -437,19 +439,34 @@ const status = {
       });
     }
     status.startedAtMs = now;
+    status.runningStage = stage;
     const index = STAGE_NAMES.indexOf(stage);
-    const elapsed = ((now - status.runStartedAtMs) / 1000).toFixed(1);
-    elements.statusTitle.textContent =
-      index < 0
-        ? stage
-        : `${stage}（${index + 1} / ${STAGE_NAMES.length}）　経過 ${elapsed}s`;
-    elements.statusTitle.classList.remove('error');
     for (const [name, item] of status.items) {
       const at = STAGE_NAMES.indexOf(name);
+      item.textContent = name;
       item.dataset.state = at < index ? 'done' : at === index ? 'active' : 'todo';
     }
+    status.tick();
+    elements.statusTitle.classList.remove('error');
     elements.statusStages.hidden = false;
     elements.statusBox.hidden = false;
+  },
+
+  /**
+   * 経過を書き直す。**`animate` から毎フレーム呼ぶ。**
+   *
+   * 段の切り替わりでしか書かないと、重い段（推論は 30 秒かかることがある）の間ずっと同じ数が
+   * 出たままで、進んでいるのか固まったのか分からない。
+   */
+  tick(): void {
+    const stage = status.runningStage;
+    if (stage === null) return;
+    const index = STAGE_NAMES.indexOf(stage);
+    const elapsed = ((performance.now() - status.runStartedAtMs) / 1000).toFixed(1);
+    elements.statusTitle.textContent =
+      index < 0
+        ? `${stage}　経過 ${elapsed}s`
+        : `${stage}（${index + 1} / ${STAGE_NAMES.length}）　経過 ${elapsed}s`;
   },
 
   /**
@@ -457,6 +474,7 @@ const status = {
    * 追える。
    */
   failure(text: string): void {
+    status.runningStage = null;
     elements.statusTitle.textContent = text;
     elements.statusTitle.classList.add('error');
     elements.statusBox.hidden = false;
@@ -469,6 +487,7 @@ const status = {
    * 決めるのに使う（重いのがアトラスなら一辺を落とす、など）。
    */
   finishRun(): void {
+    status.runningStage = null;
     const now = performance.now();
     const last = STAGE_NAMES.length - 1;
     if (status.timings.length === last) {
@@ -663,8 +682,11 @@ function animate(): void {
   requestAnimationFrame(animate);
   viewer.render();
   syncPlaybackControls();
+  status.tick();
 }
 
+// 済んだ表示は自分で閉じられるようにする（終わった後も残り続けるので）。
+elements.buttonStatusClose.addEventListener('click', () => status.message(''));
 elements.buttonInspection.addEventListener('click', () => overlay.toggle('inspection'));
 elements.buttonReport.addEventListener('click', () => overlay.toggle('report'));
 elements.buttonOverlayClose.addEventListener('click', () => overlay.close());

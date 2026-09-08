@@ -54,15 +54,10 @@ import {
   YAW_LIMIT_DEGREES,
 } from '../domain/preview/pose';
 import {
-  ALL_TEXTURES_KEY,
-  LAYER_KEYS,
   MAXIMUM_AMBIENT,
   MAXIMUM_LIGHT_INTENSITY,
   MINIMUM_AMBIENT,
   MINIMUM_LIGHT_INTENSITY,
-  RESET_KEY,
-  TEXTURE_KEYS,
-  WIREFRAME_KEY,
 } from './viewer';
 import {
   DEFAULT_VIEW_SETTINGS,
@@ -199,11 +194,6 @@ export function toExportSettings(state: PanelState): ExportSettings {
 /** パネルの状態を `ViewSettings` へ移す。 */
 export function toViewSettings(state: PanelState): ViewSettings {
   return { ...state.view };
-}
-
-/** キーコードを人に見せる短い表記（`KeyA` → `A` / `Digit1` → `1`）。 */
-function keyLabel(code: string): string {
-  return code.replace(/^Key/, '').replace(/^Digit/, '');
 }
 
 export interface GuiCallbacks {
@@ -350,9 +340,10 @@ export function setupGui(
     .name('画角 (°)')
     .onChange(pushView);
   const cameraControllers = [
-    camera.add(state.view, 'cameraPositionX').step(0.001).name('位置 X (m)').onChange(pushView),
-    camera.add(state.view, 'cameraPositionY').step(0.001).name('位置 Y (m)').onChange(pushView),
-    camera.add(state.view, 'cameraPositionZ').step(0.001).name('位置 Z (m)').onChange(pushView),
+    // `decimals` を付けないと、ドラッグで動いた値が全桁で出る（0.000007942318906007553 のように）。
+    camera.add(state.view, 'cameraPositionX').step(0.001).decimals(3).name('位置 X (m)').onChange(pushView),
+    camera.add(state.view, 'cameraPositionY').step(0.001).decimals(3).name('位置 Y (m)').onChange(pushView),
+    camera.add(state.view, 'cameraPositionZ').step(0.001).decimals(3).name('位置 Z (m)').onChange(pushView),
     camera
       .add(state.view, 'cameraPitchDegrees', -MAXIMUM_PITCH_DEGREES, MAXIMUM_PITCH_DEGREES, 0.1)
       .name('回転 X (°)')
@@ -391,7 +382,7 @@ export function setupGui(
     .onChange(pushView);
   const wireframeController = camera
     .add(state.view, 'showWireframe')
-    .name(`ワイヤーフレーム   [${keyLabel(WIREFRAME_KEY)}]`)
+    .name('ワイヤーフレーム')
     .onChange(pushView);
 
   // 可動域の上限は `domain/preview/pose` が持つ（Unity 側と同じ値）。
@@ -502,10 +493,6 @@ export function setupGui(
 
   const layerControllers = new Map<string, ReturnType<typeof view.add>>();
   const textureControllers = new Map<string, ReturnType<typeof view.add>>();
-  const layerKeyOf = (layer: string): string =>
-    Object.entries(LAYER_KEYS).find(([, value]) => value === layer)?.[0] ?? '';
-  const textureKeyOf = (layer: string): string =>
-    Object.entries(TEXTURE_KEYS).find(([, value]) => value === layer)?.[0] ?? '';
 
   const layers = view.addFolder('表示する層');
   for (const layer of LAYER_ORDER) {
@@ -513,7 +500,7 @@ export function setupGui(
       layer,
       layers
         .add(state.visibleLayers, layer)
-        .name(`${LAYER_LABELS[layer] ?? layer}   [${keyLabel(layerKeyOf(layer))}]`)
+        .name(LAYER_LABELS[layer] ?? layer)
         .onChange((value: boolean) => callbacks.onLayerVisibilityChanged(layer, value)),
     );
   }
@@ -523,7 +510,7 @@ export function setupGui(
       layer,
       textures
         .add(state.texturedLayers, layer)
-        .name(`${LAYER_LABELS[layer] ?? layer}   [${keyLabel(textureKeyOf(layer))}]`)
+        .name(LAYER_LABELS[layer] ?? layer)
         .onChange((value: boolean) => callbacks.onLayerTextureChanged(layer, value)),
     );
   }
@@ -531,8 +518,8 @@ export function setupGui(
     全テクスチャ: callbacks.onAllTexturesToggled,
     視点: callbacks.onResetView,
   };
-  view.add(viewActions, '全テクスチャ').name(`全テクスチャを切り替え   [${keyLabel(ALL_TEXTURES_KEY)}]`);
-  view.add(viewActions, '視点').name(`正面・無表情に戻す   [${keyLabel(RESET_KEY)}]`);
+  view.add(viewActions, '全テクスチャ').name('全テクスチャを切り替え');
+  view.add(viewActions, '視点').name('正面・無表情に戻す');
 
   return {
     syncViewControls(layerStates, textureStates) {

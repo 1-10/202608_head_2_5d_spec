@@ -42,8 +42,7 @@
             -->
             <div class="pane-label">
               3D ビュー（左ドラッグでカメラ周回 / Shift+左で首と視線 / 右ドラッグで平行移動 /
-              ホイールで拡大。1-4 で層、A/S/D/F でテクスチャ、T で全テクスチャ、W でワイヤー、
-              R で正面・無表情）
+              ホイールで寄り引き）
             </div>
             <div class="pane-canvas" id="canvas-head">
               <!--
@@ -53,6 +52,7 @@
                 `STAGE_NAMES` から作る（ここに写さない）。
               -->
               <div id="viewport-status" hidden>
+                <button id="btn-status-close" class="status-close" title="閉じる">&times;</button>
                 <p class="status-title" id="status-title"></p>
                 <ol class="status-stages" id="status-stages" hidden></ol>
               </div>

@@ -314,7 +314,27 @@ button:disabled {
   border-radius: 6px;
   background: color-mix(in srgb, var(--panel) 92%, transparent);
   text-align: center;
+  /* 箱そのものは操作を透かす（出ている間もビューを回せる）。閉じるボタンだけ受ける。 */
   pointer-events: none;
+}
+
+/* 済んだ表示は自分で閉じられるようにする（終わった後も残り続けるので）。 */
+.status-close {
+  position: absolute;
+  top: 2px;
+  right: 4px;
+  padding: 0 4px;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.status-close:hover {
+  color: var(--text);
 }
 
 #viewport-status[hidden],
@@ -323,7 +343,7 @@ button:disabled {
 }
 
 .status-title {
-  margin: 0;
+  margin: 0 14px 0 0;
   font-size: 12px;
   color: var(--text);
   white-space: pre-line;
