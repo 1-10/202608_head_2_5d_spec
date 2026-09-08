@@ -29,6 +29,7 @@ import {
   DEFAULT_FOV_DEGREES,
   DEFAULT_ORBIT_RADIUS_METERS,
   TARGET_HEIGHT_METERS,
+  cameraPoseAt,
 } from '../src/domain/preview/camera';
 import {
   AMBIENT_LIGHT,
@@ -95,6 +96,14 @@ describe('README の 3D ビューの表', () => {
     expect(README).toContain(
       `| 注視点 | **頭部の外接箱の中心**（あちらは眼の高さ y=${TARGET_HEIGHT_METERS}m 固定） |`,
     );
+  });
+
+  // カメラの既定の姿勢も Unity 側 `MainCamera` の写しなので、README の数はコードから作る。
+  // **回転の 180° はこの検査に入れない** — あちらの値の写しではなく「Unity のカメラは +Z を、
+  // three.js のカメラは -Z を見る」という構造の差なので、あちらが動いても変わらない。
+  it('カメラの既定の姿勢（Unity 側 MainCamera の写し）', () => {
+    const pose = cameraPoseAt([0, TARGET_HEIGHT_METERS, 0]);
+    expect(README).toContain(`位置 (0, ${pose.position[1]}, ${pose.position[2]}) / 回転 (0, 0)`);
   });
 
   it('領域の並び（先勝ちなので順序そのものが仕様）', () => {
