@@ -764,10 +764,15 @@ export class Viewer {
       this.poseDirty = true;
     }
 
+    const coefficients = this.expressionCoefficients;
+    if (coefficients === null || this.appliedCoefficients === null) return;
+    coefficients.fill(0);
     const weights = this.expressionWeights;
     weights.fill(0);
     if (this.expressionOverride !== null) {
-      this.currentExpression = this.expressionOverride(weights, deltaSeconds);
+      // **差し込み口は係数を受ける。** プリセットの重みへ寄せない — 口形もトラッキングも録画も
+      // 383 成分の係数で来る（重みを渡していたときは長さ違いで駆動源が黙って何もしなかった）。
+      this.currentExpression = this.expressionOverride(coefficients, deltaSeconds);
     } else if (this.playMode === 'off') {
       if (this.manualWeights !== null) weights.set(this.manualWeights);
       this.currentExpression = null;
@@ -802,11 +807,10 @@ export class Viewer {
       this.blinkAmount = 0;
     }
 
-    // プリセットの重み → 383 成分の係数。強さはここで 1 回だけ掛ける。
-    const coefficients = this.expressionCoefficients;
-    if (coefficients === null || this.appliedCoefficients === null) return;
-    coefficients.fill(0);
-    addPresetCoefficients(preview, coefficients, weights);
+    // 手のスライダーと自動再生だけプリセットの重みを経由する。強さはここで 1 回だけ掛ける。
+    if (this.expressionOverride === null) {
+      addPresetCoefficients(preview, coefficients, weights);
+    }
     if (this.expressionIntensity !== 1) {
       for (let component = 0; component < coefficients.length; component++) {
         coefficients[component] *= this.expressionIntensity;
