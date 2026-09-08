@@ -20,7 +20,7 @@
 - Chrome / Edge の最近の版
 - WebGPU があれば深度・法線の推論（DAViD）を fp16 で走らせる。無ければ WASM + int8 へ落ちる。
   どちらで動いたかは画面に出る
-- 初回に GNM アセット約 32MB と DAViD の ONNX（数百 MB）を読み込む
+- 初回に GNM アセット約 42MB と DAViD の ONNX（数百 MB）を読み込む
 - Webカメラを使うなら HTTPS か localhost 経由で開く
 
 ## セットアップ

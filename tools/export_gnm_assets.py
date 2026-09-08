@@ -42,6 +42,7 @@ identity 基底だけ int16 に量子化する
 
 from __future__ import annotations
 
+import itertools
 import json
 import re
 import struct
@@ -143,6 +144,21 @@ VISEME_PRESET_PREFIX = "viseme_"
 """口形プリセットの名前の頭。**GUI と 3D ビューはこの頭で「表情」と「口形」を分ける** — 一覧を
 コードへ手で写すと、ここが増減したとき黙って古くなる。"""
 
+EXPRESSION_REGIONS: tuple[str, ...] = (
+    "left_eye_region",
+    "right_eye_region",
+    "lower_face_region",
+    "tongue",
+    "pupils",
+)
+"""``expression_names`` に現れる領域。**この並びがそのまま成分の並び**（領域ごとに連続、実測）。
+
+**領域は「動かす頂点が重ならない」という意味では独立していない。** 左目と右目、目と下顔面、
+下顔面と舌は頂点を共有し、基底として見ても直交しない（重なりの実測はこのスクリプトが毎回表示する）。
+
+だから**係数は領域ごとに分けて解かず、383 成分をまとめて解く**。領域を分けて持つのは容量のため
+だけ — 密に持つと 41MB、領域ブロックなら 1/4 で済む。"""
+
 VISEME_WEIGHT_SUM_LIMIT = 1.0
 """1 つの口形に混ぜるクラス係数の重みの合計の上限。
 
@@ -163,7 +179,10 @@ NPZ_KEYS: dict[str, str] = {
     "vertex_groups": "読む",
     "vertex_group_names": "読む",
     "mesh_component_names": "読む",
-    "expression_basis": "読む: 3D ビューの表情プリセットへ焼く（書き出しには入らない）",
+    "expression_basis": (
+        "読む: 3D ビューの表情プリセットへ焼き、領域ブロックとしてそのまま載せる"
+        "（書き出しには入らない）"
+    ),
     "skinning_weights": "読む: 3D ビューで首と視線を回す（同上）",
     "joint_names": "読む: 同上",
     "joint_parent_indices": "読む: 同上",
@@ -171,7 +190,7 @@ NPZ_KEYS: dict[str, str] = {
     "template_joint_positions": "読む: 同上",
     "pose_correctives_regressor": "読む: 全要素ゼロであることの確認にだけ使う",
     "bone_aligned_template_joint_orientations": "読む: 単位行列であることの確認にだけ使う",
-    "expression_names": "読む: まばたきに使う目領域の成分を名前で選ぶ",
+    "expression_names": "読む: まばたきに使う目領域の成分を名前で選び、領域ブロックへ分ける",
     "identity_names": "読まない: 係数は index で送る",
     "joint_regressor": "読まない: 位置は template_joint_positions + joint_identity_basis で作る",
     "mirror_indices": "読まない: 左右対称で色を複製する段を持たない",
@@ -652,6 +671,134 @@ def build_viseme_coefficients(
     return np.array(rows, dtype=np.float64), names
 
 
+def build_expression_basis_blocks(
+    expression_basis: np.ndarray,
+    source: np.ndarray,
+    expression_names: list[str],
+) -> tuple[dict[str, np.ndarray], dict[str, Any], dict[str, float]]:
+    """公式の表情基底 383 成分を**領域ブロック**の int16 として詰める.
+
+    密に持つと 383 × 18,437 × 3 × 2B = 41MB になる。**成分は自分の領域の頂点しか動かさない**
+    ので、領域ごとに「動く頂点の一覧」と「その頂点だけのブロック」に分けると 1/5 で済む。
+
+    プリセット（``expressionPresetBasisQ``）とは役割が違う。あちらは係数を当て終わった変位で、
+    こちらは**係数を解くための基底そのもの**。MediaPipe の点から係数を解く経路（表情フィット）が
+    これを読む。プリセットを基底から実行時に作り直すためのものではない。
+
+    量子化のスケールは**成分ごと**。領域ごとにすると弱い成分が 1 目盛りに埋もれる。
+    """
+    seen: list[str] = []
+    for name in expression_names:
+        prefix = name.rsplit("_", 1)[0]
+        if prefix not in seen:
+            seen.append(prefix)
+    if seen != list(EXPRESSION_REGIONS):
+        raise SystemExit(f"表情基底の領域が想定と違う: {seen}（期待 {list(EXPRESSION_REGIONS)}）")
+
+    vertex_blocks: list[np.ndarray] = []
+    quantized_blocks: list[np.ndarray] = []
+    scales = np.zeros(len(expression_names), dtype=np.float64)
+    regions: list[dict[str, Any]] = []
+    vertex_offset = 0
+    quantized_offset = 0
+    worst_error = 0.0
+    supports: dict[str, np.ndarray] = {}
+    blocks: dict[str, np.ndarray] = {}
+    for region in EXPRESSION_REGIONS:
+        columns = [
+            index for index, name in enumerate(expression_names) if name.rsplit("_", 1)[0] == region
+        ]
+        if columns != list(range(columns[0], columns[-1] + 1)):
+            raise SystemExit(f"領域 {region} の成分が連続していない（{columns[0]}〜{columns[-1]}）")
+        block = expression_basis[columns[0] : columns[-1] + 1][:, source].astype(np.float64)
+        blocks[region] = block
+
+        region_scales = np.abs(block).max(axis=(1, 2))
+        region_scales[region_scales == 0.0] = 1.0
+        # **1 目盛り未満の頂点は落とす。** int16 にすると 0 になる = 送っても何も動かない。
+        step = region_scales[:, None] / 32767.0
+        moves = (np.abs(block).max(axis=2) > step).any(axis=0)
+        vertices = np.flatnonzero(moves).astype(np.int32)
+        if vertices.size == 0:
+            raise SystemExit(f"領域 {region} が動かす頂点が 1 つも無い")
+        supports[region] = moves
+
+        picked = block[:, vertices]
+        quantized = np.rint(picked / region_scales[:, None, None] * 32767.0).astype(np.int16)
+        worst_error = max(
+            worst_error,
+            float(
+                np.abs(
+                    quantized.astype(np.float64) * region_scales[:, None, None] / 32767.0 - picked
+                ).max()
+            ),
+        )
+        # 落とした頂点は必ず 1 目盛り未満であること。ここが破れると「動くはずの頂点を捨てた」。
+        dropped = block[:, ~moves]
+        if dropped.size:
+            over = float((np.abs(dropped) / region_scales[:, None, None] * 32767.0).max())
+            if over > 1.0:
+                raise SystemExit(
+                    f"領域 {region} で落とした頂点に {over:.2f} 目盛りの変位が残っている"
+                )
+
+        scales[columns[0] : columns[-1] + 1] = region_scales
+        vertex_blocks.append(vertices)
+        quantized_blocks.append(np.ascontiguousarray(quantized).reshape(-1))
+        regions.append(
+            {
+                "name": region,
+                "component_offset": columns[0],
+                "component_count": len(columns),
+                "vertex_offset": vertex_offset,
+                "vertex_count": int(vertices.size),
+                # ブロックは領域ごとに大きさが違うので、平坦化した先の頭を明示して持つ
+                # （頂点数 × 成分数 から計算し直させると、どちらかが変わったとき黙ってずれる）。
+                "quantized_offset": quantized_offset,
+            }
+        )
+        vertex_offset += int(vertices.size)
+        quantized_offset += int(quantized.size)
+
+    # 領域の重なりを毎回測る。**分けて解けるかどうかがここで決まる**ので、数字を残さず表示する。
+    shared_vertices = 0
+    worst_cosine = 0.0
+    worst_pair = ""
+    for first, second in itertools.combinations(EXPRESSION_REGIONS, 2):
+        shared = int((supports[first] & supports[second]).sum())
+        shared_vertices += shared
+        left = blocks[first].reshape(blocks[first].shape[0], -1)
+        right = blocks[second].reshape(blocks[second].shape[0], -1)
+        left = left / np.linalg.norm(left, axis=1, keepdims=True)
+        right = right / np.linalg.norm(right, axis=1, keepdims=True)
+        cosine = float(np.abs(left @ right.T).max())
+        if cosine > worst_cosine:
+            worst_cosine, worst_pair = cosine, f"{first} ↔ {second}"
+
+    arrays = {
+        "expressionBasisVertices": np.concatenate(vertex_blocks),
+        "expressionBasisQ": np.concatenate(quantized_blocks),
+    }
+    metadata = {
+        "expression_component_names": list(expression_names),
+        "expression_basis_scales": [float(value) for value in scales],
+        "expression_basis_regions": regions,
+    }
+    report = {
+        "expression_basis_vertices": float(vertex_offset),
+        "expression_basis_bytes": float(arrays["expressionBasisQ"].nbytes),
+        "expression_basis_error": worst_error,
+        "expression_region_shared_vertices": float(shared_vertices),
+        "expression_region_cosine": worst_cosine,
+    }
+    metadata["expression_region_overlap"] = (
+        f"領域の支持は重なる（延べ {shared_vertices} 頂点）。基底も直交せず、"
+        f"正規化内積の最大は {worst_cosine:.3f}（{worst_pair}）。"
+        "だから係数は領域ごとに分けず全成分をまとめて解く"
+    )
+    return arrays, metadata, report
+
+
 def build_preview_arrays(
     npz: Any,
     source: np.ndarray,
@@ -777,6 +924,10 @@ def build_preview_arrays(
         )
     blink_q = np.rint(blink / blink_scale * 32767.0).astype(np.int16)
 
+    basis_arrays, basis_metadata, basis_report = build_expression_basis_blocks(
+        expression_basis, source, expression_names
+    )
+
     joint_identity = np.ascontiguousarray(npz["joint_identity_basis"], dtype=np.float32)
     arrays: dict[str, np.ndarray] = {
         "vertexGroups": groups,
@@ -787,8 +938,10 @@ def build_preview_arrays(
         "skinJointWeights": skin_weights,
         "expressionPresetBasisQ": np.ascontiguousarray(preset_q),
         "blinkBasisQ": np.ascontiguousarray(blink_q),
+        **basis_arrays,
     }
     metadata: dict[str, Any] = {
+        **basis_metadata,
         "vertex_group_names": list(vertex_group_names),
         "vertex_group_threshold": GROUP_THRESHOLD,
         "joint_names": list(joint_names),
@@ -813,6 +966,7 @@ def build_preview_arrays(
         ),
     }
     report: dict[str, float] = {
+        **basis_report,
         "group_count": float(groups.shape[0]),
         "preset_count": float(len(preset_names)),
         "viseme_count": float(len(viseme_names)),
@@ -979,6 +1133,13 @@ def main() -> None:
         f" int16 量子化の最大誤差 {preview_report['preset_error'] * 1e6:.1f} um）\n"
         f"  まばたき: 最大変位 {preview_report['blink_max_displacement'] * 1000:.2f} mm /"
         f" 目領域 {int(preview_report['eye_region_vertices']):,} 頂点\n"
+        f"  表情基底: 領域ブロック {int(preview_report['expression_basis_vertices']):,} 頂点 /"
+        f" {preview_report['expression_basis_bytes'] / 1e6:.1f} MB"
+        f"（int16 量子化の最大誤差 {preview_report['expression_basis_error'] * 1e9:.1f} nm）\n"
+        f"    領域の重なり: 延べ"
+        f" {int(preview_report['expression_region_shared_vertices']):,} 頂点 /"
+        f" 正規化内積の最大 {preview_report['expression_region_cosine']:.3f}"
+        "（分けずにまとめて解く根拠）\n"
         f"  {output_path.stat().st_size / 1e6:.1f} MB"
     )
 

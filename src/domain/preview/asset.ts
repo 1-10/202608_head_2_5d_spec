@@ -49,9 +49,63 @@ export interface GnmPreviewAsset {
   readonly blinkScale: number;
   /** まばたきが動かす頂点の vertex group 名（クロスフェードをこの範囲へ閉じる）。 */
   readonly eyeExpressionGroups: readonly string[];
+  /** 公式 npz の `expression_names`（383 本）。並びは領域ごとに連続。 */
+  readonly expressionComponentNames: readonly string[];
+  /** 成分ごとの量子化スケール。値 = q * scale / 32767 メートル。 */
+  readonly expressionBasisScales: Float64Array;
+  /** 領域の切り出し（成分の範囲と、その領域が動かす頂点の範囲）。 */
+  readonly expressionBasisRegions: readonly ExpressionBasisRegion[];
+  /** 領域ブロックを連結した split 空間の頂点 index。 */
+  readonly expressionBasisVertices: Int32Array;
+  /** 領域ブロックを連結した int16。領域 r は (成分数, 頂点数, 3) の順。 */
+  readonly expressionBasisQ: Int16Array;
   readonly vertexCount: number;
   readonly jointCount: number;
   readonly presetCount: number;
+}
+
+/**
+ * 表情基底の領域ブロック 1 つ。
+ *
+ * **成分が動かす頂点は自分の領域のまわりに限られる。** だから密に持たず、領域ごとに「動く頂点の
+ * 一覧」と「その頂点だけのブロック」で持つ（実測の容量差はアセット生成が毎回表示する）。
+ *
+ * **領域は独立した部分空間ではない。** 左目と右目、目と下顔面、下顔面と舌は頂点を共有し、
+ * 基底として見ても直交しない。**だから係数を領域ごとに分けて解いてはいけない** — 分けるのは
+ * 容量のためだけで、解くときは全成分をまとめて 1 回で解く。
+ */
+export interface ExpressionBasisRegion {
+  /** 公式の領域名（`lower_face_region` / `left_eye_region` / `tongue` など）。 */
+  readonly name: string;
+  /** この領域が持つ成分の先頭 index（`expressionComponentNames` の中で）。 */
+  readonly componentOffset: number;
+  readonly componentCount: number;
+  /** この領域が動かす頂点の先頭 index（`expressionBasisVertices` の中で）。 */
+  readonly vertexOffset: number;
+  readonly vertexCount: number;
+  /** この領域のブロックの先頭（`expressionBasisQ` の中で）。 */
+  readonly quantizedOffset: number;
+}
+
+/**
+ * 表情基底の値（メートル）。`slot` は領域内の頂点の並び順（`vertexOffset` からの相対）。
+ *
+ * 頂点 index そのものではなく slot で引くのは、領域ブロックが「動く頂点だけ」を詰めているため。
+ * 対応する split 頂点は `expressionBasisVertices[region.vertexOffset + slot]`。
+ */
+export function expressionBasisValue(
+  preview: GnmPreviewAsset,
+  region: ExpressionBasisRegion,
+  component: number,
+  slot: number,
+  axis: number,
+): number {
+  const local = component - region.componentOffset;
+  if (local < 0 || local >= region.componentCount) {
+    throw new Error(`成分 ${component} は領域 ${region.name} の外`);
+  }
+  const base = region.quantizedOffset + (local * region.vertexCount + slot) * 3 + axis;
+  return (preview.expressionBasisQ[base] * preview.expressionBasisScales[component]) / 32767;
 }
 
 /** 表情プリセットの変位（メートル）。 */
