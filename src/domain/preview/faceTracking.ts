@@ -249,6 +249,10 @@ export interface TrackingPlan {
   readonly categories: readonly string[];
   /** プリセット名（`strongestPreset` の読み出し用）。 */
   readonly presetNames: readonly string[];
+  /** 対応表が動かすプリセットの index（ウィンクを含まない）。合計の上限をここへ掛ける。 */
+  readonly mouthIndices: readonly number[];
+  /** ウィンクのプリセットの index。上限を別に持つ（口の予算に巻き込まれないように）。 */
+  readonly winkIndices: readonly number[];
 }
 
 /** 対応表をアセットのプリセットの並びへ解決する。 */
@@ -275,6 +279,10 @@ export function resolveTrackingPlan(
     unknownPresets,
     categories: [...categories],
     presetNames,
+    mouthIndices: resolved.map((entry) => entry.index),
+    winkIndices: WINK_PRESETS.map((name) => presetNames.indexOf(name)).filter(
+      (index) => index >= 0,
+    ),
   };
 }
 
@@ -302,17 +310,34 @@ export function applyDeadband(score: number, deadband = CATEGORY_DEADBAND): numb
 /**
  * 重みの合計を上限まで比例で縮める（`weights` を破壊的に更新）。
  *
+ * `only` を渡すと、その index だけを見て、その index だけを縮める。
+ *
  * @returns 縮める前の合計
  */
-export function limitTotalWeight(weights: Float64Array, maximum = MAX_TOTAL_WEIGHT): number {
+export function limitTotalWeight(
+  weights: Float64Array,
+  maximum = MAX_TOTAL_WEIGHT,
+  only?: readonly number[],
+): number {
+  const indices = only ?? Array.from({ length: weights.length }, (_, index) => index);
   let total = 0;
-  for (const weight of weights) total += weight;
+  for (const index of indices) total += weights[index];
   if (total > maximum && total > 0) {
     const scale = maximum / total;
-    for (let index = 0; index < weights.length; index++) weights[index] *= scale;
+    for (const index of indices) weights[index] *= scale;
   }
   return total;
 }
+
+/**
+ * ウィンクに使える重みの上限。**口の予算とは別に持つ。**
+ *
+ * 上限を全プリセットで 1 つにすると、喋りながら片目を閉じたときにウィンクが道連れで縮む
+ * （口が開くと `stretch_face` などで予算が埋まり、比例縮小がウィンクにも掛かる）。**実際に
+ * 「片目を閉じても閉じない」と見えていた原因がこれ。** 予算を分ける根拠は、加算変位が壊すのは
+ * 同じ領域を動かし合ったときで、目と口は別の領域だから。
+ */
+export const MAX_WINK_WEIGHT = 1;
 
 /**
  * 左右のまばたき量を「両目のまばたき」と「ウィンク」へ分ける。
@@ -390,10 +415,11 @@ export function blendshapesToTargets(
     applyDeadband(scores.get('eyeBlinkLeft') ?? 0, deadband),
     applyDeadband(scores.get('eyeBlinkRight') ?? 0, deadband),
   );
+  // **ウィンクは対応表の後に置き、予算も別で持つ。** 先に口の合計を抑えてから、目の枠で抑える。
+  const rawTotal = limitTotalWeight(weights, MAX_TOTAL_WEIGHT, plan.mouthIndices);
   setPreset(plan, weights, WINK_PRESETS[0], blinkSplit.winkLeft);
   setPreset(plan, weights, WINK_PRESETS[1], blinkSplit.winkRight);
-
-  const rawTotal = limitTotalWeight(weights);
+  limitTotalWeight(weights, MAX_WINK_WEIGHT, plan.winkIndices);
   return { blink: blinkSplit.blink, rawTotal };
 }
 
@@ -466,6 +492,17 @@ function clamp01(value: number): number {
 export const HEAD_TIME_CONSTANT_SECONDS = 0.12;
 
 /**
+ * カメラで振れる首の範囲（度）。**リグの可動域より広く取る。**
+ *
+ * リグの可動域は Unity 側の首 ±15° / pitch ±12°（`domain/preview/pose`）。人が実際に首を振る幅は
+ * それよりずっと広いので、生の角度をそのまま渡すと**すぐ上限に張り付いて壁に当たった感じになる**
+ * （実際にそう見えていた）。ここの幅をリグの可動域へ**線形に写す**ので、大きく振っても端で
+ * 止まらず、range いっぱいまで滑らかに動く。
+ */
+export const HEAD_TRACKING_YAW_RANGE_DEGREES = 35;
+export const HEAD_TRACKING_PITCH_RANGE_DEGREES = 25;
+
+/**
  * MediaPipe の頭の姿勢行列から yaw / pitch（度）を取り出す。
  *
  * **行優先の 4x4 として読む**（`facialTransformationMatrixes[].data` の並び）。回転部を
@@ -477,6 +514,9 @@ export const HEAD_TIME_CONSTANT_SECONDS = 0.12;
  * **左右の向きは鏡にする。** 利用者は自分を映した画面を見ながら 3D の頭を合わせるので、自分が
  * 右を向いたら画面の頭も画面の右へ動く方が合わせやすい（映像をミラー表示しているのと同じ理由）。
  * `mirrorYaw` を false にすれば実際の向きに揃う。
+ *
+ * **pitch は符号を返す。** 行列から出る pitch とビューの `HeadPose.headPitchDegrees` は上下が逆で、
+ * そのまま渡すと**上を向いたら下を向く**（実機でそう見えていた）。
  */
 export const MIRROR_YAW = true;
 
@@ -502,6 +542,18 @@ export function headPoseFromMatrix(
   const degrees = 180 / Math.PI;
   return {
     yawDegrees: yaw * degrees * (mirrorYaw ? -1 : 1),
-    pitchDegrees: pitch * degrees,
+    pitchDegrees: -pitch * degrees,
   };
+}
+
+/**
+ * カメラの首の角度をリグの可動域へ写す。
+ *
+ * `range` を可動域（`limit`）へ**線形に**写し、外はクランプする。生の角度をそのまま渡すと、人の
+ * 首の振り幅（±35° 程度）に対して可動域が ±15° しかないので、少し振っただけで上限に張り付く。
+ */
+export function mapHeadAngle(degrees: number, range: number, limit: number): number {
+  if (!(range > 0)) return 0;
+  const scaled = (degrees / range) * limit;
+  return Math.min(limit, Math.max(-limit, scaled));
 }

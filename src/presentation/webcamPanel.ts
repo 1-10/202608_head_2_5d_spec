@@ -31,7 +31,10 @@ import {
   BLINK_TIME_CONSTANT_SECONDS,
   EXPRESSION_TIME_CONSTANT_SECONDS,
   HEAD_TIME_CONSTANT_SECONDS,
+  HEAD_TRACKING_PITCH_RANGE_DEGREES,
+  HEAD_TRACKING_YAW_RANGE_DEGREES,
   headPoseFromMatrix,
+  mapHeadAngle,
   TrackingPlan,
   blendshapesToTargets,
   missingCategories,
@@ -41,6 +44,7 @@ import {
   smoothingFactor,
   strongestPreset,
 } from '../domain/preview/faceTracking';
+import { PITCH_LIMIT_DEGREES, YAW_LIMIT_DEGREES } from '../domain/preview/pose';
 import { MAX_RECORDING_SECONDS, serializeRecording } from '../domain/preview/recording';
 import { isVisemePreset } from '../domain/preview/viseme';
 import { RecordingSink } from './recordingPlayer';
@@ -130,6 +134,16 @@ export class WebcamPanel {
   private lastVideoTime = -1;
   /** 対応の取りこぼしは開発者向けに 1 回だけ出す。 */
   private reportedCategories = false;
+  /**
+   * 直近の生の値（診断表示用）。
+   *
+   * **合わないときに推測しないため。** 「片目を閉じても閉じない」が、検出が拾えていないのか
+   * 配分の式なのか重みが削られたのかは、数を見ないと分けられない。
+   */
+  private lastEyeLeft = 0;
+  private lastEyeRight = 0;
+  private lastWinkLeft = 0;
+  private lastWinkRight = 0;
 
   private recordSeconds = 0;
   /** 画面の書き換えを毎フレーム行わないための直近値。 */
@@ -432,13 +446,26 @@ export class WebcamPanel {
       } else {
         this.faceLostSeconds = 0;
         this.targetBlink = blendshapesToTargets(plan, frame.scores, this.targetWeights).blink;
+        this.lastEyeLeft = frame.scores.get('eyeBlinkLeft') ?? 0;
+        this.lastEyeRight = frame.scores.get('eyeBlinkRight') ?? 0;
+        this.lastWinkLeft = this.targetWeights[plan.winkIndices[0] ?? 0] ?? 0;
+        this.lastWinkRight = this.targetWeights[plan.winkIndices[1] ?? 0] ?? 0;
         this.reportCategories(plan, frame.scores);
         this.drawTrackingPoints(frame.points);
         if (this.elements.head.checked && frame.headMatrix !== null) {
           const head = headPoseFromMatrix(frame.headMatrix);
           if (head !== null) {
-            this.targetHeadYaw = head.yawDegrees;
-            this.targetHeadPitch = head.pitchDegrees;
+            // リグの可動域へ写す（生の角度は可動域よりずっと広いので、そのままだと端に張り付く）。
+            this.targetHeadYaw = mapHeadAngle(
+              head.yawDegrees,
+              HEAD_TRACKING_YAW_RANGE_DEGREES,
+              YAW_LIMIT_DEGREES,
+            );
+            this.targetHeadPitch = mapHeadAngle(
+              head.pitchDegrees,
+              HEAD_TRACKING_PITCH_RANGE_DEGREES,
+              PITCH_LIMIT_DEGREES,
+            );
           }
         }
       }
@@ -542,10 +569,31 @@ export class WebcamPanel {
   // ---- 表示 ----
 
   private updateTimer(force: boolean): void {
-    const text = this.timerText();
+    const text = `${this.timerText()} ${this.diagnosticsText()}`;
     if (!force && text === this.shownTimer) return;
     this.shownTimer = text;
-    this.elements.timer.textContent = text;
+    const [timer, diagnostics] = text.split(' ');
+    this.elements.timer.textContent = timer;
+    this.elements.diagnostics.textContent = diagnostics;
+  }
+
+  /**
+   * 診断の 1 行（トラッキング中だけ）。
+   *
+   * 生の `eyeBlink` と、そこから作った まばたき / ウィンク、それに首の角度を並べる。合わないときに
+   * **どこで落ちているかを画面から読める**ようにするためで、飾りではない。
+   */
+  private diagnosticsText(): string {
+    if (this.mode !== 'tracking' && this.mode !== 'recording') return '';
+    const round = (value: number): string => value.toFixed(2);
+    const head = this.elements.head.checked
+      ? `　首 ${this.smoothedHeadYaw.toFixed(1)}° / ${this.smoothedHeadPitch.toFixed(1)}°`
+      : '';
+    return (
+      `目 L ${round(this.lastEyeLeft)} R ${round(this.lastEyeRight)}` +
+      `　→ まばたき ${round(this.smoothedBlink)}` +
+      ` / ウィンク L ${round(this.lastWinkLeft)} R ${round(this.lastWinkRight)}${head}`
+    );
   }
 
   private timerText(): string {
@@ -585,6 +633,8 @@ interface PanelElements {
   readonly record: HTMLButtonElement;
   readonly save: HTMLButtonElement;
   readonly timer: HTMLElement;
+  /** 生の値の 1 行（トラッキングが合わないときに読む）。 */
+  readonly diagnostics: HTMLElement;
   readonly note: HTMLElement;
 }
 
@@ -601,6 +651,7 @@ function collectElements(): PanelElements {
     record: requireElement<HTMLButtonElement>('btn-record'),
     save: requireElement<HTMLButtonElement>('btn-save'),
     timer: requireElement<HTMLElement>('webcam-timer'),
+    diagnostics: requireElement<HTMLElement>('webcam-diagnostics'),
     note: requireElement<HTMLElement>('webcam-note'),
   };
 }
