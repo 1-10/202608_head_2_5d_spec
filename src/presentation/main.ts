@@ -25,6 +25,7 @@ import { InputManager } from './input';
 import { renderInspection } from './inspectionView';
 import { Viewer } from './viewer';
 import { ViewSettings } from './viewSettings';
+import { VisemeDriver } from './visemeDriver';
 
 const elements = {
   buttonWebcam: requireElement<HTMLButtonElement>('btn-webcam'),
@@ -106,6 +107,9 @@ const panelState = createPanelState();
 const exporter = new Exporter();
 const inputManager = new InputManager(elements.video);
 const viewer = new Viewer(elements.viewport);
+// 口形の連続再生。手で立てるぶんは表情と同じ経路（`setManualExpression`）を通るので、ここが持つのは
+// 「時間で切り替える」ぶんだけ。
+const visemeDriver = new VisemeDriver();
 
 let photo: PhotoRgb | null = null;
 let outcome: ExportOutcome | null = null;
@@ -137,6 +141,17 @@ function applyViewSettings(view: ViewSettings): void {
   viewer.holdSeconds = view.holdSeconds;
   viewer.expressionIntensity = view.expressionIntensity;
   viewer.blinkEnabled = view.blinkEnabled;
+  visemeDriver.apply(view);
+  // 連続再生していないときは `null` へ戻す（顔を駆動するのは手のスライダーと表情の自動再生）。
+  viewer.expressionOverride = visemeDriver.frame;
+}
+
+/** 口形の連続再生を切り替え、ビューアーの駆動とボタンのラベルを合わせる。 */
+function toggleVisemePlayback(): void {
+  if (visemeDriver.isPlaying) visemeDriver.stop();
+  else visemeDriver.play();
+  applyViewSettings(toViewSettings(panelState));
+  gui.syncVisemePlayback(visemeDriver.isPlaying);
 }
 
 const gui: GuiHandle = setupGui(
@@ -149,8 +164,15 @@ const gui: GuiHandle = setupGui(
     onResetView: () => viewer.resetView(),
     onViewSettingsChanged: (view) => applyViewSettings(view),
     onExpressionChanged: (name, weight) => viewer.setManualExpression(name, weight),
+    onVisemePlayToggled: () => toggleVisemePlayback(),
   },
 );
+
+// ループ無しの連続再生は終端で自分から止まる。ボタンのラベルはそのときにも合わせ直す。
+visemeDriver.onFinished = (): void => {
+  viewer.expressionOverride = visemeDriver.frame;
+  gui.syncVisemePlayback(visemeDriver.isPlaying);
+};
 
 viewer.onViewChanged = (): void => {
   updateViewReadout();
@@ -180,7 +202,10 @@ function setStatus(message: string, isError = false): void {
 function updateViewReadout(): void {
   const degrees = (radians: number): string => ((radians * 180) / Math.PI).toFixed(1);
   const pose = viewer.headPose;
-  const expression = viewer.currentExpression === null ? '' : ` / 表情 ${viewer.currentExpression}`;
+  // **駆動源の名前はそのまま出す。** 表情の自動再生はプリセット名（英字）を返し、口形の連続再生は
+  // 「口形 あ」と自分で名乗る。ここで「表情」と決め打ちすると、別の駆動源が差さったときに黙って
+  // 嘘のラベルになる。
+  const expression = viewer.currentExpression === null ? '' : ` / ${viewer.currentExpression}`;
   elements.viewReadout.textContent =
     `カメラ Yaw ${degrees(viewer.orbitYaw)}° / Pitch ${degrees(viewer.orbitPitch)}° /` +
     ` Zoom ${viewer.zoom.toFixed(2)}x` +
@@ -398,6 +423,7 @@ void exporter
   .loadAsset()
   .then((loaded) => {
     bundle = loaded;
+    visemeDriver.setPreview(loaded.preview);
     gui.setExpressionPresets(loaded.preview.expressionPresetNames);
     setStatus('写真を選んでください（ファイル / Webcam）。');
   })

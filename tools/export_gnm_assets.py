@@ -15,6 +15,13 @@
 その移植で、**判断（何を読むか・領域の作り方・密対応の作り方）を変えない**。変えたら
 出力が別物になるので、変えるときはあちらと一緒に変えること。
 
+例外がひとつある: あいうえおの口形（``tools/viseme_presets.json``）
+--------------------------------------------------------------------
+表情プリセットの正本は Unity 側だが、**その後ろへ足す口形の正本はここ（web 側）**。あちらは
+公式クラスぶんしか持たないので、この口形は既知の乖離である。中身は公式クラスの係数行の線形結合
+なので、同じ重みを同じクラスへ与えれば Unity でも同じ口が作れる（``README.md`` の
+「web だから増えたもの」に、持っていくものと手順を書いてある）。
+
 GNMB のバイト配置（あちらの ``infrastructure.gnm_asset`` が正本）::
 
     magic  "GNMB"  4 bytes ASCII
@@ -50,6 +57,7 @@ DEFAULT_SPARSE_68 = REPOSITORY_ROOT / "assets" / "gnm" / "head_sparse_68.txt"
 DEFAULT_CANONICAL = REPOSITORY_ROOT / "assets" / "mediapipe" / "canonical_face_model.obj"
 DEFAULT_OUTPUT = REPOSITORY_ROOT / "public" / "gnm" / "gnm_head.gnmb"
 DEFAULT_EXPRESSION_PRESETS = REPOSITORY_ROOT / "tools" / "GnmExpressionPresets_v3_0.npz"
+DEFAULT_VISEME_PRESETS = REPOSITORY_ROOT / "tools" / "viseme_presets.json"
 
 MAGIC = b"GNMB"
 GNMB_FORMAT = "GNMB"
@@ -130,6 +138,16 @@ BLINK_PRESET_CLASSES = ("wink_left", "wink_right")
 
 EYE_EXPRESSION_GROUPS = ("expression_basis_left_eye", "expression_basis_right_eye")
 """目領域の成分が動かす頂点。実測でこの外側の変位は厳密に 0（クロスフェードをこの範囲へ閉じられる）。"""
+
+VISEME_PRESET_PREFIX = "viseme_"
+"""口形プリセットの名前の頭。**GUI と 3D ビューはこの頭で「表情」と「口形」を分ける** — 一覧を
+コードへ手で写すと、ここが増減したとき黙って古くなる。"""
+
+VISEME_WEIGHT_SUM_LIMIT = 1.0
+"""1 つの口形に混ぜるクラス係数の重みの合計の上限。
+
+口形は公式クラスの**線形結合**なので、重みをいくらでも積めば顔は壊れる。「口まわりに効く少数の
+クラスを合計 1.0 以下で混ぜたもの」という設計そのものを、生成時に機械で守る。"""
 
 DEGENERATE_EDGE_RATIO = 0.25
 REVERSAL_COSINE = -0.5
@@ -572,11 +590,74 @@ def build_gnmb_container_bytes(
     return b"".join([MAGIC, struct.pack("<I", len(header_bytes)), header_bytes, *chunks])
 
 
+def build_viseme_coefficients(
+    coefficients: np.ndarray,
+    preset_names: list[str],
+    visemes_path: Path,
+) -> tuple[np.ndarray, list[str]]:
+    """あいうえおの口形を、公式 20 クラスの**係数行の線形結合**として作る。
+
+    **383 成分を手で触らない。** 成分名は領域ごとの統計方向であって表情としての意味を持たない
+    （警告の正本は ``src/domain/preview/expression.ts`` の冒頭）。合成は必ずクラス係数行の側で行う。
+
+    **実行時に 2 本重ねるのと数値的に同一なのに、それでも焼く理由**: 頂点変位は係数について線形
+    なので絵は変わらない。変わるのは「口形が 1 本のプリセットになる」こと — 3D ビューの
+    **同時に立てるのは 1 本だけ**という原則を壊さずに口形を足せる。実行時合成にすると、口形を出す
+    ためだけに「複数本を重ねてよい経路」を viewer へ作ることになり、原則が例外だらけになる。
+
+    定義の置き場所を ``tools/viseme_presets.json``（テキスト）にしてあるのは、この 5 本の重みが
+    **web と Unity の 2 つのツールチェーンで必要になる値**だから。Python のリテラルに書くと Unity
+    側が読めず、書き写した瞬間に写しが増える。npz にするとレビューの差分で数値が見えない。
+    """
+    # ``utf-8-sig`` で読む。Windows のエディタは BOM 付きで保存することがあり、素の ``utf-8`` だと
+    # 「JSON が壊れている」という分かりにくい例外で落ちる（BOM が無ければ何も変わらない）。
+    with visemes_path.open(encoding="utf-8-sig") as handle:
+        document = json.load(handle)
+    blends = document.get("presets")
+    if not isinstance(blends, dict) or not blends:
+        raise SystemExit(f"{visemes_path} の presets が空か dict でない")
+
+    rows: list[np.ndarray] = []
+    names: list[str] = []
+    for name, blend in blends.items():
+        if not name.startswith(VISEME_PRESET_PREFIX):
+            raise SystemExit(
+                f"口形 '{name}' の名前が '{VISEME_PRESET_PREFIX}' で始まっていない。"
+                "GUI と 3D ビューは名前で表情と口形を分けるので、頭を変えるとどちらにも出なくなる"
+            )
+        if name in preset_names:
+            raise SystemExit(f"口形 '{name}' と同じ名前の表情プリセットが既にある")
+        if not isinstance(blend, dict) or not blend:
+            raise SystemExit(f"口形 '{name}' の結合が空か dict でない")
+        row = np.zeros(coefficients.shape[1], dtype=np.float64)
+        total = 0.0
+        for class_name, weight in blend.items():
+            if class_name not in preset_names:
+                raise SystemExit(
+                    f"口形 '{name}' が混ぜる '{class_name}' が表情プリセット npz に無い"
+                    f"（あるのは: {', '.join(preset_names)}）"
+                )
+            value = float(weight)
+            if not 0.0 < value <= 1.0:
+                raise SystemExit(f"口形 '{name}' の '{class_name}' の重み {value} が 0〜1 の外")
+            row += coefficients[preset_names.index(class_name)] * value
+            total += value
+        if total > VISEME_WEIGHT_SUM_LIMIT + 1e-9:
+            raise SystemExit(
+                f"口形 '{name}' の重みの合計が {total:.3f}"
+                f"（上限 {VISEME_WEIGHT_SUM_LIMIT}）。混ぜすぎると顔が壊れる"
+            )
+        rows.append(row)
+        names.append(name)
+    return np.array(rows, dtype=np.float64), names
+
+
 def build_preview_arrays(
     npz: Any,
     source: np.ndarray,
     vertex_group_names: list[str],
     presets_path: Path,
+    visemes_path: Path,
 ) -> tuple[dict[str, np.ndarray], dict[str, Any], dict[str, float]]:
     """3D ビューが使う領域・姿勢・表情の配列を作る。
 
@@ -628,6 +709,14 @@ def build_preview_arrays(
             raise SystemExit(f"表情プリセット npz のキーが想定と違う: {sorted(preset_keys)}")
         coefficients = preset_npz["expression_presets"].astype(np.float64)
         preset_names = names_of(preset_npz["class_names"])
+
+    # あいうえおの口形を 20 クラスの係数行から作って後ろへ足す。**表情の後ろに置く** — 既存の
+    # プリセットの index が動くと、Unity 側と突き合わせるときに番号がずれる。
+    viseme_coefficients, viseme_names = build_viseme_coefficients(
+        coefficients, preset_names, visemes_path
+    )
+    coefficients = np.concatenate([coefficients, viseme_coefficients], axis=0)
+    preset_names = preset_names + viseme_names
 
     expression_basis = npz["expression_basis"]
     if coefficients.shape[1] != expression_basis.shape[0]:
@@ -717,10 +806,16 @@ def build_preview_arrays(
             " Assets/Sandbox/Ooba/GNM/Tools/export_expression_presets.py"
             "（公式 CVAE デコーダの latent 0 = クラス条件付き平均）"
         ),
+        "viseme_preset_prefix": VISEME_PRESET_PREFIX,
+        "viseme_presets_source": (
+            f"{visemes_path.name}（正本は web 側。上のクラス係数行の線形結合なので、"
+            "Unity 側は同じ重みを同じクラスへ与えれば同じ口になる）"
+        ),
     }
     report: dict[str, float] = {
         "group_count": float(groups.shape[0]),
         "preset_count": float(len(preset_names)),
+        "viseme_count": float(len(viseme_names)),
         "preset_max_displacement": float(np.abs(displacement).max()),
         "preset_error": preset_error,
         "joint_identity_max": float(np.abs(joint_identity).max()),
@@ -741,12 +836,14 @@ def main() -> None:
     presets_path = (
         Path(arguments[4]) if len(arguments) > 4 else DEFAULT_EXPRESSION_PRESETS
     )
+    visemes_path = Path(arguments[5]) if len(arguments) > 5 else DEFAULT_VISEME_PRESETS
 
     for label, path in (
         ("gnm_head.npz", npz_path),
         ("head_sparse_68.txt", sparse_path),
         ("canonical_face_model.obj", canonical_path),
         ("GnmExpressionPresets_v3_0.npz", presets_path),
+        ("viseme_presets.json", visemes_path),
     ):
         if not path.is_file():
             raise SystemExit(
@@ -790,7 +887,7 @@ def main() -> None:
             npz["vertex_identity_basis"][:, source], dtype=np.float32
         )
         preview_arrays, preview_metadata, preview_report = build_preview_arrays(
-            npz, source, vertex_group_names, presets_path
+            npz, source, vertex_group_names, presets_path, visemes_path
         )
 
     sparse68_indices, sparse68_weights = load_sparse_68(sparse_path)
@@ -877,7 +974,8 @@ def main() -> None:
         f" ジョイント {len(EXPECTED_JOINT_NAMES)} 本"
         f"（identity で最大 {preview_report['joint_identity_max'] * 1000:.1f} mm 動く）/"
         f" 表情プリセット {int(preview_report['preset_count'])} 本"
-        f"（最大変位 {preview_report['preset_max_displacement'] * 1000:.1f} mm /"
+        f"（うち口形 {int(preview_report['viseme_count'])} 本 /"
+        f" 最大変位 {preview_report['preset_max_displacement'] * 1000:.1f} mm /"
         f" int16 量子化の最大誤差 {preview_report['preset_error'] * 1e6:.1f} um）\n"
         f"  まばたき: 最大変位 {preview_report['blink_max_displacement'] * 1000:.2f} mm /"
         f" 目領域 {int(preview_report['eye_region_vertices']):,} 頂点\n"

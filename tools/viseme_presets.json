@@ -1,0 +1,11 @@
+{
+  "note": "あいうえおの口形（viseme）を、公式 20 クラスの係数行の線形結合として定義したもの。tools/export_gnm_assets.py がこれを読んで expression_basis へ当て、表情プリセットの後ろへ 5 本足して gnm_head.gnmb を焼く。値はクラス名 → 重み。合計は 1.0 以下（超えると生成が落ちる）。",
+  "source": "この 5 本の正本は web 側（このファイル）。既存 20 本の正本は 1-10/2607_Obayashi_Avatar_Mockup_3DGS の Assets/Sandbox/Ooba/GNM/Tools/export_expression_presets.py で、そちらは 20 本しか持たない。Unity へ持っていくときはこのファイルをそのまま渡せば、同じ 20 クラスへ同じ重みを与えて同じ口が作れる。",
+  "presets": {
+    "viseme_a": { "stretch_face": 0.55 },
+    "viseme_i": { "smile_wide": 0.6 },
+    "viseme_u": { "pucker": 0.8 },
+    "viseme_e": { "stretch_face": 0.25, "smile_wide": 0.4 },
+    "viseme_o": { "funneler": 0.55, "stretch_face": 0.25 }
+  }
+}
