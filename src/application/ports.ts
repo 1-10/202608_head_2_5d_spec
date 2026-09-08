@@ -64,9 +64,30 @@ export type VideoFrameSource = HTMLVideoElement | HTMLCanvasElement | ImageBitma
  * 478 点」で、主役の選定と二段検出という別の関心を持つ。同じ検出器へ相乗りさせると、リアルタイムの
  * 都合（1 顔・毎フレーム・blendshape）が書き出しの経路を歪める。
  *
- * 返すのは**カテゴリ名 → スコア**（0〜1）だけ。カテゴリ名の一覧は実行時に返ってくるものが正本なので、
- * 契約に焼かない。顔が写っていなければ `null`。
+ * 返すのは**カテゴリ名 → スコア**（0〜1）と、**画面へ描くための点**だけ。カテゴリ名の一覧は実行時に
+ * 返ってくるものが正本なので、契約に焼かない。顔が写っていなければ `null`。
  */
+export interface FaceTrackingFrame {
+  /** blendshape のカテゴリ名 → スコア（0〜1）。表情を駆動するのはこちら。 */
+  readonly scores: ReadonlyMap<string, number>;
+  /**
+   * (点数, 2) の正規化座標（0〜1・左上原点）。
+   *
+   * **表情の駆動には使わない。** 何を追えているかを映像へ重ねて見せるためだけのもの（形の
+   * フィットは書き出し側の `FaceLandmarkDetector` が別に取る）。点数はモデルの版で変わるので
+   * 契約に焼かない。
+   */
+  readonly points: Float32Array;
+  /**
+   * 頭の姿勢（4x4・列優先）。取れなければ `null`。
+   *
+   * **首を動かすモードでだけ使う。** 表情だけを写すのが既定で、向きを混ぜると「今どちらが向きを
+   * 決めているか」が画面から読めなくなる（`domain/preview/faceTracking` の冒頭）。角度の取り出しは
+   * ドメインの純関数が持つ — ここは行列をそのまま渡すだけ。
+   */
+  readonly headMatrix: Float32Array | null;
+}
+
 export interface FaceExpressionTracker {
   /** 使えるようにする（モデルの取得を含む）。失敗は `domain/errors` の型で投げる。 */
   start(): Promise<void>;
@@ -75,7 +96,7 @@ export interface FaceExpressionTracker {
    *
    * @param timestampMs 単調増加する時刻（ミリ秒）。**同じ値を 2 回渡さない**
    */
-  detect(source: VideoFrameSource, timestampMs: number): ReadonlyMap<string, number> | null;
+  detect(source: VideoFrameSource, timestampMs: number): FaceTrackingFrame | null;
   /** 資源を返す。 */
   stop(): void;
 }

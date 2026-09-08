@@ -70,7 +70,14 @@
               <button id="btn-webcam-close" class="overlay-close" title="閉じる">&times;</button>
             </div>
             <div class="webcam-body">
-              <video id="webcam-video" class="webcam-video" autoplay playsinline muted></video>
+              <!--
+                追えている点は映像と同じ箱へ重ねる。**canvas 側で座標を反転しない** — 箱ごと
+                CSS で左右反転するので、二重に反転すると点が合わなくなる。
+              -->
+              <div class="webcam-stage">
+                <video id="webcam-video" class="webcam-video" autoplay playsinline muted></video>
+                <canvas id="webcam-overlay" class="webcam-overlay"></canvas>
+              </div>
 
               <div class="webcam-row">
                 <button id="btn-camera">カメラ開始</button>
@@ -79,6 +86,9 @@
 
               <div class="webcam-row">
                 <button id="btn-track" aria-pressed="false" disabled>表情トラッキング</button>
+                <label class="webcam-check" title="表情に加えて首の向きも追う">
+                  <input id="chk-head" type="checkbox" />首も動かす
+                </label>
               </div>
 
               <div class="webcam-row">

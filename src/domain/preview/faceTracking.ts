@@ -3,9 +3,10 @@
 // 入力は MediaPipe FaceLandmarker の **blendshape スコア**（ARKit 系のカテゴリ名 → 0〜1）。出力は
 // `domain/preview/expression` が食う**プリセットの重み**（長さ `presetCount`）と**まばたき量**。
 //
-// **首・顔の向きは駆動しない。** 表情だけを写す。頭部姿勢はビューの `headPose`（手のスライダーと
-// マウス追従）が持っており、そこへカメラの姿勢を足すと「どちらが今の向きを決めているか」が
-// 画面から読めなくなる。
+// **首・顔の向きは既定では駆動しない。** 表情だけを写す。頭部姿勢はビューの `headPose`（手の
+// スライダーとマウス追従）が持っており、そこへ黙ってカメラの姿勢を足すと「どちらが今の向きを
+// 決めているか」が画面から読めなくなる。**明示的に選んだときだけ**首も動かす
+// （`headPoseFromMatrix`）— どちらで動いているかは画面のスイッチが示す。
 //
 // ## 対応表は名前ではなく意味で作る
 //
@@ -39,6 +40,12 @@ export interface TrackingRow {
   /** なぜその対応なのか。**対応の理由が自明でないものには必ず書く。** */
   readonly reason: string;
 }
+
+/**
+ * ウィンクのプリセット名。**対応表には載せない** — `splitBlinkAndWink` が blendshape から直に
+ * 立てるもので、カテゴリ 1 つに対応する動きではない。
+ */
+export const WINK_PRESETS: readonly string[] = ['wink_left', 'wink_right'];
 
 /** 左右対のカテゴリを 0.5 ずつで 1 本にする（両側満点で 1）。 */
 function pair(left: string, right: string, gain = 1): TrackingTerm[] {
@@ -197,6 +204,19 @@ export const MAX_TOTAL_WEIGHT = 1.5;
 export const WINK_ASYMMETRY_THRESHOLD = 0.25;
 
 /**
+ * 左右差がここまで開いたら**完全にウィンク**として扱う（まばたきは 0 にする）。
+ *
+ * **1.0 にしてはいけない。** MediaPipe は片目を閉じたとき開いている側にも 0.1〜0.3 を返す
+ * （クロストーク）ので、左右差は 1.0 に届かない。上限を 1.0 に置くと、実際のウィンクでも
+ * まばたきが 0.2〜0.25 残り、**両目が薄く閉じる**（実際にそう見えていた）。
+ *
+ * まばたきが残ると害が二重になる — `blendBlink` は目領域を**置き換える**ので、まばたきが立つと
+ * その割合だけウィンクのプリセットが打ち消される（`expression.ts` 冒頭の「加算にすると開瞼系と
+ * 打ち消し合う」と同じ理屈）。片目を閉じたのに両目が薄く閉じ、しかもウィンクが弱くなる。
+ */
+export const WINK_FULL_ASYMMETRY = 0.5;
+
+/**
  * 表情の一次遅れの時定数（秒）。
  *
  * カメラの推定はフレームごとに跳ねるので、そのまま当てると顔が震える。60ms は 30fps の 2 フレーム弱で、
@@ -243,7 +263,9 @@ export function resolveTrackingPlan(
     if (index < 0) unknownPresets.push(row.preset);
     else resolved.push({ index, row });
   }
-  const mapped = new Set(resolved.map((entry) => entry.row.preset));
+  // **ウィンクは対応表に無いが駆動される。** `blendshapesToTargets` が `splitBlinkAndWink` から
+  // 直に立てるので、「駆動されない」の一覧へ入れると診断が嘘になる。
+  const mapped = new Set([...resolved.map((entry) => entry.row.preset), ...WINK_PRESETS]);
   const categories = new Set<string>();
   for (const row of rows) for (const term of row.terms) categories.add(term.category);
   return {
@@ -295,28 +317,35 @@ export function limitTotalWeight(weights: Float64Array, maximum = MAX_TOTAL_WEIG
 /**
  * 左右のまばたき量を「両目のまばたき」と「ウィンク」へ分ける。
  *
- * 両目を同じだけ閉じたぶんはまばたき（目領域の置き換え）へ、左右差はウィンクのプリセットへ流す。
- * 差が `WINK_ASYMMETRY_THRESHOLD` 以下なら差は雑音とみなし、まばたきは左右の**平均**で駆動する
- * （min だと左右のわずかなズレのぶんだけ毎回閉じ切らない）。
+ * **左右対称ならまばたき、非対称ならウィンク**、という切り分け。差が
+ * `WINK_ASYMMETRY_THRESHOLD` 以下なら雑音とみなしてまばたきだけを左右の**平均**で駆動し
+ * （min だと左右のわずかなズレのぶんだけ毎回閉じ切らない）、`WINK_FULL_ASYMMETRY` まで開いたら
+ * **まばたきは 0** にしてウィンクだけを立てる:
  *
- * 閾値をまたぐところで飛ばないよう、`t`（0→1）で平均から min へ連続に移す:
- *
- *     blink = 平均 − t × 差 / 2   （t=1 で min に一致）
+ *     blink = 平均 × (1 − t)
  *     wink  = t × 差
+ *
+ * **min（共通ぶん）をまばたきにしない。** 片目を閉じたとき開いている側にもクロストークで
+ * 0.1〜0.3 が乗るので、min を残すと両目が薄く閉じたままになり、しかも `blendBlink` の置き換えで
+ * ウィンクのプリセットまで打ち消される。開いている側の残りは**雑音として捨てる**方が絵が合う。
+ *
+ * `t` は閾値をまたぐところで飛ばないよう連続に上げる。
  */
 export function splitBlinkAndWink(
   left: number,
   right: number,
   threshold = WINK_ASYMMETRY_THRESHOLD,
+  fullAsymmetry = WINK_FULL_ASYMMETRY,
 ): { blink: number; winkLeft: number; winkRight: number } {
   const clampedLeft = clamp01(left);
   const clampedRight = clamp01(right);
   const asymmetry = Math.abs(clampedLeft - clampedRight);
   const average = (clampedLeft + clampedRight) / 2;
-  const t = threshold >= 1 ? 0 : clamp01((asymmetry - threshold) / (1 - threshold));
+  const span = fullAsymmetry - threshold;
+  const t = span <= 0 ? (asymmetry > threshold ? 1 : 0) : clamp01((asymmetry - threshold) / span);
   const wink = t * asymmetry;
   return {
-    blink: clamp01(average - (t * asymmetry) / 2),
+    blink: clamp01(average * (1 - t)),
     winkLeft: clampedLeft > clampedRight ? wink : 0,
     winkRight: clampedRight > clampedLeft ? wink : 0,
   };
@@ -361,8 +390,8 @@ export function blendshapesToTargets(
     applyDeadband(scores.get('eyeBlinkLeft') ?? 0, deadband),
     applyDeadband(scores.get('eyeBlinkRight') ?? 0, deadband),
   );
-  setPreset(plan, weights, 'wink_left', blinkSplit.winkLeft);
-  setPreset(plan, weights, 'wink_right', blinkSplit.winkRight);
+  setPreset(plan, weights, WINK_PRESETS[0], blinkSplit.winkLeft);
+  setPreset(plan, weights, WINK_PRESETS[1], blinkSplit.winkRight);
 
   const rawTotal = limitTotalWeight(weights);
   return { blink: blinkSplit.blink, rawTotal };
@@ -426,4 +455,53 @@ export function strongestPreset(
 function clamp01(value: number): number {
   if (!Number.isFinite(value)) return 0;
   return Math.min(1, Math.max(0, value));
+}
+
+/**
+ * 首の追従の時定数（秒）。**表情より長くする。**
+ *
+ * 首は表情より大きく、ゆっくり動く。表情と同じ 60ms で追うと、検出の跳ねがそのまま首の震えに
+ * なって酔う。
+ */
+export const HEAD_TIME_CONSTANT_SECONDS = 0.12;
+
+/**
+ * MediaPipe の頭の姿勢行列から yaw / pitch（度）を取り出す。
+ *
+ * **行優先の 4x4 として読む**（`facialTransformationMatrixes[].data` の並び）。回転部を
+ * `Ry(yaw) * Rx(pitch)` として分解する — 正面で (0, 0)、可動域へ入れるのは呼ぶ側
+ * （`domain/preview/pose.clampPose`）。
+ *
+ * **ロールは捨てる。** ビューの `HeadPose` が持たないし、確認用途で首を傾ける場面が無い。
+ *
+ * **左右の向きは鏡にする。** 利用者は自分を映した画面を見ながら 3D の頭を合わせるので、自分が
+ * 右を向いたら画面の頭も画面の右へ動く方が合わせやすい（映像をミラー表示しているのと同じ理由）。
+ * `mirrorYaw` を false にすれば実際の向きに揃う。
+ */
+export const MIRROR_YAW = true;
+
+export function headPoseFromMatrix(
+  matrix: Float32Array,
+  mirrorYaw = MIRROR_YAW,
+): { yawDegrees: number; pitchDegrees: number } | null {
+  if (matrix.length < 16) return null;
+  // 行優先: m[行][列] = matrix[行 * 4 + 列]。
+  const m01 = matrix[1];
+  const m02 = matrix[2];
+  const m11 = matrix[5];
+  const m12 = matrix[6];
+  const m22 = matrix[10];
+  // 回転行列なら列の長さは 1。全ゼロや壊れた行列をここで落とす（atan2 は 0 を返してしまう）。
+  const firstColumn = Math.hypot(matrix[0], matrix[4], matrix[8]);
+  if (!Number.isFinite(firstColumn) || firstColumn < 0.5) return null;
+  const pitch = Math.atan2(-m12, m11);
+  const yaw = Math.atan2(m02, m22);
+  if (!Number.isFinite(pitch) || !Number.isFinite(yaw)) return null;
+  // 使わないが、分解の前提（`Ry * Rx` にロールが混じっていない）を壊した行列を黙って通さない。
+  if (!Number.isFinite(m01)) return null;
+  const degrees = 180 / Math.PI;
+  return {
+    yawDegrees: yaw * degrees * (mirrorYaw ? -1 : 1),
+    pitchDegrees: pitch * degrees,
+  };
 }

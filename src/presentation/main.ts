@@ -143,6 +143,20 @@ const webcamPanel = new WebcamPanel(inputManager, createFaceExpressionTracker(),
   acceptPhoto: (next) => acceptPhoto(next),
   setStatus: (message, isError) => setStatus(message, isError),
   recording: recordingPlayer,
+  setHeadPose: (yawDegrees, pitchDegrees) => {
+    // **マウス追従は切る。** あちらが入ったままだと `setHeadPose` を受け付けず、カメラで首を
+    // 動かしているつもりでカーソルが向きを決め続ける（どちらが動かしているか読めなくなる）。
+    if (panelState.view.followPointer) {
+      panelState.view.followPointer = false;
+      viewer.followPointer = false;
+    }
+    viewer.setHeadPose({
+      headYawDegrees: yawDegrees,
+      headPitchDegrees: pitchDegrees,
+      gazeYawDegrees: 0,
+      gazePitchDegrees: 0,
+    });
+  },
 });
 webcamPanel.onOpenChanged = (): void => {
   elements.buttonWebcam.setAttribute('aria-pressed', String(webcamPanel.isOpen));
@@ -277,6 +291,17 @@ function toggleRecordingPlayback(): void {
 
 /** 収録した表情アニメーション（JSON）を読み込む。 */
 async function loadRecording(file: File): Promise<void> {
+  // **読み込む前に、まだ 3D ビューへ頭が出ていないなら断る。** プリセット名が空のまま
+  // `parseRecording` へ渡すと「一致する名前が 1 つも無い」枝へ落ち、**別のアセットで録った**という
+  // 嘘の理由が出る（ページを開いて最初に押すだけで踏める）。
+  if (viewer.expressionNames().length === 0) {
+    setStatus('先に写真を通してください（収録の表情を当てる頭がまだありません）。', true);
+    return;
+  }
+  // **録画中なら止めてから差し替える。** クリップの持ち主はひとつなので、差し替えただけでは
+  // Webカメラは録画を続け、読み込んだクリップの後ろへ接ぎ木される（「保存」で混ざったものが出る）。
+  stopOtherDrivers('recording');
+  webcamPanel.stopRecording();
   try {
     const loaded = parseRecording(await file.text(), viewer.expressionNames());
     recordingPlayer.setRecording(loaded.recording);

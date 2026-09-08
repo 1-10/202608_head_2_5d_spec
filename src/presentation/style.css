@@ -305,15 +305,31 @@ button:disabled {
  * 映像は**ミラー表示**（自分が動いた向きと画面の向きが揃っていないと合わせられない）。
  * `captureWebcamFrame` は video の画素をそのまま読むので、写真は非反転のまま — 表示だけを返す。
  */
+.webcam-stage {
+  position: relative;
+  display: block;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  overflow: hidden;
+  /* 映像と追跡点をまとめて反転する。**canvas 側で座標を反転しない**（二重になる）。 */
+  transform: scaleX(-1);
+}
+
 .webcam-video {
   display: block;
   width: 100%;
   aspect-ratio: 4 / 3;
-  border: 1px solid var(--line);
-  border-radius: 4px;
   background: #000;
   object-fit: cover;
-  transform: scaleX(-1);
+}
+
+/* 追えている点。映像とぴったり重ねるので、大きさは JS 側が表示画素へ合わせる。 */
+.webcam-overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
 }
 
 .webcam-row {
