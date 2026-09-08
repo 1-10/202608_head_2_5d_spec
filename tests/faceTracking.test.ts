@@ -25,6 +25,9 @@ import {
   MAX_WINK_WEIGHT,
   headPoseFromMatrix,
   mapHeadAngle,
+  mirroredPreset,
+  DEFAULT_TRACKING_GAIN,
+  applyDeadband,
 } from '../src/domain/preview/faceTracking';
 import { loadPreview } from './asset';
 
@@ -35,8 +38,12 @@ const PRESET_NAMES: readonly string[] = [
   'wink_right',
 ];
 
+/**
+ * 対応そのものを見る検査用の plan。**鏡は入れない** — 左右の入れ替えは画面の都合なので、
+ * 対応表の当て方とは分けて検査する（鏡そのものの検査は「左右は画面のミラー表示と揃える」）。
+ */
 function plan(names: readonly string[] = PRESET_NAMES): ReturnType<typeof resolveTrackingPlan> {
-  return resolveTrackingPlan(names);
+  return resolveTrackingPlan(names, TRACKING_ROWS, false);
 }
 
 function weightOf(names: readonly string[], weights: Float64Array, preset: string): number {
@@ -125,6 +132,8 @@ describe('blendshape → 重み', () => {
         ['jawOpen', scoreFor(0.5)],
       ]),
       weights,
+      CATEGORY_DEADBAND,
+      1, // 追従の強さは掛けない（ここで見たいのは「無い名前で落ちない」ことだけ）
     );
     expect(result.blink).toBe(0);
     expect(weightOf(PRESET_NAMES, weights, 'stretch_face')).toBeCloseTo(0.5, 6);
@@ -141,11 +150,12 @@ describe('blendshape → 重み', () => {
     expect(() => blendshapesToTargets(plan(), new Map(), new Float64Array(1))).toThrow();
   });
 
+  // 強さ（`DEFAULT_TRACKING_GAIN`）を掛けない素の形。伸ばし方そのものを見る。
   it('デッドバンド以下は 0、超えたぶんは 0〜1 へ伸ばす', () => {
-    expect(applyDeadband(CATEGORY_DEADBAND)).toBe(0);
-    expect(applyDeadband(CATEGORY_DEADBAND / 2)).toBe(0);
-    expect(applyDeadband(1)).toBeCloseTo(1, 12);
-    expect(applyDeadband(scoreFor(0.25))).toBeCloseTo(0.25, 12);
+    expect(applyDeadband(CATEGORY_DEADBAND, CATEGORY_DEADBAND, 1)).toBe(0);
+    expect(applyDeadband(CATEGORY_DEADBAND / 2, CATEGORY_DEADBAND, 1)).toBe(0);
+    expect(applyDeadband(1, CATEGORY_DEADBAND, 1)).toBeCloseTo(1, 12);
+    expect(applyDeadband(scoreFor(0.25), CATEGORY_DEADBAND, 1)).toBeCloseTo(0.25, 12);
   });
 
   it('無表情の雑音（全カテゴリが薄く立つ）を通さない', () => {
@@ -421,5 +431,51 @@ describe('頭の pitch の向き', () => {
     ]);
     const pose = headPoseFromMatrix(matrix, false);
     expect(pose!.pitchDegrees).toBeCloseTo(-10, 3);
+  });
+});
+
+describe('左右は画面のミラー表示と揃える', () => {
+  it('対になっている名前は入れ替わる（それ以外はそのまま）', () => {
+    expect(mirroredPreset('wink_left', true)).toBe('wink_right');
+    expect(mirroredPreset('wink_right', true)).toBe('wink_left');
+    expect(mirroredPreset('mouth_left', true)).toBe('mouth_right');
+    expect(mirroredPreset('happy', true)).toBe('happy');
+  });
+
+  it('鏡を切ると解剖学的な左右へ揃う', () => {
+    expect(mirroredPreset('wink_left', false)).toBe('wink_left');
+  });
+
+  // 実機で「右目を動かすと CG の左が動く」と見えていた症状。映像を左右反転して出しているので、
+  // 解剖学的な左右で素直に繋ぐと画面上では逆に出る。
+  it('被写体の左目を閉じると、鏡では wink_right が立つ', () => {
+    const resolved = resolveTrackingPlan(PRESET_NAMES, TRACKING_ROWS, true);
+    const weights = new Float64Array(PRESET_NAMES.length);
+    blendshapesToTargets(
+      resolved,
+      new Map([
+        ['eyeBlinkLeft', 1],
+        ['eyeBlinkRight', 0],
+      ]),
+      weights,
+    );
+    expect(weights[PRESET_NAMES.indexOf('wink_right')]).toBeGreaterThan(0.5);
+    expect(weights[PRESET_NAMES.indexOf('wink_left')]).toBe(0);
+  });
+});
+
+describe('追従の強さ', () => {
+  it('スコアが 1.0 に届かなくてもプリセットは満点近くまで立つ', () => {
+    // MediaPipe ははっきり作った表情でも 0.4〜0.7 あたりしか返さない。素通しだと顔が動かない。
+    expect(applyDeadband(0.6, 0.08, 1)).toBeCloseTo((0.6 - 0.08) / 0.92, 6);
+    expect(applyDeadband(0.6, 0.08, DEFAULT_TRACKING_GAIN)).toBeGreaterThan(0.9);
+  });
+
+  it('デッドバンド以下は強さに依らず 0（無表情の揺らぎを拾わない）', () => {
+    expect(applyDeadband(0.05, 0.08, 4)).toBe(0);
+  });
+
+  it('1 を超えない', () => {
+    expect(applyDeadband(1, 0.08, 4)).toBe(1);
   });
 });

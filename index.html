@@ -109,6 +109,16 @@
                 </label>
               </div>
 
+              <!--
+                追従の強さ。**画面から触れるようにしてある** — MediaPipe のスコアがどこまで伸びるか
+                は顔・照明・距離で変わるので、決め打ちの倍率だと「動かない」か「無表情でも動く」の
+                どちらかに寄る。既定は `DEFAULT_TRACKING_GAIN`。
+              -->
+              <div class="webcam-row">
+                <label class="webcam-range" for="range-gain">追従の強さ</label>
+                <input id="range-gain" type="range" min="0.5" max="4" step="0.1" value="1.8" />
+              </div>
+
               <div class="webcam-row">
                 <button id="btn-record" disabled>録画</button>
                 <span id="webcam-timer" class="webcam-timer"></span>

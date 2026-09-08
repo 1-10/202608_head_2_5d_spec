@@ -47,6 +47,32 @@ export interface TrackingRow {
  */
 export const WINK_PRESETS: readonly string[] = ['wink_left', 'wink_right'];
 
+/**
+ * 左右を入れ替えるプリセットの対。
+ *
+ * **画面のミラー表示と揃える。** 映像は左右反転して出しているので、利用者が「映像の左に見える目」
+ * を閉じたら、3D の頭も**見た目の左**が閉じる方が合わせやすい。解剖学的な左右（`eyeBlinkLeft` は
+ * 被写体の左目 / `wink_left` は頭の左）で素直に繋ぐと、画面上では逆に出る — **実機で
+ * 「右目を動かすと CG の左が動く」と見えていたのがこれ**。yaw を鏡にしているのと同じ理由。
+ */
+export const MIRRORED_PRESET_PAIRS: readonly (readonly [string, string])[] = [
+  ['wink_left', 'wink_right'],
+  ['mouth_left', 'mouth_right'],
+];
+
+/** 左右を入れ替えて出すか。false にすると解剖学的な左右へ揃う。 */
+export const MIRROR_SIDES = true;
+
+/** 左右を入れ替えたプリセット名（対に無い名前はそのまま）。 */
+export function mirroredPreset(name: string, mirror = MIRROR_SIDES): string {
+  if (!mirror) return name;
+  for (const [left, right] of MIRRORED_PRESET_PAIRS) {
+    if (name === left) return right;
+    if (name === right) return left;
+  }
+  return name;
+}
+
 /** 左右対のカテゴリを 0.5 ずつで 1 本にする（両側満点で 1）。 */
 function pair(left: string, right: string, gain = 1): TrackingTerm[] {
   return [
@@ -185,6 +211,18 @@ export const TRACKING_ROWS: readonly TrackingRow[] = [
 export const CATEGORY_DEADBAND = 0.08;
 
 /**
+ * デッドバンドの後に掛ける倍率（追従の強さ）。
+ *
+ * **MediaPipe のスコアは滅多に 1.0 へ届かない。** はっきり作った表情でも 0.4〜0.7 あたりで、
+ * 素通しするとプリセットの重みがその値のままになり、**顔がほとんど動かない**（実機でそう見えて
+ * いた）。1.8 は「はっきり作った表情でプリセットが満点近くまで立つ」線。上げすぎると無表情の
+ * 揺らぎまで拾うので、画面のスライダーで触れるようにしてある。
+ */
+export const DEFAULT_TRACKING_GAIN = 1.8;
+export const MINIMUM_TRACKING_GAIN = 0.5;
+export const MAXIMUM_TRACKING_GAIN = 4;
+
+/**
  * プリセットの重みの合計の上限。
  *
  * プリセットは**加算変位**なので重ねると顔が壊れる（`expression.ts` 冒頭）。自動再生は同時に 1 本
@@ -253,17 +291,22 @@ export interface TrackingPlan {
   readonly mouthIndices: readonly number[];
   /** ウィンクのプリセットの index。上限を別に持つ（口の予算に巻き込まれないように）。 */
   readonly winkIndices: readonly number[];
+  /** 左右を入れ替えて出しているか。 */
+  readonly mirror: boolean;
 }
 
 /** 対応表をアセットのプリセットの並びへ解決する。 */
 export function resolveTrackingPlan(
   presetNames: readonly string[],
   rows: readonly TrackingRow[] = TRACKING_ROWS,
+  mirror = MIRROR_SIDES,
 ): TrackingPlan {
   const resolved: { index: number; row: TrackingRow }[] = [];
   const unknownPresets: string[] = [];
   for (const row of rows) {
-    const index = presetNames.indexOf(row.preset);
+    // **左右は鏡で解決する。** 対応表は解剖学的な左右で書き、出す先だけ入れ替える（表の側を
+    // 書き換えると「どちらの左右で書いてあるか」が読めなくなる）。
+    const index = presetNames.indexOf(mirroredPreset(row.preset, mirror));
     if (index < 0) unknownPresets.push(row.preset);
     else resolved.push({ index, row });
   }
@@ -280,9 +323,10 @@ export function resolveTrackingPlan(
     categories: [...categories],
     presetNames,
     mouthIndices: resolved.map((entry) => entry.index),
-    winkIndices: WINK_PRESETS.map((name) => presetNames.indexOf(name)).filter(
-      (index) => index >= 0,
-    ),
+    winkIndices: WINK_PRESETS.map((name) =>
+      presetNames.indexOf(mirroredPreset(name, mirror)),
+    ).filter((index) => index >= 0),
+    mirror,
   };
 }
 
@@ -300,11 +344,15 @@ export function missingCategories(
   return plan.categories.filter((category) => !present.has(category));
 }
 
-/** デッドバンドを引いて 0〜1 へ引き伸ばす。 */
-export function applyDeadband(score: number, deadband = CATEGORY_DEADBAND): number {
+/** デッドバンドを引いて 0〜1 へ引き伸ばし、追従の強さを掛ける。 */
+export function applyDeadband(
+  score: number,
+  deadband = CATEGORY_DEADBAND,
+  gain = DEFAULT_TRACKING_GAIN,
+): number {
   if (!Number.isFinite(score) || score <= deadband) return 0;
   if (deadband >= 1) return 0;
-  return Math.min(1, (score - deadband) / (1 - deadband));
+  return Math.min(1, ((score - deadband) / (1 - deadband)) * gain);
 }
 
 /**
@@ -397,6 +445,7 @@ export function blendshapesToTargets(
   scores: ReadonlyMap<string, number>,
   weights: Float64Array,
   deadband = CATEGORY_DEADBAND,
+  gain = DEFAULT_TRACKING_GAIN,
 ): TrackingTargets {
   if (weights.length !== plan.presetCount) {
     throw new Error(`重みが ${weights.length} 個（期待 ${plan.presetCount}）`);
@@ -405,20 +454,20 @@ export function blendshapesToTargets(
   for (const { index, row } of plan.rows) {
     let value = 0;
     for (const term of row.terms) {
-      value += applyDeadband(scores.get(term.category) ?? 0, deadband) * term.gain;
+      value += applyDeadband(scores.get(term.category) ?? 0, deadband, gain) * term.gain;
     }
     weights[index] = clamp01(value);
   }
 
   // まばたきは加算のプリセットではないので、対応表とは別に扱う。
   const blinkSplit = splitBlinkAndWink(
-    applyDeadband(scores.get('eyeBlinkLeft') ?? 0, deadband),
-    applyDeadband(scores.get('eyeBlinkRight') ?? 0, deadband),
+    applyDeadband(scores.get('eyeBlinkLeft') ?? 0, deadband, gain),
+    applyDeadband(scores.get('eyeBlinkRight') ?? 0, deadband, gain),
   );
   // **ウィンクは対応表の後に置き、予算も別で持つ。** 先に口の合計を抑えてから、目の枠で抑える。
   const rawTotal = limitTotalWeight(weights, MAX_TOTAL_WEIGHT, plan.mouthIndices);
-  setPreset(plan, weights, WINK_PRESETS[0], blinkSplit.winkLeft);
-  setPreset(plan, weights, WINK_PRESETS[1], blinkSplit.winkRight);
+  setPreset(plan, weights, mirroredPreset(WINK_PRESETS[0], plan.mirror), blinkSplit.winkLeft);
+  setPreset(plan, weights, mirroredPreset(WINK_PRESETS[1], plan.mirror), blinkSplit.winkRight);
   limitTotalWeight(weights, MAX_WINK_WEIGHT, plan.winkIndices);
   return { blink: blinkSplit.blink, rawTotal };
 }

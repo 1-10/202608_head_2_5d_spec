@@ -29,7 +29,11 @@ import { FaceExpressionTracker } from '../application/ports';
 import { describeFailure } from '../application/exportGuest';
 import {
   BLINK_TIME_CONSTANT_SECONDS,
+  DEFAULT_TRACKING_GAIN,
   EXPRESSION_TIME_CONSTANT_SECONDS,
+  MAXIMUM_TRACKING_GAIN,
+  MINIMUM_TRACKING_GAIN,
+  CATEGORY_DEADBAND,
   HEAD_TIME_CONSTANT_SECONDS,
   HEAD_TRACKING_PITCH_RANGE_DEGREES,
   HEAD_TRACKING_YAW_RANGE_DEGREES,
@@ -148,6 +152,7 @@ export class WebcamPanel {
   private recordSeconds = 0;
   /** 画面の書き換えを毎フレーム行わないための直近値。 */
   private shownTimer = '';
+  private shownDiagnostics = '';
 
   private readonly driver: ExpressionDriver = {
     expression: (weights, deltaSeconds) => this.advance(weights, deltaSeconds),
@@ -192,7 +197,10 @@ export class WebcamPanel {
 
   /** カメラを止める（写真をファイルから選んだときなど、外から止めたい場合に呼ぶ）。 */
   stopCamera(): void {
-    if (this.mode === 'tracking' || this.mode === 'recording') this.releaseDriver('off');
+    if (this.mode === 'tracking' || this.mode === 'recording') {
+      this.releaseDriver('off');
+      this.resetTrackedFace();
+    }
     this.tracker.stop();
     this.input.stopWebcam();
     this.cameraOn = false;
@@ -225,6 +233,28 @@ export class WebcamPanel {
     if (this.mode === 'off') return;
     this.releaseDriver('off');
     this.refresh();
+  }
+
+  /**
+   * 追うのをやめたときに顔と首を初期状態へ戻す。
+   *
+   * **表情は勝手に戻る**（駆動を手放すと手のスライダー = 0 が効く）が、**首は最後に追っていた
+   * 向きで残る** — 追うのをやめたのに顔が横を向いたままになるので、ここで正面へ返す。
+   */
+  private resetTrackedFace(): void {
+    this.targetWeights.fill(0);
+    this.smoothedWeights.fill(0);
+    this.targetBlink = 0;
+    this.smoothedBlink = 0;
+    this.targetHeadYaw = 0;
+    this.targetHeadPitch = 0;
+    this.smoothedHeadYaw = 0;
+    this.smoothedHeadPitch = 0;
+    this.lastEyeLeft = 0;
+    this.lastEyeRight = 0;
+    this.lastWinkLeft = 0;
+    this.lastWinkRight = 0;
+    this.host.setHeadPose(0, 0);
   }
 
   /** Reset で呼ぶ。カメラを止めて表示を戻す（**クリップは持っていないので捨てない**）。 */
@@ -284,6 +314,7 @@ export class WebcamPanel {
       this.targetHeadPitch = 0;
       if (!elements.head.checked) this.host.setHeadPose(0, 0);
     });
+    elements.gain.addEventListener('input', () => this.updateTimer(true));
     elements.record.addEventListener('click', () => this.toggleRecording());
     elements.save.addEventListener('click', () => this.save());
   }
@@ -321,6 +352,7 @@ export class WebcamPanel {
     if (this.mode === 'tracking' || this.mode === 'recording') {
       this.releaseDriver('off');
       this.drawTrackingPoints(null);
+      this.resetTrackedFace();
       this.refresh();
       return;
     }
@@ -445,7 +477,13 @@ export class WebcamPanel {
         this.drawTrackingPoints(null);
       } else {
         this.faceLostSeconds = 0;
-        this.targetBlink = blendshapesToTargets(plan, frame.scores, this.targetWeights).blink;
+        this.targetBlink = blendshapesToTargets(
+          plan,
+          frame.scores,
+          this.targetWeights,
+          CATEGORY_DEADBAND,
+          this.trackingGain(),
+        ).blink;
         this.lastEyeLeft = frame.scores.get('eyeBlinkLeft') ?? 0;
         this.lastEyeRight = frame.scores.get('eyeBlinkRight') ?? 0;
         this.lastWinkLeft = this.targetWeights[plan.winkIndices[0] ?? 0] ?? 0;
@@ -569,19 +607,32 @@ export class WebcamPanel {
   // ---- 表示 ----
 
   private updateTimer(force: boolean): void {
-    const text = `${this.timerText()} ${this.diagnosticsText()}`;
-    if (!force && text === this.shownTimer) return;
-    this.shownTimer = text;
-    const [timer, diagnostics] = text.split(' ');
+    const timer = this.timerText();
+    const diagnostics = this.diagnosticsText();
+    if (!force && timer === this.shownTimer && diagnostics === this.shownDiagnostics) return;
+    this.shownTimer = timer;
+    this.shownDiagnostics = diagnostics;
     this.elements.timer.textContent = timer;
     this.elements.diagnostics.textContent = diagnostics;
   }
 
   /**
+   * 追従の強さ（画面のスライダーが正本）。
+   *
+   * **画面から触れるようにしてある。** MediaPipe のスコアがどこまで伸びるかは顔・照明・距離で
+   * 変わるので、決め打ちの倍率だと「動かない」か「無表情でも動く」のどちらかに寄る。
+   */
+  private trackingGain(): number {
+    const value = Number(this.elements.gain.value);
+    if (!Number.isFinite(value)) return DEFAULT_TRACKING_GAIN;
+    return Math.min(MAXIMUM_TRACKING_GAIN, Math.max(MINIMUM_TRACKING_GAIN, value));
+  }
+
+  /**
    * 診断の 1 行（トラッキング中だけ）。
    *
-   * 生の `eyeBlink` と、そこから作った まばたき / ウィンク、それに首の角度を並べる。合わないときに
-   * **どこで落ちているかを画面から読める**ようにするためで、飾りではない。
+   * 生の `eyeBlink` と、そこから作った まばたき / ウィンク、追従の強さ、首の角度を並べる。合わない
+   * ときに**どこで落ちているかを画面から読める**ようにするためで、飾りではない。
    */
   private diagnosticsText(): string {
     if (this.mode !== 'tracking' && this.mode !== 'recording') return '';
@@ -592,7 +643,8 @@ export class WebcamPanel {
     return (
       `目 L ${round(this.lastEyeLeft)} R ${round(this.lastEyeRight)}` +
       `　→ まばたき ${round(this.smoothedBlink)}` +
-      ` / ウィンク L ${round(this.lastWinkLeft)} R ${round(this.lastWinkRight)}${head}`
+      ` / ウィンク L ${round(this.lastWinkLeft)} R ${round(this.lastWinkRight)}` +
+      `　強さ ${this.trackingGain().toFixed(1)}${head}`
     );
   }
 
@@ -630,6 +682,8 @@ interface PanelElements {
   readonly track: HTMLButtonElement;
   /** 首も動かすか。**既定は切**（表情だけを写すのが元の約束）。 */
   readonly head: HTMLInputElement;
+  /** 追従の強さ。 */
+  readonly gain: HTMLInputElement;
   readonly record: HTMLButtonElement;
   readonly save: HTMLButtonElement;
   readonly timer: HTMLElement;
@@ -648,6 +702,7 @@ function collectElements(): PanelElements {
     capture: requireElement<HTMLButtonElement>('btn-capture'),
     track: requireElement<HTMLButtonElement>('btn-track'),
     head: requireElement<HTMLInputElement>('chk-head'),
+    gain: requireElement<HTMLInputElement>('range-gain'),
     record: requireElement<HTMLButtonElement>('btn-record'),
     save: requireElement<HTMLButtonElement>('btn-save'),
     timer: requireElement<HTMLElement>('webcam-timer'),
