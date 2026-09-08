@@ -1,7 +1,7 @@
 // 表情アニメーションの収録と再生（`domain/preview/recording`）。
 //
-// 収録するのは**表情基底の成分の係数**。v1 はプリセットの重みだったので、Unity では再生できない
-// 形だった（web 固有の 25 本に依存していた）。
+// 収録するのは**表情基底の成分の係数**。一時プリセットの重みで持っていたが、あれは web 固有の
+// 25 本に依存する形で Unity では再生できなかった。
 
 import { describe, expect, it } from 'vitest';
 import { RecordingFileError } from '../src/domain/errors';
@@ -251,10 +251,8 @@ describe('読み込みの検証', () => {
     expect(() => parseRecording('12', NAMES)).toThrow(RecordingFileError);
   });
 
-  // v1（プリセットの重み）は読まない。**黙って読むと別の顔になる**（意味が違うものを同じ index で
-  // 当てることになる）。
   it('形式のバージョンが違う', () => {
-    for (const version of [1, RECORDING_FORMAT_VERSION + 1]) {
+    for (const version of [RECORDING_FORMAT_VERSION - 1, RECORDING_FORMAT_VERSION + 1]) {
       const text = JSON.stringify({
         formatVersion: version,
         componentNames: NAMES,
