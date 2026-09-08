@@ -10,7 +10,7 @@
       <header id="toolbar">
         <h1>GNM Head Exporter <span class="subtitle">(Web)</span></h1>
         <div class="toolbar-actions">
-          <button id="btn-webcam">Webcam</button>
+          <button id="btn-webcam" aria-pressed="false">Webカメラ</button>
           <button id="btn-upload">写真を選ぶ</button>
           <input id="file-input" type="file" accept="image/*" hidden />
           <button id="btn-reset">Reset</button>
@@ -51,14 +51,54 @@
               <pre id="report" hidden></pre>
             </div>
           </div>
+
+          <!--
+            Webカメラは 3D ビューへ重ねるが**覆わない**。自分の顔と 3D の顔を同時に見るのが
+            表情トラッキングの目的なので、検査画像のような全面のオーバーレイにはできない。かといって
+            常設の欄にすると、カメラを使わない間もずっと画面を取る。小さな箱を隅へ浮かせる。
+          -->
+          <aside id="webcam-panel" hidden>
+            <div class="webcam-bar">
+              <span class="webcam-title">Webカメラ</span>
+              <span id="webcam-state" class="webcam-state">停止中</span>
+              <button id="btn-webcam-close" class="overlay-close" title="閉じる">&times;</button>
+            </div>
+            <div class="webcam-body">
+              <video id="webcam-video" class="webcam-video" autoplay playsinline muted></video>
+
+              <div class="webcam-row">
+                <button id="btn-camera">カメラ開始</button>
+                <button id="btn-capture" disabled>写真として取り込む</button>
+              </div>
+
+              <div class="webcam-row">
+                <button id="btn-track" aria-pressed="false" disabled>表情トラッキング</button>
+              </div>
+
+              <div class="webcam-row">
+                <button id="btn-record" disabled>録画</button>
+                <span id="webcam-timer" class="webcam-timer"></span>
+              </div>
+
+              <div class="webcam-row">
+                <button id="btn-play" disabled>再生</button>
+                <label class="webcam-check">
+                  <input id="chk-loop" type="checkbox" />ループ
+                </label>
+                <button id="btn-save" disabled>保存</button>
+                <button id="btn-load">読み込み</button>
+                <input id="recording-input" type="file" accept="application/json,.json" hidden />
+              </div>
+
+              <p id="webcam-note" class="webcam-note"></p>
+            </div>
+          </aside>
         </main>
 
         <div class="gui-column" id="gui-view"></div>
       </div>
 
     </div>
-
-    <video id="webcam-video" autoplay playsinline muted hidden></video>
 
     <script type="module" src="/src/presentation/main.ts"></script>
   </body>

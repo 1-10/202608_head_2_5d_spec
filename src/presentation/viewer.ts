@@ -410,6 +410,22 @@ export class Viewer {
   /** 今かかっている自動再生のプリセット名（無ければ null）。 */
   currentExpression: string | null = null;
 
+  /**
+   * 表情の重みを外から差し込む口（1 フレームぶん）。
+   *
+   * `null` なら自動再生と手のスライダーで駆動する。**重みを埋めるのは呼ばれた側**
+   * （`weights` は毎フレーム 0 で来る。長さは `presetCount`）。返り値は読み出しに出す名前。
+   *
+   * ここを口にしておくと、口形・トラッキング・録画の再生といった「別の駆動源」が
+   * ビューアーの中へ状態を増やさずに入れ替われる。
+   */
+  expressionOverride:
+    | ((weights: Float64Array, deltaSeconds: number) => string | null)
+    | null = null;
+
+  /** まばたき量（0〜1）を外から差し込む口。`null` なら自動まばたき。 */
+  blinkOverride: (() => number) | null = null;
+
   /** 視点や表示状態が変わったときに呼ばれる（UI の同期用）。 */
   onViewChanged: (() => void) | null = null;
 
@@ -763,7 +779,12 @@ export class Viewer {
 
     const weights = this.expressionWeights;
     weights.fill(0);
-    if (this.playMode === 'off') {
+    if (this.expressionOverride !== null) {
+      this.currentExpression = this.expressionOverride(weights, deltaSeconds);
+      for (let preset = 0; preset < weights.length; preset++) {
+        weights[preset] *= this.expressionIntensity;
+      }
+    } else if (this.playMode === 'off') {
       if (this.manualWeights !== null) {
         for (let preset = 0; preset < weights.length; preset++) {
           weights[preset] = this.manualWeights[preset] * this.expressionIntensity;
@@ -789,7 +810,9 @@ export class Viewer {
       }
     }
 
-    if (this.blinkEnabled) {
+    if (this.blinkOverride !== null) {
+      this.blinkAmount = Math.min(1, Math.max(0, this.blinkOverride()));
+    } else if (this.blinkEnabled) {
       const step = advanceBlink(this.blink, deltaSeconds);
       this.blink = step.state;
       this.blinkAmount = step.weight;

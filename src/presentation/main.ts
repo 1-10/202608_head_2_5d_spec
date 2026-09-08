@@ -13,7 +13,7 @@ import { EYE_SIDES } from '../domain/eyes/layout';
 import { depthCoverage } from '../domain/hair/shell';
 import { PhotoRgb } from '../domain/photo';
 import { ExportOutcome, describeFailure, isPipelineError } from '../application/exportGuest';
-import { Exporter, GnmAssetBundle, buildGuestZip } from '../composition';
+import { Exporter, GnmAssetBundle, buildGuestZip, createFaceExpressionTracker } from '../composition';
 import {
   GuiHandle,
   createPanelState,
@@ -25,6 +25,7 @@ import { InputManager } from './input';
 import { renderInspection } from './inspectionView';
 import { Viewer } from './viewer';
 import { ViewSettings } from './viewSettings';
+import { WebcamPanel } from './webcamPanel';
 
 const elements = {
   buttonWebcam: requireElement<HTMLButtonElement>('btn-webcam'),
@@ -111,6 +112,25 @@ let photo: PhotoRgb | null = null;
 let outcome: ExportOutcome | null = null;
 let bundle: GnmAssetBundle | null = null;
 let busy = false;
+
+/**
+ * Webカメラ（映像・写真の取り込み・表情トラッキング・録画・再生）。
+ *
+ * **判断はパネル側が持つ。** ここは「表情の駆動を誰が握るか」の口を渡すだけ — ビューアーへ直に
+ * 触らせないので、駆動源が増えても配線の形は変わらない。
+ */
+const webcamPanel = new WebcamPanel(inputManager, createFaceExpressionTracker(), {
+  presetNames: () => viewer.expressionNames(),
+  setExpressionDriver: (driver) => {
+    viewer.expressionOverride = driver === null ? null : (weights, delta) => driver.expression(weights, delta);
+    viewer.blinkOverride = driver === null ? null : () => driver.blink();
+  },
+  acceptPhoto: (next) => acceptPhoto(next),
+  setStatus: (message, isError) => setStatus(message, isError),
+});
+webcamPanel.onOpenChanged = (): void => {
+  elements.buttonWebcam.setAttribute('aria-pressed', String(webcamPanel.isOpen));
+};
 
 /** ビューの値をまとめてビューアーへ移す。**片方だけ適用する経路を作らない。** */
 function applyViewSettings(view: ViewSettings): void {
@@ -252,6 +272,8 @@ async function runExport(): Promise<void> {
     for (const [name, weight] of Object.entries(panelState.expressions)) {
       viewer.setManualExpression(name, weight);
     }
+    // 3D ビューに頭が出て初めてトラッキングと再生が使える（重みを当てる先がある）。
+    webcamPanel.refresh();
     renderInspection(elements.inspection, result.inspection);
     elements.report.textContent = buildReport(result);
     setStatus('');
@@ -329,10 +351,7 @@ elements.buttonUpload.addEventListener('click', () => elements.fileInput.click()
 elements.fileInput.addEventListener('change', async () => {
   const file = elements.fileInput.files?.[0];
   if (file === undefined) return;
-  if (inputManager.isWebcamActive) {
-    inputManager.stopWebcam();
-    elements.buttonWebcam.textContent = 'Webcam';
-  }
+  webcamPanel.stopCamera();
   try {
     await acceptPhoto(await inputManager.loadFromFile(file));
   } catch (error) {
@@ -341,34 +360,17 @@ elements.fileInput.addEventListener('change', async () => {
   elements.fileInput.value = '';
 });
 
-elements.buttonWebcam.addEventListener('click', async () => {
-  try {
-    if (!inputManager.isWebcamActive) {
-      setStatus('Webcam を起動しています…');
-      await inputManager.startWebcam();
-      elements.buttonWebcam.textContent = 'Capture';
-      setStatus('正面を向いて Capture を押してください。');
-      return;
-    }
-    const captured = inputManager.captureWebcamFrame();
-    inputManager.stopWebcam();
-    elements.buttonWebcam.textContent = 'Webcam';
-    await acceptPhoto(captured);
-  } catch (error) {
-    console.error(error);
-    setStatus('Webcam にアクセスできませんでした。', true);
-  }
-});
+elements.buttonWebcam.addEventListener('click', () => webcamPanel.toggle());
 
 elements.buttonReset.addEventListener('click', () => {
-  inputManager.stopWebcam();
-  elements.buttonWebcam.textContent = 'Webcam';
+  webcamPanel.reset();
   photo = null;
   outcome = null;
   viewer.dispose();
   elements.inspection.replaceChildren();
   elements.report.textContent = '';
   overlay.close();
+  webcamPanel.refresh();
   updateButtons();
   setStatus('');
 });
@@ -399,6 +401,6 @@ void exporter
   .then((loaded) => {
     bundle = loaded;
     gui.setExpressionPresets(loaded.preview.expressionPresetNames);
-    setStatus('写真を選んでください（ファイル / Webcam）。');
+    setStatus('写真を選んでください（写真を選ぶ / Webカメラ）。');
   })
   .catch((error) => setStatus(describeFailure(error).cause, true));
