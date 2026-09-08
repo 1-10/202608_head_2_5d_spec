@@ -20,7 +20,7 @@
 - Chrome / Edge の最近の版
 - WebGPU があれば深度・法線の推論（DAViD）を fp16 で走らせる。無ければ WASM + int8 へ落ちる。
   どちらで動いたかは画面に出る
-- 初回に GNM アセット約 42MB と DAViD の ONNX（数百 MB）を読み込む
+- 初回に GNM アセット約 39MB と DAViD の ONNX（数百 MB）を読み込む
 - Webカメラを使うなら HTTPS か localhost 経由で開く
 
 ## セットアップ
@@ -65,7 +65,8 @@ fp16 / int8 を生成し、同じ Hub リポジトリの `david/` へ上げる�
   寄り引き。位置と回転は右パネルへ数で出ていて、打ち込んでも動く
 - **表情** — プリセットを手で立てるか、自動で切り替える。自動まばたきもここ
 - **口形（あいうえお）** — 5 本の口形を手で立てるか、連続再生する
-- **Webカメラの表情トラッキング** — 自分の表情を 3D の顔へ写す。「首も動かす」を入れると首も追従する
+- **Webカメラの表情トラッキング** — 自分の表情を 3D の顔へ写す。「首も動かす」を入れると首も追従する。
+  追い始めの 1 フレームを「無表情」として取り込むので、始めるときは力を抜いた顔でいる
 - **録画と再生** — トラッキング中の表情を収録して JSON へ保存し、読み込んで再生する（再生と読み込みは
   右パネルの「表情アニメーション」）
 - **検査画像** — 各段の出力を並べる。結果が合わないときにどの段で崩れたかを見る
@@ -107,7 +108,7 @@ src/
   domain/          # 純粋計算（contract / field / photo / normal / ramp / resample /
                    #   faceSubject / faceLadder / inspection / gnm / atlas / eyes / hair）
     preview/       # 3D ビューだけが使う層（asset / camera / pose / expression / viseme /
-                   #   faceTracking / recording / normals / scene）
+                   #   expressionFit / headTracking / recording / normals / scene）
   application/     # ユースケースと Port（exportGuest / ports / settings）
   infrastructure/  # Port の実装（gnmb / gnmAsset / packaging / imaging / jpeg / png /
                    #   photoCanvas / faceLandmarks / faceTracker / segmentation /
@@ -131,7 +132,8 @@ public/gnm/        # ブラウザが読む GNM アセット
 | 6 段の合成と失敗の伝え方 | `src/application/exportGuest.ts` |
 | 書き出しパラメータの既定値と範囲 | `src/application/settings.ts` |
 | 3D ビューの値と Unity 側との対応 | `src/presentation/viewSettings.ts` / `src/presentation/viewer.ts` |
-| 表情トラッキングの当て方 | `src/domain/preview/faceTracking.ts` |
+| 表情トラッキング（点から係数を解く） | `src/domain/preview/expressionFit.ts` |
+| 表情を係数 383 本で持つ理由 | `src/domain/preview/expression.ts` |
 | アセット生成と量子化 | `tools/export_gnm_assets.py` |
 
 正本との突き合わせは `tools/golden_export_guest.py` がデスクトップ側の `domain` を動かして基準値を

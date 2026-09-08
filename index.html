@@ -116,7 +116,8 @@
               -->
               <div class="webcam-row">
                 <label class="webcam-range" for="range-gain">追従の強さ</label>
-                <input id="range-gain" type="range" min="0.5" max="4" step="0.1" value="1.8" />
+                <!-- 範囲と既定は webcamPanel が domain の定数から埋める（HTML へ数を写さない） -->
+                <input id="range-gain" type="range" step="0.1" />
               </div>
 
               <div class="webcam-row">

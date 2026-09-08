@@ -11,7 +11,7 @@
 // 姿勢と表情の計算そのものは純粋関数なので、アセット無しでも回る形にしてある。
 
 import { describe, expect, it } from 'vitest';
-import { loadBundle, loadPreview } from './asset';
+import { loadBundle, loadPreview, presetDisplacement } from './asset';
 import {
   EXCLUDED_SELECTOR,
   GnmPreviewAsset,
@@ -20,7 +20,7 @@ import {
   classifyTriangles,
   evaluateSelector,
   expressionBasisValue,
-  presetDisplacement,
+  presetRow,
 } from '../src/domain/preview/asset';
 import {
   BLINK_DURATION_MAX_MS,
@@ -30,13 +30,14 @@ import {
   FADE_SECONDS,
   HOLD_SECONDS,
   addExpression,
+  addPresetCoefficients,
   advanceBlink,
   advancePlayback,
-  blendBlink,
+  blendBlinkCoefficients,
   envelope,
-  eyeExpressionMask,
   startBlink,
   weightsFor,
+  zeroCoefficients,
 } from '../src/domain/preview/expression';
 import { splitPresetIndices } from '../src/domain/preview/viseme';
 import {
@@ -298,7 +299,9 @@ describe('表情プリセット', () => {
     const identity = new Float64Array(asset.vertexIdentityBasis.componentCount);
     const base = verticesOf(asset, identity);
     const moved = Float64Array.from(base);
-    addExpression(preview, moved, weightsFor(preview, [['smile_wide', 1]]));
+    const coefficients = zeroCoefficients(preview);
+    addPresetCoefficients(preview, coefficients, weightsFor(preview, [['smile_wide', 1]]));
+    addExpression(preview, moved, coefficients);
     let maximum = 0;
     for (let index = 0; index < base.length; index++) {
       maximum = Math.max(maximum, Math.abs(moved[index] - base[index]));
@@ -308,8 +311,21 @@ describe('表情プリセット', () => {
     expect(maximum).toBeLessThan(0.03);
 
     const zeroed = Float64Array.from(base);
-    addExpression(preview, zeroed, new Float64Array(preview.presetCount));
+    addExpression(preview, zeroed, zeroCoefficients(preview));
     expect(zeroed).toEqual(base);
+  });
+
+  // プリセットは 383 成分の**係数の行**で、変位はそこから作る。旧実装はアセットに変位を焼いていた。
+  it('プリセットは係数の行として入っている（変位は基底から作る）', () => {
+    const preview = loadPreview();
+    expect(preview.expressionPresetCoefficients.length).toBe(
+      preview.presetCount * preview.componentCount,
+    );
+    const row = presetRow(preview, preview.expressionPresetNames.indexOf('smile_wide'));
+    let nonzero = 0;
+    for (const value of row) if (value !== 0) nonzero++;
+    // 公式 CVAE の出力なので行は密。ここが疎になったらプリセットの作り方が変わっている。
+    expect(nonzero).toBeGreaterThan(preview.componentCount / 2);
   });
 
   it('知らないプリセット名は落とす（黙って無表情にしない）', () => {
@@ -395,55 +411,64 @@ describe('表情プリセット', () => {
     }
   });
 
-  it('まばたきは目領域だけを置き換える（加算しない）', () => {
-    const { asset, preview } = loadBundle();
-    const identity = new Float64Array(asset.vertexIdentityBasis.componentCount);
-    const rest = verticesOf(asset, identity);
-    const eyeMask = eyeExpressionMask(preview);
-    expect(countMask(eyeMask)).toBeGreaterThan(0);
-
+  it('まばたきは目の成分だけを置き換える（加算しない）', () => {
+    const preview = loadPreview();
     // 開瞼系（surprise）を全開で立てた上にまばたきを掛ける。
-    const surprised = Float64Array.from(rest);
-    addExpression(preview, surprised, weightsFor(preview, [['surprise', 1]]));
+    const surprised = zeroCoefficients(preview);
+    addPresetCoefficients(preview, surprised, weightsFor(preview, [['surprise', 1]]));
     const blinked = Float64Array.from(surprised);
-    blendBlink(preview, blinked, rest, 1, eyeMask);
+    blendBlinkCoefficients(preview, blinked, 1);
 
-    // 完全閉眼（amount=1）なら、目領域は surprise の変位が消えてまばたきだけになる。
-    const blinkOnly = Float64Array.from(rest);
-    blendBlink(preview, blinkOnly, rest, 1, eyeMask);
-    let insideDifference = 0;
-    let outsideDifference = 0;
-    for (let vertex = 0; vertex < preview.vertexCount; vertex++) {
-      for (let axis = 0; axis < 3; axis++) {
-        const index = vertex * 3 + axis;
-        const difference = Math.abs(blinked[index] - blinkOnly[index]);
-        if (eyeMask[vertex] !== 0) insideDifference = Math.max(insideDifference, difference);
-        else outsideDifference = Math.max(outsideDifference, Math.abs(blinked[index] - surprised[index]));
+    const end = preview.blinkComponentOffset + preview.blinkComponentCount;
+    for (let component = 0; component < preview.componentCount; component++) {
+      if (component >= preview.blinkComponentOffset && component < end) {
+        // 完全閉眼なら surprise の係数は残らず、まばたきの係数そのものになる。
+        expect(blinked[component]).toBeCloseTo(preview.blinkCoefficients[component], 10);
+      } else {
+        // 目の外（口・頬・舌）はそのまま残る。
+        expect(blinked[component]).toBe(surprised[component]);
       }
     }
-    // 目領域は surprise の影響がゼロになる（= 加算ではなく置き換え）。
-    expect(insideDifference).toBeLessThan(1e-12);
-    // 目領域の外は触らない（口や頬の表情はそのまま残る）。
-    expect(outsideDifference).toBeLessThan(1e-12);
 
     // amount=0 では何も変わらない。
     const untouched = Float64Array.from(surprised);
-    blendBlink(preview, untouched, rest, 0, eyeMask);
+    blendBlinkCoefficients(preview, untouched, 0);
     expect(untouched).toEqual(surprised);
   });
 
-  it('まばたきの変位は目領域の外へ出ない（アセット生成時の検査の裏取り）', () => {
-    const preview = loadPreview();
-    const eyeMask = eyeExpressionMask(preview);
-    const step = preview.blinkScale / 32767;
-    let outside = 0;
-    for (let vertex = 0; vertex < preview.vertexCount; vertex++) {
-      if (eyeMask[vertex] !== 0) continue;
-      for (let axis = 0; axis < 3; axis++) {
-        outside = Math.max(outside, Math.abs(preview.blinkBasisQ[vertex * 3 + axis]) * step);
+  // **症状そのものの検査。** 開瞼系を立てたまま閉じ切れるかは、置き換えを係数の側へ移したときに
+  // 壊れやすい（加算に戻ると瞼が閉じ切らず眼球が貫く）。
+  it('surprise を立てたままでも閉じ切る（瞼が開眼時より下がる）', () => {
+    const { asset, preview } = loadBundle();
+    const rest = verticesOf(asset, new Float64Array(asset.vertexIdentityBasis.componentCount));
+    const coefficients = zeroCoefficients(preview);
+    addPresetCoefficients(preview, coefficients, weightsFor(preview, [['surprise', 1]]));
+    const open = Float64Array.from(rest);
+    addExpression(preview, open, coefficients);
+    blendBlinkCoefficients(preview, coefficients, 1);
+    const closed = Float64Array.from(rest);
+    addExpression(preview, closed, coefficients);
+
+    let drop = 0;
+    for (const region of preview.expressionBasisRegions) {
+      if (!region.name.includes('eye')) continue;
+      for (let slot = 0; slot < region.vertexCount; slot++) {
+        const vertex = preview.expressionBasisVertices[region.vertexOffset + slot];
+        drop = Math.max(drop, open[vertex * 3 + 1] - closed[vertex * 3 + 1]);
       }
     }
-    expect(outside).toBeLessThanOrEqual(step);
+    // mm 単位で下がる（0 なら置き換えが効いていない）。
+    expect(drop).toBeGreaterThan(0.001);
+  });
+
+  it('まばたきが置き換える区間は目の 2 領域そのもの', () => {
+    const preview = loadPreview();
+    const eye = preview.expressionBasisRegions.filter((region) => region.name.includes('eye'));
+    expect(eye.length).toBe(2);
+    const offset = Math.min(...eye.map((region) => region.componentOffset));
+    const count = eye.reduce((total, region) => total + region.componentCount, 0);
+    expect(preview.blinkComponentOffset).toBe(offset);
+    expect(preview.blinkComponentCount).toBe(count);
   });
 });
 
@@ -495,16 +520,14 @@ describe('表情基底', () => {
     const inside = new Uint8Array(preview.vertexCount);
     for (const vertex of preview.expressionBasisVertices) inside[vertex] = 1;
 
-    for (let preset = 0; preset < preview.presetCount; preset++) {
-      const step = preview.expressionPresetScales[preset] / 32767;
-      let outside = 0;
+    for (const name of preview.expressionPresetNames) {
+      const displacement = presetDisplacement(preview, name);
       for (let vertex = 0; vertex < preview.vertexCount; vertex++) {
         if (inside[vertex] !== 0) continue;
         for (let axis = 0; axis < 3; axis++) {
-          outside = Math.max(outside, Math.abs(presetDisplacement(preview, preset, vertex, axis)));
+          expect(displacement[vertex * 3 + axis]).toBe(0);
         }
       }
-      expect(outside).toBeLessThanOrEqual(step);
     }
   });
 

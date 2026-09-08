@@ -1,6 +1,6 @@
 // 口形（あいうえお）の連続再生。`Viewer.expressionOverride` へ差す駆動源。
 //
-// **手動の 5 本はここを通らない。** 口形はアセットへ焼いた 1 本のプリセットなので、手で立てるのは
+// **手動の 5 本はここを通らない。** 口形は表情プリセットと同じ「係数の行」1 本なので、手で立てるのは
 // 既存の `Viewer.setManualExpression` で足りる（表情のスライダーと同じ経路）。ここが要るのは
 // 「時間で切り替える」ぶんだけ。
 //
@@ -9,9 +9,10 @@
 // これから増える）。ここをビューアーへ書くと、増えるたびにビューアーが状態を抱える。
 //
 // **同時に立てるのは 1 本だけ**（`domain/preview/viseme` の原則）。連続再生はそれを機械で守る —
-// 毎フレーム 0 で来る `weights` に、今の 1 本ぶんしか書かない。
+// 毎フレーム 0 で来る係数へ、今の 1 本ぶんの行しか足さない。
 
 import { GnmPreviewAsset } from '../domain/preview/asset';
+import { addPresetCoefficients } from '../domain/preview/expression';
 import {
   IDLE_VISEME_PLAYBACK,
   VisemePlayback,
@@ -21,8 +22,11 @@ import {
 } from '../domain/preview/viseme';
 import { ViewSettings } from './viewSettings';
 
-/** `Viewer.expressionOverride` へ差せる形。 */
-export type ExpressionFrame = (weights: Float64Array, deltaSeconds: number) => string | null;
+/** `Viewer.expressionOverride` へ差せる形（埋めるのは表情基底 383 成分の係数）。 */
+export type ExpressionFrame = (
+  coefficients: Float64Array,
+  deltaSeconds: number,
+) => string | null;
 
 /**
  * 口形の連続再生。
@@ -33,8 +37,11 @@ export type ExpressionFrame = (weights: Float64Array, deltaSeconds: number) => s
  * 知らせる。
  */
 export class VisemeDriver {
-  /** アセットの中の口形プリセットの index（並びは焼いた順 = あいうえお）。 */
+  /** アセットの中の口形プリセットの index（並びはアセットの順 = あいうえお）。 */
   private presets: readonly number[] = [];
+  private preview: GnmPreviewAsset | null = null;
+  /** プリセットの重み → 係数へ畳むための作業領域。 */
+  private weights: Float64Array = new Float64Array(0);
   private names: readonly string[] = [];
   private playback: VisemePlayback = IDLE_VISEME_PLAYBACK;
   private running = false;
@@ -44,6 +51,8 @@ export class VisemeDriver {
 
   /** アセットを読んだ（か差し替えた）ときに呼ぶ。 */
   setPreview(preview: GnmPreviewAsset): void {
+    this.preview = preview;
+    this.weights = new Float64Array(preview.presetCount);
     this.presets = splitPresetIndices(preview).visemes;
     this.names = this.presets.map((preset) => preview.expressionPresetNames[preset]);
     this.stop();
@@ -90,12 +99,12 @@ export class VisemeDriver {
   }
 
   /**
-   * 1 フレームぶんの重みを埋め、読み出しに出す名前を返す。
+   * 1 フレームぶんの係数を埋め、読み出しに出す名前を返す。
    *
    * 名前は `口形 あ` のように**自分が何なのかまで名乗る**。読み出し側で「表情」と決め打ちすると、
    * 別の駆動源が同じ口へ差さったときに黙って嘘のラベルになる。
    */
-  private readonly step: ExpressionFrame = (weights, deltaSeconds) => {
+  private readonly step: ExpressionFrame = (coefficients, deltaSeconds) => {
     const step = advanceVisemePlayback(
       this.playback,
       this.presets.length,
@@ -114,7 +123,10 @@ export class VisemeDriver {
       }
       return null;
     }
-    weights[this.presets[step.index]] = step.weight;
+    if (this.preview === null) return null;
+    this.weights.fill(0);
+    this.weights[this.presets[step.index]] = step.weight;
+    addPresetCoefficients(this.preview, coefficients, this.weights);
     return `口形 ${visemeLabel(this.names[step.index])}`;
   };
 }
