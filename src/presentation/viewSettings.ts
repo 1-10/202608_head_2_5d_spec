@@ -13,11 +13,7 @@ import {
   HOLD_SECONDS,
 } from '../domain/preview/expression';
 import { NECK_SHARE } from '../domain/preview/pose';
-import {
-  VISEME_FADE_SECONDS,
-  VISEME_HOLD_SECONDS,
-  VisemeMode,
-} from '../domain/preview/viseme';
+import { VISEME_FADE_SECONDS, VISEME_HOLD_SECONDS } from '../domain/preview/viseme';
 import {
   AMBIENT_LIGHT,
   DEFAULT_AMBIENT_COLOR,
@@ -52,21 +48,6 @@ export const PLAY_MODE_LABELS: Readonly<Record<ExpressionPlayMode, string>> = {
   random: 'ランダム',
 };
 
-/** 口形の駆動の選べる値（GUI のドロップダウンの並び）。 */
-export const VISEME_MODES: readonly VisemeMode[] = ['off', 'manual', 'sequence'];
-
-/**
- * 口形の駆動の日本語ラベル。
- *
- * `off` を「手動」と呼ばない（表情の `PLAY_MODE_LABELS` とは意味が違う）。口形の `off` は
- * **口形を一切立てない**で、そのとき顔を駆動するのは従来どおり表情の側。
- */
-export const VISEME_MODE_LABELS: Readonly<Record<VisemeMode, string>> = {
-  off: '使わない',
-  manual: '手動',
-  sequence: '連続再生',
-};
-
 /** 3D ビューの調整値。 */
 export interface ViewSettings {
   readonly fovDegrees: number;
@@ -89,13 +70,12 @@ export interface ViewSettings {
   readonly holdSeconds: number;
   readonly expressionIntensity: number;
   readonly blinkEnabled: boolean;
-  /**
-   * 口形の駆動。
-   *
-   * 口形の**量**はここに持たない。焼いたプリセット 1 本なので、手で立てるぶんは表情のスライダーと
-   * 同じ入れ物（`PanelState.expressions`）に入る — 同じものを 2 か所で持つと片方だけ古くなる。
-   */
-  readonly visemeMode: VisemeMode;
+  // 口形は**焼いたプリセット 1 本**なので、手で立てる量は表情のスライダーと同じ入れ物
+  // （`PanelState.expressions`）に入る。ここに持つのは連続再生の速さとループだけ。
+  //
+  // **「今 連続再生しているか」もここに持たない。** それは値ではなく駆動源の状態で、正本は
+  // `VisemeDriver`（再生ボタンが押した / 終端で止まった、をあちらが知っている）。ビューの調整値
+  // として持つと、終端で止まったときに設定の側が古くなる。
   readonly visemeFadeSeconds: number;
   readonly visemeHoldSeconds: number;
   /** 連続再生を お の次に あ へ戻すか。 */
@@ -122,7 +102,6 @@ export const DEFAULT_VIEW_SETTINGS: ViewSettings = {
   holdSeconds: HOLD_SECONDS,
   expressionIntensity: 1,
   blinkEnabled: true,
-  visemeMode: 'off',
   visemeFadeSeconds: VISEME_FADE_SECONDS,
   visemeHoldSeconds: VISEME_HOLD_SECONDS,
   visemeLoop: true,

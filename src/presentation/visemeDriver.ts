@@ -27,8 +27,10 @@ export type ExpressionFrame = (weights: Float64Array, deltaSeconds: number) => s
 /**
  * 口形の連続再生。
  *
- * 状態は「どこまで進んだか」だけ。速さとループはビューの設定が正本で、`apply` のたびに丸ごと
- * 受け取る（片方だけ更新する経路を作らない）。
+ * 速さとループはビューの設定が正本で、`apply` のたびに丸ごと受け取る（片方だけ更新する経路を
+ * 作らない）。**「今 再生しているか」の正本はここ** — 再生は再生ボタンで始まるが、ループ無しなら
+ * 終端で自分から止まるので、押した側が状態を持つと終端で古くなる。止まったことは `onFinished` で
+ * 知らせる。
  */
 export class VisemeDriver {
   /** アセットの中の口形プリセットの index（並びは焼いた順 = あいうえお）。 */
@@ -44,24 +46,36 @@ export class VisemeDriver {
   setPreview(preview: GnmPreviewAsset): void {
     this.presets = splitPresetIndices(preview).visemes;
     this.names = this.presets.map((preset) => preview.expressionPresetNames[preset]);
-    this.rewind();
+    this.stop();
   }
 
-  /** 連続再生を あ の手前へ戻す（「先頭から再生」）。 */
-  rewind(): void {
+  /** 今 連続再生しているか。ボタンのラベルの正本。 */
+  get isPlaying(): boolean {
+    return this.running;
+  }
+
+  /** 終端まで行って自分から止まったときに呼ばれる（ボタンを「再生」へ戻すため）。 */
+  onFinished: (() => void) | null = null;
+
+  /**
+   * あ から再生し直す。
+   *
+   * **必ず頭から始める。** 終端まで行って止まった状態のまま押されることがあり、そこから続けると
+   * 何も起きずに壊れているように見える。
+   */
+  play(): void {
+    this.playback = IDLE_VISEME_PLAYBACK;
+    this.running = true;
+  }
+
+  /** 止める。手のスライダーと表情の自動再生へ顔を返す。 */
+  stop(): void {
+    this.running = false;
     this.playback = IDLE_VISEME_PLAYBACK;
   }
 
-  /**
-   * ビューの設定を取り込む。
-   *
-   * 駆動を切り替えたときは頭から始める。終端まで行って止まった状態のまま「連続再生」へ戻すと、
-   * 何も起きずに壊れているように見える。
-   */
+  /** ビューの設定（速さとループ）を取り込む。再生しているかはここでは変えない。 */
   apply(view: ViewSettings): void {
-    const running = view.visemeMode === 'sequence';
-    if (running !== this.running) this.rewind();
-    this.running = running;
     this.loop = view.visemeLoop;
     this.fadeSeconds = view.visemeFadeSeconds;
     this.holdSeconds = view.visemeHoldSeconds;
@@ -91,7 +105,15 @@ export class VisemeDriver {
       this.holdSeconds,
     );
     this.playback = step.playback;
-    if (step.index < 0) return null;
+    if (step.index < 0) {
+      // ループ無しで終端まで行った。**自分で止まる** — 止まったまま口を占有し続けると、手の
+      // スライダーも表情の自動再生も効かない顔になる。
+      if (this.running) {
+        this.running = false;
+        this.onFinished?.();
+      }
+      return null;
+    }
     weights[this.presets[step.index]] = step.weight;
     return `口形 ${visemeLabel(this.names[step.index])}`;
   };

@@ -84,14 +84,9 @@ export function splitPresetIndices(preview: GnmPreviewAsset): PresetSplit {
   return { expressions, visemes };
 }
 
-/**
- * 口形の駆動のしかた。
- *
- * `off` では口形を一切立てない（そのとき顔を駆動するのは従来どおり表情の側）。表情の
- * `ExpressionPlayMode` へ混ぜないのは、**口形と表情が別の駆動源**だから — 1 つの列挙に混ぜると
- * 「表情を手で立てたまま口形を連続再生する」が型の上で表せなくなる。
- */
-export type VisemeMode = 'off' | 'manual' | 'sequence';
+// **口形に「駆動の種類」を持たせない。** 手で立てるかどうかはスライダーを動かすかどうかで決まり、
+// 連続再生かどうかは `presentation/visemeDriver` が再生中かどうかで決まる。表情の
+// `ExpressionPlayMode` にあたる列挙をここへ作ると、同じことを 2 か所が言うことになる。
 
 /**
  * 連続再生の立ち上がりと保持（秒）。
@@ -120,7 +115,7 @@ export interface VisemePlayback {
   readonly elapsedSeconds: number;
 }
 
-/** 再生前の状態。「先頭から再生」もここへ戻す。 */
+/** 再生前の状態。再生ボタンは必ずここから始める。 */
 export const IDLE_VISEME_PLAYBACK: VisemePlayback = { index: -1, elapsedSeconds: 0 };
 
 /**

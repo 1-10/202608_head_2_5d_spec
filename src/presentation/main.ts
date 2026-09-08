@@ -146,6 +146,14 @@ function applyViewSettings(view: ViewSettings): void {
   viewer.expressionOverride = visemeDriver.frame;
 }
 
+/** 口形の連続再生を切り替え、ビューアーの駆動とボタンのラベルを合わせる。 */
+function toggleVisemePlayback(): void {
+  if (visemeDriver.isPlaying) visemeDriver.stop();
+  else visemeDriver.play();
+  applyViewSettings(toViewSettings(panelState));
+  gui.syncVisemePlayback(visemeDriver.isPlaying);
+}
+
 const gui: GuiHandle = setupGui(
   { exportPanel: elements.guiExport, viewPanel: elements.guiView },
   panelState,
@@ -156,9 +164,15 @@ const gui: GuiHandle = setupGui(
     onResetView: () => viewer.resetView(),
     onViewSettingsChanged: (view) => applyViewSettings(view),
     onExpressionChanged: (name, weight) => viewer.setManualExpression(name, weight),
-    onVisemeRewind: () => visemeDriver.rewind(),
+    onVisemePlayToggled: () => toggleVisemePlayback(),
   },
 );
+
+// ループ無しの連続再生は終端で自分から止まる。ボタンのラベルはそのときにも合わせ直す。
+visemeDriver.onFinished = (): void => {
+  viewer.expressionOverride = visemeDriver.frame;
+  gui.syncVisemePlayback(visemeDriver.isPlaying);
+};
 
 viewer.onViewChanged = (): void => {
   updateViewReadout();

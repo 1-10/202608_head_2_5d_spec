@@ -39,7 +39,7 @@ import {
 } from '../application/settings';
 import { LAYER_ORDER } from '../domain/preview/asset';
 import { ExpressionPlayMode } from '../domain/preview/expression';
-import { VisemeMode, isVisemePreset, visemeLabel } from '../domain/preview/viseme';
+import { isVisemePreset, visemeLabel } from '../domain/preview/viseme';
 import {
   GAZE_LIMIT_DEGREES,
   HeadPose,
@@ -75,8 +75,6 @@ import {
   MINIMUM_VISEME_HOLD_SECONDS,
   PLAY_MODES,
   PLAY_MODE_LABELS,
-  VISEME_MODES,
-  VISEME_MODE_LABELS,
   ViewSettings,
 } from './viewSettings';
 
@@ -125,7 +123,6 @@ export interface PanelState {
     holdSeconds: number;
     expressionIntensity: number;
     blinkEnabled: boolean;
-    visemeMode: VisemeMode;
     visemeFadeSeconds: number;
     visemeHoldSeconds: number;
     visemeLoop: boolean;
@@ -210,8 +207,8 @@ export interface GuiCallbacks {
   onViewSettingsChanged: (view: ViewSettings) => void;
   /** 手で立てるプリセット（表情・口形とも）の重みが変わった。 */
   onExpressionChanged: (name: string, weight: number) => void;
-  /** 口形の連続再生を先頭へ戻す。 */
-  onVisemeRewind: () => void;
+  /** 口形の連続再生の再生 / 停止が押された。 */
+  onVisemePlayToggled: () => void;
 }
 
 export interface GuiHandle {
@@ -222,6 +219,13 @@ export interface GuiHandle {
   ): void;
   /** ドラッグやマウス追従で動いた首と視線をスライダーへ戻す。 */
   syncHeadPose(pose: HeadPose): void;
+  /**
+   * 口形の連続再生のボタンを今の状態に合わせる。
+   *
+   * **押した側で切り替えない。** ループ無しの連続再生は終端で自分から止まるので、押した回数で
+   * ラベルを決めると止まった後も「停止」のまま残る。正本は `VisemeDriver.isPlaying`。
+   */
+  syncVisemePlayback(playing: boolean): void;
   /**
    * アセットを読んだ後にプリセットのスライダーを作る（名前はアセットが正本）。
    *
@@ -402,43 +406,23 @@ export function setupGui(
   // 表情とは別（言葉を作る / 感情を作る）で、速さの既定も桁が違う。同じ節に混ぜると、20 本の
   // 表情の末尾に あいうえお が並んで「表情の一種」に見える。
   const viseme = view.addFolder('口形（あいうえお）');
-  const visemeModeChoices: Record<string, VisemeMode> = {};
-  for (const mode of VISEME_MODES) visemeModeChoices[VISEME_MODE_LABELS[mode]] = mode;
-  const visemeSliders = new Map<string, ReturnType<typeof view.add>>();
-  // スライダーはアセットを読んでから作る（`setExpressionPresets`）。
+  // **操作は全部出しっぱなしにする。** 出し入れすると、口形を触るたびにパネルの行数が変わって他の
+  // 節の位置が動く（探し直しになる）。連続再生中に手のスライダーが効かないのは表情の自動再生と
+  // 同じ扱いで、そちらもスライダーを隠していない。
+  //
+  // **「駆動」の選択は持たない。** 手で立てるかどうかはスライダーを動かすかどうかで決まり、連続
+  // 再生かどうかは下のボタンで決まる。同じことを言う選択肢を別に置くと、ボタンと食い違ったときに
+  // どちらが本当か分からなくなる。
+  //
+  // スライダーはアセットを読んでから作る（`setExpressionPresets`）ので、それまでは空の節を出さない。
   const visemePresets = viseme.addFolder('手動');
+  visemePresets.hide();
   const play = viseme.addFolder('連続再生');
 
-  /**
-   * 今の駆動に関わる操作だけを出す。
-   *
-   * **「使わない」なのにスライダーが触れる状態を作らない。** 触れてしまうと、画面の「駆動」が
-   * 言っていることと顔が食い違う。どちらが顔を駆動しているかはパネルの形そのもので分かる方がよい。
-   */
-  const syncVisemeFolders = (): void => {
-    const mode = state.view.visemeMode;
-    if (mode === 'manual' && visemeSliders.size > 0) visemePresets.show();
-    else visemePresets.hide();
-    if (mode === 'sequence') play.show();
-    else play.hide();
-  };
-
-  const visemeModeController = viseme
-    .add(state.view, 'visemeMode', visemeModeChoices)
-    .name('駆動')
-    .onChange((mode: VisemeMode) => {
-      // 「使わない」へ戻したら手で立てた口形も 0 へ落とす。値だけ残すと、口形を使わない設定なのに
-      // 顔の口が あ のまま、という食い違いが出る。
-      if (mode === 'off') {
-        for (const [name, controller] of visemeSliders) {
-          state.expressions[name] = 0;
-          controller.updateDisplay();
-          callbacks.onExpressionChanged(name, 0);
-        }
-      }
-      syncVisemeFolders();
-      pushView();
-    });
+  // ラベルの正本は `VisemeDriver`（ループ無しなら終端で自分から止まるので、押した回数では決まらない）。
+  const playbackController = play
+    .add({ 再生: (): void => callbacks.onVisemePlayToggled() }, '再生')
+    .name('再生');
   play
     .add(
       state.view,
@@ -460,8 +444,6 @@ export function setupGui(
     .name('保持 (秒)')
     .onChange(pushView);
   play.add(state.view, 'visemeLoop').name('ループ').onChange(pushView);
-  play.add({ 先頭から再生: callbacks.onVisemeRewind }, '先頭から再生');
-  syncVisemeFolders();
 
   const layerControllers = new Map<string, ReturnType<typeof view.add>>();
   const textureControllers = new Map<string, ReturnType<typeof view.add>>();
@@ -508,7 +490,9 @@ export function setupGui(
         textureControllers.get(layer)?.updateDisplay();
       }
       wireframeController.updateDisplay();
-      visemeModeController.updateDisplay();
+    },
+    syncVisemePlayback(playing) {
+      playbackController.name(playing ? '停止' : '再生');
     },
     syncHeadPose(pose_) {
       state.view.headYawDegrees = pose_.headYawDegrees;
@@ -520,26 +504,25 @@ export function setupGui(
     setExpressionPresets(names) {
       presets.children.slice().forEach((child) => child.destroy());
       visemePresets.children.slice().forEach((child) => child.destroy());
-      visemeSliders.clear();
       let expressionCount = 0;
+      let visemeCount = 0;
       for (const name of names) {
         if (state.expressions[name] === undefined) state.expressions[name] = 0;
         const onChange = (value: number): void => callbacks.onExpressionChanged(name, value);
         if (isVisemePreset(name)) {
-          visemeSliders.set(
-            name,
-            visemePresets
-              .add(state.expressions, name, 0, 1, 0.01)
-              .name(visemeLabel(name))
-              .onChange(onChange),
-          );
+          visemePresets
+            .add(state.expressions, name, 0, 1, 0.01)
+            .name(visemeLabel(name))
+            .onChange(onChange);
+          visemeCount++;
         } else {
           presets.add(state.expressions, name, 0, 1, 0.01).onChange(onChange);
           expressionCount++;
         }
       }
+      // 出すのは中身があるときだけ。空の節を出しても触れるものが無い（駆動では出し入れしない）。
       if (expressionCount > 0) presets.show();
-      syncVisemeFolders();
+      if (visemeCount > 0) visemePresets.show();
     },
   };
 }
