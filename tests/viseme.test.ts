@@ -17,9 +17,8 @@
 // のに落ちる」検査になる。順序なら、崩れたときだけ落ちる。
 
 import { describe, expect, it } from 'vitest';
-import { loadPreview } from './asset';
-import { GnmPreviewAsset, evaluateSelector, presetDisplacement } from '../src/domain/preview/asset';
-import { addExpression, weightsFor } from '../src/domain/preview/expression';
+import { loadPreview, presetDisplacement } from './asset';
+import { GnmPreviewAsset, evaluateSelector } from '../src/domain/preview/asset';
 import {
   IDLE_VISEME_PLAYBACK,
   VISEME_FADE_SECONDS,
@@ -47,15 +46,15 @@ interface MouthShape {
   readonly spread: number;
 }
 
-function mouthShape(preview: GnmPreviewAsset, preset: number): MouthShape {
+function mouthShape(preview: GnmPreviewAsset, preset: string): MouthShape {
+  const displacement = presetDisplacement(preview, preset);
   const upper = indicesOf(evaluateSelector(preview, ['upper_lip']));
   const lower = indicesOf(evaluateSelector(preview, ['lower_lip']));
   const chin = indicesOf(evaluateSelector(preview, ['chin_region']));
   const lips = indicesOf(evaluateSelector(preview, ['upper_lip', 'lower_lip']));
   const mean = (list: readonly number[], axis: number): number =>
-    list.reduce((total, vertex) => total + presetDisplacement(preview, preset, vertex, axis), 0) /
-    list.length;
-  const lipsX = lips.map((vertex) => presetDisplacement(preview, preset, vertex, 0));
+    list.reduce((total, vertex) => total + displacement[vertex * 3 + axis], 0) / list.length;
+  const lipsX = lips.map((vertex) => displacement[vertex * 3]);
   const centre = lipsX.reduce((total, value) => total + value, 0) / lipsX.length;
   const variance =
     lipsX.reduce((total, value) => total + (value - centre) ** 2, 0) / lipsX.length;
@@ -67,17 +66,18 @@ function mouthShape(preview: GnmPreviewAsset, preset: number): MouthShape {
   };
 }
 
-/** 焼いた口形を、あいうえおの並び（= 焼いた順）で名前 → 形にする。 */
+/** 口形を、あいうえおの並び（= アセットの並び）で名前 → 形にする。 */
 function visemeShapes(preview: GnmPreviewAsset): Map<string, MouthShape> {
   const shapes = new Map<string, MouthShape>();
   for (const preset of splitPresetIndices(preview).visemes) {
-    shapes.set(preview.expressionPresetNames[preset], mouthShape(preview, preset));
+    const name = preview.expressionPresetNames[preset];
+    shapes.set(name, mouthShape(preview, name));
   }
   return shapes;
 }
 
-describe('口形プリセット（アセットに焼いてある）', () => {
-  it('あいうえおの 5 本が焼かれていて、並びは あ→い→う→え→お', () => {
+describe('口形プリセット（係数の行として入っている）', () => {
+  it('あいうえおの 5 本があり、並びは あ→い→う→え→お', () => {
     const preview = loadPreview();
     const { visemes } = splitPresetIndices(preview);
     const names = visemes.map((preset) => preview.expressionPresetNames[preset]);
@@ -159,15 +159,11 @@ describe('口形プリセット（アセットに焼いてある）', () => {
     expect(e.spread).toBeLessThan(i.spread);
   });
 
-  it('重みを立てると顔が動き、口形も表情と同じ加算変位として当たる', () => {
+  it('重みを立てると顔が動き、口形も表情と同じ係数の行として当たる', () => {
     const preview = loadPreview();
-    const rest = new Float64Array(preview.vertexCount * 3);
-    const moved = Float64Array.from(rest);
-    addExpression(preview, moved, weightsFor(preview, [['viseme_a', 1]]));
+    const moved = presetDisplacement(preview, 'viseme_a');
     let maximum = 0;
-    for (let index = 0; index < moved.length; index++) {
-      maximum = Math.max(maximum, Math.abs(moved[index] - rest[index]));
-    }
+    for (const value of moved) maximum = Math.max(maximum, Math.abs(value));
     // 表情プリセットと同じ桁（weight 1.0 で数 mm 〜 3cm）。
     expect(maximum).toBeGreaterThan(0.002);
     expect(maximum).toBeLessThan(0.03);

@@ -49,11 +49,12 @@ import {
   HOLD_SECONDS,
   IDLE_PLAYBACK,
   addExpression,
+  addPresetCoefficients,
   advanceBlink,
   advancePlayback,
-  blendBlink,
-  eyeExpressionMask,
+  blendBlinkCoefficients,
   startBlink,
+  zeroCoefficients,
 } from '../domain/preview/expression';
 import { splitPresetIndices } from '../domain/preview/viseme';
 import {
@@ -316,18 +317,25 @@ export class Viewer {
   private appliedWeights: Float64Array | null = null;
   private manualWeights: Float64Array | null = null;
   /**
+   * 今フレームの表情係数（383 成分）。プリセットの重みもまばたきもここへ畳んでから頂点へ当てる。
+   *
+   * **表情の行き先はこの 1 本だけ。** プリセット・口形・トラッキング・まばたきが別々の経路で
+   * 頂点を触ると、どれが効いているのか追えなくなる（旧実装はまばたきだけ頂点の側で混ぜていた）。
+   */
+  private expressionCoefficients: Float64Array | null = null;
+  /** 前のフレームで当てた係数（変わったかの判定用）。 */
+  private appliedCoefficients: Float64Array | null = null;
+  /** `addExpression` が使う作業領域（係数 × スケールを畳む）。 */
+  private basisScratch: Float64Array | null = null;
+  /**
    * 自動再生が回すプリセットの index。
    *
    * **口形を混ぜない。** アセットは表情と口形を 1 本の並びで持つので、`presetCount` をそのまま回すと
    * 「表情の自動再生」が口を あ にする。分けるのは名前（`domain/preview/viseme`）。
    */
   private expressionIndices: readonly number[] = [];
-  /** まばたきが動かす頂点（クロスフェードをこの範囲へ閉じる）。 */
-  private eyeMask: Uint8Array | null = null;
   /** 今フレームのまばたき量。0（開眼）〜1（閉眼）。 */
   private blinkAmount = 0;
-  /** 前のフレームで当てたまばたき量（変わったかの判定用）。 */
-  private appliedBlinkAmount = 0;
 
   private hidden = new Set<string>();
   /** テクスチャを**外している**層。`hidden` と同じ「除外集合」の持ち方に揃える。 */
@@ -439,9 +447,10 @@ export class Viewer {
     this.appliedWeights = new Float64Array(animation.preview.presetCount);
     this.manualWeights = new Float64Array(animation.preview.presetCount);
     this.expressionIndices = splitPresetIndices(animation.preview).expressions;
-    this.eyeMask = eyeExpressionMask(animation.preview);
+    this.expressionCoefficients = zeroCoefficients(animation.preview);
+    this.appliedCoefficients = zeroCoefficients(animation.preview);
+    this.basisScratch = zeroCoefficients(animation.preview);
     this.blinkAmount = 0;
-    this.appliedBlinkAmount = 0;
     this.hidden = new Set();
     this.untextured = new Set();
     this.playback = IDLE_PLAYBACK;
@@ -754,15 +763,8 @@ export class Viewer {
     weights.fill(0);
     if (this.expressionOverride !== null) {
       this.currentExpression = this.expressionOverride(weights, deltaSeconds);
-      for (let preset = 0; preset < weights.length; preset++) {
-        weights[preset] *= this.expressionIntensity;
-      }
     } else if (this.playMode === 'off') {
-      if (this.manualWeights !== null) {
-        for (let preset = 0; preset < weights.length; preset++) {
-          weights[preset] = this.manualWeights[preset] * this.expressionIntensity;
-        }
-      }
+      if (this.manualWeights !== null) weights.set(this.manualWeights);
       this.currentExpression = null;
     } else {
       // 自動再生中は手のスライダーを無視する。
@@ -780,7 +782,7 @@ export class Viewer {
       this.playback = step.playback;
       if (step.index >= 0) {
         const preset = this.expressionIndices[step.index];
-        weights[preset] = step.weight * this.expressionIntensity;
+        weights[preset] = step.weight;
         this.currentExpression = preview.expressionPresetNames[preset];
       }
     }
@@ -795,19 +797,28 @@ export class Viewer {
       this.blinkAmount = 0;
     }
 
-    if (this.blinkAmount !== this.appliedBlinkAmount) this.poseDirty = true;
-    if (this.appliedWeights !== null) {
-      for (let preset = 0; preset < weights.length; preset++) {
-        if (weights[preset] !== this.appliedWeights[preset]) {
-          this.poseDirty = true;
-          break;
-        }
+    // プリセットの重み → 383 成分の係数。強さはここで 1 回だけ掛ける。
+    const coefficients = this.expressionCoefficients;
+    if (coefficients === null || this.appliedCoefficients === null) return;
+    coefficients.fill(0);
+    addPresetCoefficients(preview, coefficients, weights);
+    if (this.expressionIntensity !== 1) {
+      for (let component = 0; component < coefficients.length; component++) {
+        coefficients[component] *= this.expressionIntensity;
+      }
+    }
+    // まばたきは**加算ではなく目の成分の置き換え**。係数の側で混ぜるので、以降は係数 1 本で足りる。
+    blendBlinkCoefficients(preview, coefficients, this.blinkAmount);
+
+    for (let component = 0; component < coefficients.length; component++) {
+      if (coefficients[component] !== this.appliedCoefficients[component]) {
+        this.poseDirty = true;
+        break;
       }
     }
     if (!this.poseDirty) return;
     this.poseDirty = false;
-    this.appliedWeights?.set(weights);
-    this.appliedBlinkAmount = this.blinkAmount;
+    this.appliedCoefficients.set(coefficients);
     this.updateGeometry();
   }
 
@@ -826,15 +837,12 @@ export class Viewer {
     }
     const preview = this.animation.preview;
     this.workingVertices.set(this.animation.restVertices);
-    addExpression(preview, this.workingVertices, this.expressionWeights);
-    // まばたきは**加算ではなく目領域の置き換え**。表情を当てた後に掛ける。
-    if (this.eyeMask !== null) {
-      blendBlink(
+    if (this.expressionCoefficients !== null) {
+      addExpression(
         preview,
         this.workingVertices,
-        this.animation.restVertices,
-        this.blinkAmount,
-        this.eyeMask,
+        this.expressionCoefficients,
+        this.basisScratch ?? undefined,
       );
     }
 
@@ -1049,6 +1057,8 @@ export class Viewer {
     this.appliedWeights = null;
     this.manualWeights = null;
     this.expressionIndices = [];
-    this.eyeMask = null;
+    this.expressionCoefficients = null;
+    this.appliedCoefficients = null;
+    this.basisScratch = null;
   }
 }

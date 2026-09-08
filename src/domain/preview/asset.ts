@@ -35,20 +35,23 @@ export interface GnmPreviewAsset {
    * （`viseme_*`）を後ろから連結したもの。**表情と口形はこの名前で切り分ける**（`preview/viseme`）。
    */
   readonly expressionPresetNames: readonly string[];
-  /** (プリセット数, 頂点数, 3) の int16。値 = q * scale / 32767 メートル。 */
-  readonly expressionPresetBasisQ: Int16Array;
-  /** プリセットごとの量子化スケール。 */
-  readonly expressionPresetScales: Float64Array;
   /**
-   * (頂点数, 3) まばたきの変位（int16）。値 = q * `blinkScale` / 32767 メートル。
+   * (プリセット数, 成分数) プリセットを表す**係数の行**。
    *
-   * **表情プリセットの 1 本として持たない。** まばたきは他の表情へ加算するのではなく、目領域だけ
+   * **変位に潰して持たない。** プリセットは元から「383 成分の係数の並び」で、潰すと GNM 本来の
+   * 「基底 × 係数」という形が web の中だけで消える。係数のままなら Unity へそのまま持って行ける。
+   */
+  readonly expressionPresetCoefficients: Float32Array;
+  /**
+   * (成分数,) まばたきの係数（`wink_left` + `wink_right` を目の成分だけ残したもの）。
+   *
+   * **表情プリセットの 1 本として持たない。** まばたきは他の表情へ加算するのではなく、目の成分を
    * 置き換える（正本は旧 web 版 `gnmHeadMesh` のクロスフェード）。
    */
-  readonly blinkBasisQ: Int16Array;
-  readonly blinkScale: number;
-  /** まばたきが動かす頂点の vertex group 名（クロスフェードをこの範囲へ閉じる）。 */
-  readonly eyeExpressionGroups: readonly string[];
+  readonly blinkCoefficients: Float32Array;
+  /** まばたきが置き換える成分の区間（= 目領域の成分）。 */
+  readonly blinkComponentOffset: number;
+  readonly blinkComponentCount: number;
   /** 公式 npz の `expression_names`（383 本）。並びは領域ごとに連続。 */
   readonly expressionComponentNames: readonly string[];
   /** 成分ごとの量子化スケール。値 = q * scale / 32767 メートル。 */
@@ -57,11 +60,13 @@ export interface GnmPreviewAsset {
   readonly expressionBasisRegions: readonly ExpressionBasisRegion[];
   /** 領域ブロックを連結した split 空間の頂点 index。 */
   readonly expressionBasisVertices: Int32Array;
-  /** 領域ブロックを連結した int16。領域 r は (成分数, 頂点数, 3) の順。 */
+  /** 領域ブロックを連結した int16。領域ごとに **(頂点数, 成分数, 3)** の順。 */
   readonly expressionBasisQ: Int16Array;
   readonly vertexCount: number;
   readonly jointCount: number;
   readonly presetCount: number;
+  /** 表情基底の成分数（383）。 */
+  readonly componentCount: number;
 }
 
 /**
@@ -104,19 +109,19 @@ export function expressionBasisValue(
   if (local < 0 || local >= region.componentCount) {
     throw new Error(`成分 ${component} は領域 ${region.name} の外`);
   }
-  const base = region.quantizedOffset + (local * region.vertexCount + slot) * 3 + axis;
+  const base = region.quantizedOffset + (slot * region.componentCount + local) * 3 + axis;
   return (preview.expressionBasisQ[base] * preview.expressionBasisScales[component]) / 32767;
 }
 
-/** 表情プリセットの変位（メートル）。 */
-export function presetDisplacement(
-  preview: GnmPreviewAsset,
-  preset: number,
-  vertex: number,
-  axis: number,
-): number {
-  const base = (preset * preview.vertexCount + vertex) * 3 + axis;
-  return (preview.expressionPresetBasisQ[base] * preview.expressionPresetScales[preset]) / 32767;
+/** プリセット 1 本の係数の行（長さ `componentCount`）。 */
+export function presetRow(preview: GnmPreviewAsset, preset: number): Float64Array {
+  if (preset < 0 || preset >= preview.presetCount) {
+    throw new Error(`プリセット ${preset} は範囲外（0〜${preview.presetCount - 1}）`);
+  }
+  const base = preset * preview.componentCount;
+  return Float64Array.from(
+    preview.expressionPresetCoefficients.subarray(base, base + preview.componentCount),
+  );
 }
 
 /**

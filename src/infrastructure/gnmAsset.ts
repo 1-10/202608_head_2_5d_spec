@@ -228,12 +228,6 @@ function parsePreview(
     );
   }
   const expressionPresetNames = requireStringArray(header, 'expression_preset_names');
-  const expressionPresetScales = Float64Array.from(
-    requireNumberArray(header, 'expression_preset_scales'),
-  );
-  if (expressionPresetScales.length !== expressionPresetNames.length) {
-    throw new Error('expression_preset_scales と expression_preset_names の数が合わない');
-  }
 
   const vertexGroups = requireArray(container, 'vertexGroups', Uint8Array);
   const jointParentIndices = requireArray(container, 'jointParentIndices', Int32Array);
@@ -254,13 +248,32 @@ function parsePreview(
   );
   const expressionBasisVertices = requireArray(container, 'expressionBasisVertices', Int32Array);
   const expressionBasisQ = requireArray(container, 'expressionBasisQ', Int16Array);
-  const expressionPresetBasisQ = requireArray(container, 'expressionPresetBasisQ', Int16Array);
-  const blinkBasisQ = requireArray(container, 'blinkBasisQ', Int16Array);
-  const blinkScale = requireNumber(header, 'blink_scale');
-  const eyeExpressionGroups = requireStringArray(header, 'eye_expression_groups');
-  for (const name of eyeExpressionGroups) {
-    if (!vertexGroupNames.includes(name)) {
-      throw new Error(`eye_expression_groups の '${name}' が vertex_group_names に無い`);
+  const expressionPresetCoefficients = requireArray(
+    container,
+    'expressionPresetCoefficients',
+    Float32Array,
+  );
+  const blinkCoefficients = requireArray(container, 'blinkCoefficients', Float32Array);
+  const blinkComponentOffset = requireNumber(header, 'blink_component_offset');
+  const blinkComponentCount = requireNumber(header, 'blink_component_count');
+  const componentCount = expressionComponentNames.length;
+  if (blinkComponentOffset < 0 || blinkComponentOffset + blinkComponentCount > componentCount) {
+    throw new Error(
+      `まばたきが置き換える区間 ${blinkComponentOffset}〜` +
+        `${blinkComponentOffset + blinkComponentCount} が成分数 ${componentCount} を超えている`,
+    );
+  }
+  // **区間の外に係数が残っていないこと。** 残っていると「目の成分だけ置き換える」という設計が
+  // 破れていて、口や舌がまばたきで動く。
+  for (let component = 0; component < componentCount; component++) {
+    const inside =
+      component >= blinkComponentOffset &&
+      component < blinkComponentOffset + blinkComponentCount;
+    if (!inside && blinkCoefficients[component] !== 0) {
+      throw new Error(
+        `まばたきの係数が置き換え区間の外（成分 ${component} =` +
+          ` ${blinkCoefficients[component]}）に出ている`,
+      );
     }
   }
 
@@ -273,8 +286,12 @@ function parsePreview(
     ['jointIdentityBasis', jointIdentityBasis.length, identityComponentCount * jointCount * 3],
     ['skinJointIndices', skinJointIndices.length, vertexCount * 2],
     ['skinJointWeights', skinJointWeights.length, vertexCount * 2],
-    ['expressionPresetBasisQ', expressionPresetBasisQ.length, presetCount * vertexCount * 3],
-    ['blinkBasisQ', blinkBasisQ.length, vertexCount * 3],
+    [
+      'expressionPresetCoefficients',
+      expressionPresetCoefficients.length,
+      presetCount * componentCount,
+    ],
+    ['blinkCoefficients', blinkCoefficients.length, componentCount],
     [
       'expressionBasisVertices',
       expressionBasisVertices.length,
@@ -319,11 +336,10 @@ function parsePreview(
     skinJointIndices,
     skinJointWeights,
     expressionPresetNames,
-    expressionPresetBasisQ,
-    expressionPresetScales,
-    blinkBasisQ,
-    blinkScale,
-    eyeExpressionGroups,
+    expressionPresetCoefficients,
+    blinkCoefficients,
+    blinkComponentOffset,
+    blinkComponentCount,
     expressionComponentNames,
     expressionBasisScales,
     expressionBasisRegions,
@@ -332,6 +348,7 @@ function parsePreview(
     vertexCount,
     jointCount,
     presetCount,
+    componentCount,
   };
 }
 
