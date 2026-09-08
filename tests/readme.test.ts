@@ -26,6 +26,12 @@ import {
 } from '../src/domain/preview/pose';
 import { FADE_SECONDS, HOLD_SECONDS } from '../src/domain/preview/expression';
 import {
+  DEFAULT_FOV_DEGREES,
+  DEFAULT_ORBIT_RADIUS_METERS,
+  TARGET_HEIGHT_METERS,
+  cameraPoseAt,
+} from '../src/domain/preview/camera';
+import {
   BLINK_TIME_CONSTANT_SECONDS,
   CATEGORY_DEADBAND,
   EXPRESSION_TIME_CONSTANT_SECONDS,
@@ -37,11 +43,8 @@ import {
   AMBIENT_LIGHT,
   DEFAULT_AMBIENT_COLOR,
   DEFAULT_BACKGROUND,
-  DEFAULT_DISTANCE_METERS,
-  DEFAULT_FOV_DEGREES,
   DEFAULT_LIGHT_COLOR,
   DEFAULT_LIGHT_INTENSITY,
-  TARGET_HEIGHT_METERS,
 } from '../src/presentation/viewer';
 
 const README = readFileSync(resolve(__dirname, '..', 'README.md'), 'utf-8');
@@ -85,7 +88,7 @@ describe('README の調整パラメータの表', () => {
 describe('README の 3D ビューの表', () => {
   it('カメラ（Unity 側 MainCamera の写し）', () => {
     expect(README).toContain(
-      `| 投影 | 透視 FOV ${DEFAULT_FOV_DEGREES}° / 距離 ${DEFAULT_DISTANCE_METERS}m |`,
+      `| 投影 | 透視 FOV ${DEFAULT_FOV_DEGREES}° / 距離 ${DEFAULT_ORBIT_RADIUS_METERS}m |`,
     );
     expect(README).toContain(`| 背景 | \`${DEFAULT_BACKGROUND}\` |`);
   });
@@ -101,6 +104,14 @@ describe('README の 3D ビューの表', () => {
     expect(README).toContain(
       `| 注視点 | **頭部の外接箱の中心**（あちらは眼の高さ y=${TARGET_HEIGHT_METERS}m 固定） |`,
     );
+  });
+
+  // カメラの既定の姿勢も Unity 側 `MainCamera` の写しなので、README の数はコードから作る。
+  // **回転の 180° はこの検査に入れない** — あちらの値の写しではなく「Unity のカメラは +Z を、
+  // three.js のカメラは -Z を見る」という構造の差なので、あちらが動いても変わらない。
+  it('カメラの既定の姿勢（Unity 側 MainCamera の写し）', () => {
+    const pose = cameraPoseAt([0, TARGET_HEIGHT_METERS, 0]);
+    expect(README).toContain(`位置 (0, ${pose.position[1]}, ${pose.position[2]}) / 回転 (0, 0)`);
   });
 
   it('領域の並び（先勝ちなので順序そのものが仕様）', () => {

@@ -7,6 +7,7 @@
 // | | 値 | 正本 |
 // |:--|:--|:--|
 // | 投影 | 透視 FOV 20° / 距離 1.3m / 注視点 y=0.297m | `Scenes/Viewer.unity` の `MainCamera` |
+// | カメラの姿勢 | 位置 + pitch/yaw の**フリーカメラ**（`domain/preview/camera`） | 既定の姿勢だけが同カメラの写し |
 // | 光 | 平行光 1 灯 + 環境光 | 同 `DirectionalLight` |
 // | 背景 | `#26292e` | 同 `MainCamera` の `m_BackGroundColor` |
 // | 法線 | 写真を貼る領域は **+Z 固定**、口腔内は**実法線** | `GnmHeadInstance.FlattenNormals` |
@@ -24,7 +25,12 @@
 // 移す変換は要らない（`normalMatrix` を掛けると光が画面に貼り付いて、周回しても陰影が動かなくなる）。
 //
 // 旧 web 版から残したもの: 首と視線のドラッグ操作（0.25°/px）・自動まばたき・ワイヤーフレーム・
-// 背景色・FOV と距離の調整。Unity 側に無いが、写真 1 枚から起こした頭を確認するのに効く。
+// 背景色・FOV の調整。Unity 側に無いが、写真 1 枚から起こした頭を確認するのに効く。
+//
+// **カメラはフリーカメラ。** 位置と回転（pitch / yaw）が状態で、周回の中心は毎フレーム導出する
+// （`domain/preview/camera`）。ここが持つのはその姿勢とドラッグ・ホイールの割り当てだけで、
+// 計算は全部あちら側。**同じことを 2 通りで持たない** — 「拡大率」も「注視点からの距離」も
+// 周回半径へ畳んである。
 //
 // 不透明を先に、半透明を後に描く。半透明は深度を読むが書かず、重なりは**三角形を奥→手前に並べ替えて**
 // 色を決める（深度書き込みを止めて描くので、描く順がそのまま色になる）。
@@ -50,6 +56,23 @@ import {
   startBlink,
 } from '../domain/preview/expression';
 import { splitPresetIndices } from '../domain/preview/viseme';
+import {
+  CameraPose,
+  DEFAULT_FOV_DEGREES,
+  MAXIMUM_FOV_DEGREES,
+  MINIMUM_FOV_DEGREES,
+  ORBIT_DEGREES_PER_PIXEL,
+  TARGET_HEIGHT_METERS,
+  Vector3,
+  ZOOM_PIXELS_PER_E,
+  cameraPoseAt,
+  lookAt,
+  moveInView,
+  orbitBy,
+  scaleOrbitRadius,
+  viewHalfHeightMeters,
+  withTransform,
+} from '../domain/preview/camera';
 import {
   DEGREES_PER_PIXEL,
   HeadPose,
@@ -80,31 +103,9 @@ import {
   sceneLayerNames,
 } from '../domain/preview/scene';
 
-/** 画角（度）。正本は Unity 側 `MainCamera` の `field of view`。 */
-export const DEFAULT_FOV_DEGREES = 20;
-export const MINIMUM_FOV_DEGREES = 10;
-export const MAXIMUM_FOV_DEGREES = 60;
-
-/** 注視点からの距離（メートル）。正本は同カメラの z。 */
-export const DEFAULT_DISTANCE_METERS = 1.3;
-export const MINIMUM_DISTANCE_METERS = 0.35;
-export const MAXIMUM_DISTANCE_METERS = 3;
-
-/**
- * 注視点の高さ（メートル）。シーンが無いときの既定。
- *
- * Unity 側 `MainCamera` の y（GNM の眼の高さ）。**シーンがあるときは頭部の外接箱の中心を使う** —
- * あちらのカメラは体に載せた状態で使う前提のリグで、頭だけを見るこちらでは頭が枠の中心へ来る方が
- * 確認しやすい（旧 web 版も頭の中心を見ていた）。判断は `domain/preview/scene.previewTarget`。
- */
-export const TARGET_HEIGHT_METERS = 0.297;
-
-/** near / far。正本は同カメラ。 */
+/** near / far。正本は Unity 側 `MainCamera`。 */
 const NEAR_PLANE = 0.01;
 const FAR_PLANE = 20;
-
-export const MAXIMUM_ZOOM = 5.0;
-export const MINIMUM_ZOOM = 0.3;
 
 /**
  * 環境光の量（既定）。
@@ -144,12 +145,6 @@ export const LIGHT_DIRECTION: readonly [number, number, number] = [-0.2802, 0.57
 /** 背景色。正本は Unity 側 `MainCamera` の `m_BackGroundColor`。 */
 export const DEFAULT_BACKGROUND = '#26292e';
 
-/** カメラ周回のドラッグ 1 画素あたりの回転（ラジアン）。 */
-const RADIANS_PER_PIXEL = 0.01;
-
-/** 周回の pitch の上限（ラジアン）。真上・真下を越えて回さない。 */
-const ORBIT_PITCH_LIMIT = 1.45;
-
 /** 髪の裾を描かない閾値。正本は `MT_GnmHairTransparent` の `_Cutoff`。 */
 const HAIR_ALPHA_CUTOFF = 0.3;
 
@@ -185,7 +180,7 @@ export const TEXTURE_KEYS: Readonly<Record<string, string>> = {
 /** 全部のテクスチャをまとめて切り替えるキー。 */
 export const ALL_TEXTURES_KEY = 'KeyT';
 
-/** 正面・等倍・無表情に戻すキー。 */
+/** 正面・既定の距離・無表情に戻すキー。 */
 export const RESET_KEY = 'KeyR';
 
 /** ワイヤーフレームを切り替えるキー。 */
@@ -379,13 +374,14 @@ export class Viewer {
   /** 同じ数を何度も console へ出さないための直近値。 */
   private reportedUndeterminedNormals = 0;
 
-  /** カメラ周回の角度（ラジアン）。頭の向き（`headPose`）とは別。 */
-  orbitYaw = 0;
-  orbitPitch = 0;
-  zoom = 1;
-  pan: [number, number] = [0, 0];
+  /**
+   * カメラの姿勢（位置 + pitch/yaw + 周回半径）。頭の向き（`headPose`）とは別。
+   *
+   * **ここが正本。** パネルに出る位置と回転はこれの写しで、ドラッグ・ホイール・入力のどれで
+   * 動いても `onViewChanged` 経由で合わせ直す。
+   */
+  cameraPose: CameraPose = cameraPoseAt([0, TARGET_HEIGHT_METERS, 0]);
   fovDegrees = DEFAULT_FOV_DEGREES;
-  distanceMeters = DEFAULT_DISTANCE_METERS;
 
   /** 平行光の色（CSS の色表記）。既定は Unity 側 `DirectionalLight` の `m_Color`。 */
   lightColor = DEFAULT_LIGHT_COLOR;
@@ -608,14 +604,21 @@ export class Viewer {
     this.applyLighting();
   }
 
-  /** 正面・等倍・無表情に戻す。 */
-  resetView(): void {
-    this.orbitYaw = 0;
-    this.orbitPitch = 0;
-    this.zoom = 1;
-    this.pan = [0, 0];
+  /**
+   * カメラだけを既定へ戻す（位置・回転・周回半径・画角）。
+   *
+   * **光も首も表情も触らない。** 打ち込んだ transform を戻したいだけのときに、他の調整まで巻き
+   * 添えにしない。全部戻すのは `resetView`（`R`）。
+   */
+  resetCamera(): void {
+    this.cameraPose = cameraPoseAt(this.target);
     this.fovDegrees = DEFAULT_FOV_DEGREES;
-    this.distanceMeters = DEFAULT_DISTANCE_METERS;
+    this.onViewChanged?.();
+  }
+
+  /** 正面・既定の距離・無表情に戻す。 */
+  resetView(): void {
+    this.resetCamera();
     this.lightColor = DEFAULT_LIGHT_COLOR;
     this.lightIntensity = DEFAULT_LIGHT_INTENSITY;
     this.ambientColor = DEFAULT_AMBIENT_COLOR;
@@ -631,6 +634,21 @@ export class Viewer {
     this.playback = IDLE_PLAYBACK;
     this.currentExpression = null;
     this.poseDirty = true;
+    this.onViewChanged?.();
+  }
+
+  /**
+   * カメラの位置と回転を指定する（パネルの入力）。
+   *
+   * 周回半径は据え置く — 半径はパネルに出ない値で、ホイールと「注視点を見る」だけが変える。
+   */
+  setCameraTransform(position: Vector3, pitchDegrees: number, yawDegrees: number): void {
+    this.cameraPose = withTransform(this.cameraPose, position, pitchDegrees, yawDegrees);
+  }
+
+  /** 位置はそのままで注視点（頭部の中心）を向き直す。手で回して枠から外したときに戻る口。 */
+  lookAtTarget(): void {
+    this.cameraPose = lookAt(this.cameraPose, this.target);
     this.onViewChanged?.();
   }
 
@@ -929,29 +947,26 @@ export class Viewer {
     }
   }
 
-  /** 注視点のまわりを周回するカメラを置く。 */
+  /**
+   * 姿勢をそのまま three.js のカメラへ写す。
+   *
+   * `lookAt` は使わない — 向きは pitch / yaw が決めているので、注視点から作り直す理由が無い
+   * （旧実装は注視点を経由していたが、pan が注視点と位置を同じだけ動かすので結果は同じだった）。
+   */
   private placeCamera(): void {
     this.camera.fov = Math.min(
       MAXIMUM_FOV_DEGREES,
       Math.max(MINIMUM_FOV_DEGREES, this.fovDegrees),
     );
     this.camera.updateProjectionMatrix();
-    const distance =
-      Math.min(MAXIMUM_DISTANCE_METERS, Math.max(MINIMUM_DISTANCE_METERS, this.distanceMeters)) /
-      this.zoom;
-    const rotation = new THREE.Euler(this.orbitPitch, this.orbitYaw, 0, 'YXZ');
-    const right = new THREE.Vector3(1, 0, 0).applyEuler(rotation);
-    const up = new THREE.Vector3(0, 1, 0).applyEuler(rotation);
-    const forward = new THREE.Vector3(0, 0, 1).applyEuler(rotation);
-    // pan は画面内の平行移動。拡大したまま端を見るのに要る（拡大は中心のまま効くので、平行移動が
-    // 無いと目・口の端が枠外に出て検査できない）。
-    const halfHeight = distance * Math.tan((this.camera.fov * Math.PI) / 360);
-    const target = new THREE.Vector3(...this.target);
-    target.addScaledVector(right, -this.pan[0] * halfHeight * this.camera.aspect);
-    target.addScaledVector(up, -this.pan[1] * halfHeight);
-    this.camera.position.copy(target).addScaledVector(forward, distance);
-    this.camera.up.copy(up);
-    this.camera.lookAt(target);
+    const { position, pitchDegrees, yawDegrees } = this.cameraPose;
+    this.camera.position.set(position[0], position[1], position[2]);
+    this.camera.rotation.set(
+      (pitchDegrees * Math.PI) / 180,
+      (yawDegrees * Math.PI) / 180,
+      0,
+      'YXZ',
+    );
     this.camera.updateMatrixWorld();
   }
 
@@ -1010,10 +1025,10 @@ export class Viewer {
       lastX = event.clientX;
       lastY = event.clientY;
       if (dragging === 'orbit') {
-        this.orbitYaw += deltaX * RADIANS_PER_PIXEL;
-        this.orbitPitch = Math.min(
-          ORBIT_PITCH_LIMIT,
-          Math.max(-ORBIT_PITCH_LIMIT, this.orbitPitch + deltaY * RADIANS_PER_PIXEL),
+        this.cameraPose = orbitBy(
+          this.cameraPose,
+          deltaX * ORBIT_DEGREES_PER_PIXEL,
+          deltaY * ORBIT_DEGREES_PER_PIXEL,
         );
       } else if (dragging === 'head') {
         this.setHeadPose({
@@ -1024,10 +1039,17 @@ export class Viewer {
           gazePitchDegrees: this.headPose.gazePitchDegrees,
         });
       } else {
-        this.pan = [
-          this.pan[0] + (2 * deltaX) / Math.max(this.container.clientWidth, 1),
-          this.pan[1] - (2 * deltaY) / Math.max(this.container.clientHeight, 1),
-        ];
+        // 画面内の平行移動。拡大したまま端を見るのに要る（周回も拡大も中心のまま効くので、
+        // 平行移動が無いと目・口の端が枠外に出て検査できない）。掴んだ点が指に付いてくるよう、
+        // 1 画素を「周回の中心の面での 1 画素ぶんの長さ」へ直して動かす。
+        const metersPerPixel =
+          (2 * viewHalfHeightMeters(this.cameraPose, this.camera.fov)) /
+          Math.max(this.container.clientHeight, 1);
+        this.cameraPose = moveInView(
+          this.cameraPose,
+          -deltaX * metersPerPixel,
+          deltaY * metersPerPixel,
+        );
       }
       this.onViewChanged?.();
     });
@@ -1046,9 +1068,12 @@ export class Viewer {
       'wheel',
       (event) => {
         event.preventDefault();
-        // ホイール 1 ノッチ = 120 なので、デスクトップ側と同じ `exp(delta / 1200)`。
-        const factor = Math.exp(-event.deltaY / 1200);
-        this.zoom = Math.min(MAXIMUM_ZOOM, Math.max(MINIMUM_ZOOM, this.zoom * factor));
+        // ホイール 1 ノッチ = 120 なので、デスクトップ側と同じ `exp(delta / 1200)`。手前へ回すと
+        // （deltaY < 0）半径が縮んで寄る。
+        this.cameraPose = scaleOrbitRadius(
+          this.cameraPose,
+          Math.exp(event.deltaY / ZOOM_PIXELS_PER_E),
+        );
         this.onViewChanged?.();
       },
       { passive: false },
