@@ -167,6 +167,19 @@ export class WebcamPanel {
     this.refresh();
   }
 
+  /**
+   * 表情の駆動だけを手放す（**カメラは止めない**）。
+   *
+   * 口形の連続再生など、別の駆動源が顔を取ったときに外から呼ぶ。**駆動源はひとつだけ**なので、
+   * 黙って上書きされると「トラッキング中」の表示だけが残って顔が動かない状態になる。カメラを
+   * 止めないのは、映像を見ながら口形を確かめたい場合があるから。
+   */
+  stopDriving(): void {
+    if (this.mode === 'off') return;
+    this.releaseDriver('off');
+    this.refresh();
+  }
+
   /** Reset で呼ぶ。カメラも収録も捨てる。 */
   reset(): void {
     this.releaseDriver('off');

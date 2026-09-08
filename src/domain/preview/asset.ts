@@ -30,7 +30,10 @@ export interface GnmPreviewAsset {
   readonly skinJointIndices: Uint8Array;
   /** (頂点数, 2) 重み。和は 1。 */
   readonly skinJointWeights: Float32Array;
-  /** Unity 側 `Tools/GnmExpressionPresets_v3_0.npz` の `class_names`。 */
+  /**
+   * Unity 側 `Tools/GnmExpressionPresets_v3_0.npz` の `class_names` に、web 側で足した口形
+   * （`viseme_*`）を後ろから連結したもの。**表情と口形はこの名前で切り分ける**（`preview/viseme`）。
+   */
   readonly expressionPresetNames: readonly string[];
   /** (プリセット数, 頂点数, 3) の int16。値 = q * scale / 32767 メートル。 */
   readonly expressionPresetBasisQ: Int16Array;

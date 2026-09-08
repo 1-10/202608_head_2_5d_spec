@@ -15,7 +15,9 @@ import {
   MINIMUM_IDENTITY_CLIP,
   TEXTURE_SIZE_CHOICES,
 } from '../src/application/settings';
+import { loadPreview } from './asset';
 import { PREVIEW_REGIONS } from '../src/domain/preview/asset';
+import { splitPresetIndices } from '../src/domain/preview/viseme';
 import {
   GAZE_LIMIT_DEGREES,
   NECK_SHARE,
@@ -127,6 +129,17 @@ describe('README の 3D ビューの表', () => {
     );
     expect(README).toContain(
       `立ち上がり ${FADE_SECONDS}s / 保持 ${HOLD_SECONDS}s |`,
+    );
+  });
+
+  // 口形の本数は `tools/viseme_presets.json` が決めてアセットへ焼かれる。README はそれの写しなので、
+  // 焼く本数を変えたらここが落ちる（口形の中身そのものの検査は `tests/viseme.test.ts`）。
+  it('口形の本数（アセットの写し）', () => {
+    const preview = loadPreview();
+    const { expressions, visemes } = splitPresetIndices(preview);
+    expect(README).toContain(`| 口形 | あいうえおの ${visemes.length} プリセット`);
+    expect(README).toContain(
+      `（アセットは ${expressions.length} + ${visemes.length} = ${preview.presetCount} 本になる）`,
     );
   });
 });

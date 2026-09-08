@@ -25,7 +25,8 @@ import { InputManager } from './input';
 import { renderInspection } from './inspectionView';
 import { Viewer } from './viewer';
 import { ViewSettings } from './viewSettings';
-import { WebcamPanel } from './webcamPanel';
+import { VisemeDriver } from './visemeDriver';
+import { ExpressionDriver, WebcamPanel } from './webcamPanel';
 
 const elements = {
   buttonWebcam: requireElement<HTMLButtonElement>('btn-webcam'),
@@ -107,11 +108,16 @@ const panelState = createPanelState();
 const exporter = new Exporter();
 const inputManager = new InputManager(elements.video);
 const viewer = new Viewer(elements.viewport);
+// 口形の連続再生。手で立てるぶんは表情と同じ経路（`setManualExpression`）を通るので、ここが持つのは
+// 「時間で切り替える」ぶんだけ。
+const visemeDriver = new VisemeDriver();
 
 let photo: PhotoRgb | null = null;
 let outcome: ExportOutcome | null = null;
 let bundle: GnmAssetBundle | null = null;
 let busy = false;
+/** Webカメラが表情の駆動を握っているときの差し込み口（握っていなければ `null`）。 */
+let webcamDriver: ExpressionDriver | null = null;
 
 /**
  * Webカメラ（映像・写真の取り込み・表情トラッキング・録画・再生）。
@@ -122,8 +128,14 @@ let busy = false;
 const webcamPanel = new WebcamPanel(inputManager, createFaceExpressionTracker(), {
   presetNames: () => viewer.expressionNames(),
   setExpressionDriver: (driver) => {
-    viewer.expressionOverride = driver === null ? null : (weights, delta) => driver.expression(weights, delta);
-    viewer.blinkOverride = driver === null ? null : () => driver.blink();
+    webcamDriver = driver;
+    // カメラが顔を取ったら口形の連続再生は止める（**駆動源はひとつだけ**）。黙って無視すると、
+    // 再生ボタンが「停止」のまま口形が出ない状態になる。
+    if (driver !== null && visemeDriver.isPlaying) {
+      visemeDriver.stop();
+      gui.syncVisemePlayback(false);
+    }
+    applyExpressionDriver();
   },
   acceptPhoto: (next) => acceptPhoto(next),
   setStatus: (message, isError) => setStatus(message, isError),
@@ -157,6 +169,44 @@ function applyViewSettings(view: ViewSettings): void {
   viewer.holdSeconds = view.holdSeconds;
   viewer.expressionIntensity = view.expressionIntensity;
   viewer.blinkEnabled = view.blinkEnabled;
+  visemeDriver.apply(view);
+  applyExpressionDriver();
+}
+
+/**
+ * 表情とまばたきの駆動を誰が握るかを決める。**ここが唯一の決め所。**
+ *
+ * 駆動源は Webカメラ（トラッキングと録画の再生）と口形の連続再生の 2 つあり、**同時には動かない**。
+ * ビューアーの口（`expressionOverride` / `blinkOverride`）へ各々が勝手に差すと、あとから
+ * `applyViewSettings` が走っただけでカメラの駆動が黙って外れる（実際にそうなっていた）。
+ *
+ * 順は**カメラが先**。カメラは利用者が今まさに顔を映しているもので、口形の再生より意図が強い。
+ * ただし取り合いにはしない — カメラが取るときは口形を止め、口形を再生するときはカメラの駆動を
+ * 手放させる（どちらも後から押した方が勝つ）。
+ */
+function applyExpressionDriver(): void {
+  const driver = webcamDriver;
+  if (driver !== null) {
+    viewer.expressionOverride = (weights, delta) => driver.expression(weights, delta);
+    viewer.blinkOverride = () => driver.blink();
+    return;
+  }
+  // 連続再生していなければ `null`（顔を駆動するのは手のスライダーと表情の自動再生）。
+  viewer.expressionOverride = visemeDriver.frame;
+  viewer.blinkOverride = null;
+}
+
+/** 口形の連続再生を切り替え、ビューアーの駆動とボタンのラベルを合わせる。 */
+function toggleVisemePlayback(): void {
+  if (visemeDriver.isPlaying) {
+    visemeDriver.stop();
+  } else {
+    // カメラが顔を握っていれば手放させる（駆動源はひとつだけ）。
+    webcamPanel.stopDriving();
+    visemeDriver.play();
+  }
+  applyExpressionDriver();
+  gui.syncVisemePlayback(visemeDriver.isPlaying);
 }
 
 const gui: GuiHandle = setupGui(
@@ -169,8 +219,15 @@ const gui: GuiHandle = setupGui(
     onResetView: () => viewer.resetView(),
     onViewSettingsChanged: (view) => applyViewSettings(view),
     onExpressionChanged: (name, weight) => viewer.setManualExpression(name, weight),
+    onVisemePlayToggled: () => toggleVisemePlayback(),
   },
 );
+
+// ループ無しの連続再生は終端で自分から止まる。ボタンのラベルはそのときにも合わせ直す。
+visemeDriver.onFinished = (): void => {
+  applyExpressionDriver();
+  gui.syncVisemePlayback(visemeDriver.isPlaying);
+};
 
 viewer.onViewChanged = (): void => {
   updateViewReadout();
@@ -200,7 +257,10 @@ function setStatus(message: string, isError = false): void {
 function updateViewReadout(): void {
   const degrees = (radians: number): string => ((radians * 180) / Math.PI).toFixed(1);
   const pose = viewer.headPose;
-  const expression = viewer.currentExpression === null ? '' : ` / 表情 ${viewer.currentExpression}`;
+  // **駆動源の名前はそのまま出す。** 表情の自動再生はプリセット名（英字）を返し、口形の連続再生は
+  // 「口形 あ」と自分で名乗る。ここで「表情」と決め打ちすると、別の駆動源が差さったときに黙って
+  // 嘘のラベルになる。
+  const expression = viewer.currentExpression === null ? '' : ` / ${viewer.currentExpression}`;
   elements.viewReadout.textContent =
     `カメラ Yaw ${degrees(viewer.orbitYaw)}° / Pitch ${degrees(viewer.orbitPitch)}° /` +
     ` Zoom ${viewer.zoom.toFixed(2)}x` +
@@ -400,6 +460,7 @@ void exporter
   .loadAsset()
   .then((loaded) => {
     bundle = loaded;
+    visemeDriver.setPreview(loaded.preview);
     gui.setExpressionPresets(loaded.preview.expressionPresetNames);
     setStatus('写真を選んでください（写真を選ぶ / Webカメラ）。');
   })

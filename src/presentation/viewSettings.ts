@@ -13,6 +13,7 @@ import {
   HOLD_SECONDS,
 } from '../domain/preview/expression';
 import { NECK_SHARE } from '../domain/preview/pose';
+import { VISEME_FADE_SECONDS, VISEME_HOLD_SECONDS } from '../domain/preview/viseme';
 import {
   AMBIENT_LIGHT,
   DEFAULT_AMBIENT_COLOR,
@@ -29,6 +30,13 @@ export const MINIMUM_HOLD_SECONDS = 0;
 export const MAXIMUM_HOLD_SECONDS = 5;
 export const MINIMUM_EXPRESSION_INTENSITY = 0;
 export const MAXIMUM_EXPRESSION_INTENSITY = 2;
+
+// 口形の連続再生は 1 音ぶんが短いので、表情の 0〜2 秒 / 0〜5 秒とは範囲を分ける（同じ範囲だと
+// スライダーの端 1/10 でしか触れない）。
+export const MINIMUM_VISEME_FADE_SECONDS = 0;
+export const MAXIMUM_VISEME_FADE_SECONDS = 0.6;
+export const MINIMUM_VISEME_HOLD_SECONDS = 0;
+export const MAXIMUM_VISEME_HOLD_SECONDS = 0.6;
 
 /** 自動再生の選べる値（GUI のドロップダウンの並び）。 */
 export const PLAY_MODES: readonly ExpressionPlayMode[] = ['off', 'sequence', 'random'];
@@ -62,6 +70,16 @@ export interface ViewSettings {
   readonly holdSeconds: number;
   readonly expressionIntensity: number;
   readonly blinkEnabled: boolean;
+  // 口形は**焼いたプリセット 1 本**なので、手で立てる量は表情のスライダーと同じ入れ物
+  // （`PanelState.expressions`）に入る。ここに持つのは連続再生の速さとループだけ。
+  //
+  // **「今 連続再生しているか」もここに持たない。** それは値ではなく駆動源の状態で、正本は
+  // `VisemeDriver`（再生ボタンが押した / 終端で止まった、をあちらが知っている）。ビューの調整値
+  // として持つと、終端で止まったときに設定の側が古くなる。
+  readonly visemeFadeSeconds: number;
+  readonly visemeHoldSeconds: number;
+  /** 連続再生を お の次に あ へ戻すか。 */
+  readonly visemeLoop: boolean;
 }
 
 export const DEFAULT_VIEW_SETTINGS: ViewSettings = {
@@ -84,4 +102,7 @@ export const DEFAULT_VIEW_SETTINGS: ViewSettings = {
   holdSeconds: HOLD_SECONDS,
   expressionIntensity: 1,
   blinkEnabled: true,
+  visemeFadeSeconds: VISEME_FADE_SECONDS,
+  visemeHoldSeconds: VISEME_HOLD_SECONDS,
+  visemeLoop: true,
 };
