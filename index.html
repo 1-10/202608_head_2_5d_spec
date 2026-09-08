@@ -29,7 +29,6 @@
           <button id="btn-export" disabled>guest zip を書き出す</button>
           <button id="btn-inspection" aria-pressed="false">検査画像</button>
           <button id="btn-report" aria-pressed="false">内訳</button>
-          <span id="status-message" class="status-message"></span>
         </div>
       </header>
 
@@ -46,13 +45,14 @@
             </div>
             <div class="pane-canvas" id="canvas-head">
               <!--
-                **進行は 3D ビューの中に出す。** 処理の結果が出るのはここなので、ツールバーの
-                隅だけに出しても「どこで何が起きているか」が結び付かない。段の一覧は
-                `application/exportGuest` の `STAGE_NAMES` から作る（ここに写さない）。
+                **状態は 3D ビューの中央に出す。ここが唯一の置き場。** 処理の結果が出るのは
+                ここなので、ツールバーの隅に出しても「どこで何が起きているか」が結び付かない
+                （隅の表示はやめた）。進行の段の一覧は `application/exportGuest` の
+                `STAGE_NAMES` から作る（ここに写さない）。
               -->
-              <div id="viewport-progress" hidden>
-                <p class="progress-title" id="progress-title"></p>
-                <ol class="progress-stages" id="progress-stages"></ol>
+              <div id="viewport-status" hidden>
+                <p class="status-title" id="status-title"></p>
+                <ol class="status-stages" id="status-stages" hidden></ol>
               </div>
             </div>
           </section>

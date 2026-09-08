@@ -41,12 +41,11 @@ const elements = {
   buttonExport: requireElement<HTMLButtonElement>('btn-export'),
   fileInput: requireElement<HTMLInputElement>('file-input'),
   recordingInput: requireElement<HTMLInputElement>('recording-input'),
-  status: requireElement<HTMLElement>('status-message'),
+  statusBox: requireElement<HTMLElement>('viewport-status'),
+  statusTitle: requireElement<HTMLElement>('status-title'),
+  statusStages: requireElement<HTMLElement>('status-stages'),
   report: requireElement<HTMLElement>('report'),
   viewport: requireElement<HTMLElement>('canvas-head'),
-  progress: requireElement<HTMLElement>('viewport-progress'),
-  progressTitle: requireElement<HTMLElement>('progress-title'),
-  progressStages: requireElement<HTMLElement>('progress-stages'),
   viewReadout: requireElement<HTMLElement>('readout-view'),
   video: requireElement<HTMLVideoElement>('webcam-video'),
   guiExport: requireElement<HTMLElement>('gui-export'),
@@ -385,12 +384,15 @@ window.addEventListener('keydown', (event) => {
 });
 
 /**
- * 3D ビューの中の進行表示。
+ * 3D ビューの中央に出す状態表示。**置き場はここだけ。**
+ *
+ * 進行（段の一覧）・完了・失敗・案内を同じ箱が出す。ツールバーの隅にも出していたが、処理の結果が
+ * 出るのは 3D ビューなので、隅だけだと「どこで何が起きているか」が結び付かない — 2 か所へ出すのも
+ * やめた（同じことを 2 か所が言うと、片方だけ古くなる）。
  *
  * **段の一覧は `STAGE_NAMES` から作る。** ここへ書き写すと、段が増減したとき画面だけ古くなる。
- * 済んだ段・今の段・まだの段を `data-state` で示し、色は CSS が持つ。
  */
-const progress = {
+const status = {
   /** 段の `<li>`（一覧は 1 回だけ作る）。 */
   items: new Map<string, HTMLElement>(),
 
@@ -399,40 +401,53 @@ const progress = {
       const item = document.createElement('li');
       item.textContent = stage;
       item.dataset.state = 'todo';
-      elements.progressStages.appendChild(item);
-      progress.items.set(stage, item);
+      elements.statusStages.appendChild(item);
+      status.items.set(stage, item);
     }
   },
 
-  /** 今の段を出す。`null` で閉じる。 */
-  show(stage: string | null): void {
-    if (stage === null) {
-      elements.progress.hidden = true;
-      return;
-    }
-    elements.progress.hidden = false;
+  /** ひとこと出す。空文字で閉じる（段の一覧も隠す）。 */
+  message(text: string, isError = false): void {
+    elements.statusTitle.textContent = text;
+    elements.statusTitle.classList.toggle('error', isError);
+    elements.statusStages.hidden = true;
+    elements.statusBox.hidden = text === '';
+  },
+
+  /** 今の段を出す（段の一覧つき）。 */
+  stage(stage: string): void {
     const index = STAGE_NAMES.indexOf(stage);
-    elements.progressTitle.textContent =
-      index < 0
-        ? stage
-        : `${stage}（${index + 1} / ${STAGE_NAMES.length}）`;
-    for (const [name, item] of progress.items) {
+    elements.statusTitle.textContent =
+      index < 0 ? stage : `${stage}（${index + 1} / ${STAGE_NAMES.length}）`;
+    elements.statusTitle.classList.remove('error');
+    for (const [name, item] of status.items) {
       const at = STAGE_NAMES.indexOf(name);
       item.dataset.state = at < index ? 'done' : at === index ? 'active' : 'todo';
     }
+    elements.statusStages.hidden = false;
+    elements.statusBox.hidden = false;
   },
 
-  /** 次の書き出しのために全部「まだ」へ戻す。 */
+  /**
+   * 失敗を出す。**段の一覧は出したまま**にする — どこまで進んで落ちたかが画面に残る方が原因を
+   * 追える。
+   */
+  failure(text: string): void {
+    elements.statusTitle.textContent = text;
+    elements.statusTitle.classList.add('error');
+    elements.statusBox.hidden = false;
+  },
+
+  /** 段の一覧を「まだ」へ戻して閉じる。 */
   reset(): void {
-    for (const item of progress.items.values()) item.dataset.state = 'todo';
-    elements.progressTitle.textContent = '';
-    elements.progress.hidden = true;
+    for (const item of status.items.values()) item.dataset.state = 'todo';
+    status.message('');
   },
 };
 
+/** 状態表示への入口（Webカメラなど外からも使う）。 */
 function setStatus(message: string, isError = false): void {
-  elements.status.textContent = message;
-  elements.status.classList.toggle('error', isError);
+  status.message(message, isError);
 }
 
 function updateViewReadout(): void {
@@ -463,10 +478,9 @@ async function runExport(): Promise<void> {
   busy = true;
   updateButtons();
   try {
-    const result = await exporter.run(photo, toExportSettings(panelState), (stage) => {
-      setStatus(`段「${stage}」を実行しています…`);
-      progress.show(stage);
-    });
+    const result = await exporter.run(photo, toExportSettings(panelState), (stage) =>
+      status.stage(stage),
+    );
     outcome = result;
     if (bundle === null) throw new Error('アセットが読めていない');
     const source = result.previewSceneSource;
@@ -522,16 +536,13 @@ async function runExport(): Promise<void> {
     webcamPanel.refresh();
     renderInspection(elements.inspection, result.inspection);
     elements.report.textContent = buildReport(result);
-    progress.reset();
-    setStatus('');
+    status.reset();
   } catch (error) {
     console.error(error);
     const report = describeFailure(error);
     const stage = report.stage === null ? '' : `段「${report.stage}」で`;
     const remedy = report.remedy === null ? '' : `\n${report.remedy}`;
-    setStatus(`${stage}失敗しました（${report.errorType}）: ${report.cause}${remedy}`, true);
-    // **失敗した段を出したまま閉じる。** どこまで進んで落ちたかが画面に残る方が原因を追える。
-    elements.progressTitle.textContent = `失敗: ${report.cause}`;
+    status.failure(`${stage}失敗しました（${report.errorType}）: ${report.cause}${remedy}`);
     if (!isPipelineError(error)) console.warn('想定外の失敗（バグの可能性）', error);
   } finally {
     busy = false;
@@ -625,7 +636,7 @@ elements.buttonReset.addEventListener('click', () => {
   viewer.dispose();
   elements.inspection.replaceChildren();
   elements.report.textContent = '';
-  progress.reset();
+  status.reset();
   overlay.close();
   webcamPanel.refresh();
   updateButtons();
@@ -648,7 +659,7 @@ function animate(): void {
 elements.buttonInspection.addEventListener('click', () => overlay.toggle('inspection'));
 elements.buttonReport.addEventListener('click', () => overlay.toggle('report'));
 elements.buttonOverlayClose.addEventListener('click', () => overlay.close());
-progress.build();
+status.build();
 overlay.syncButtons();
 updateViewReadout();
 updateButtons();

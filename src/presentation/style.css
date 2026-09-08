@@ -80,15 +80,6 @@ button:disabled {
   cursor: default;
 }
 
-.status-message {
-  font-size: 12px;
-  color: var(--muted);
-  white-space: pre-line;
-}
-
-.status-message.error {
-  color: var(--error);
-}
 
 #content-row {
   display: flex;
@@ -308,57 +299,66 @@ button:disabled {
  * `captureWebcamFrame` は video の画素をそのまま読むので、写真は非反転のまま — 表示だけを返す。
  */
 /*
- * 書き出しの進行。**3D ビューの中に出す**（処理の結果が出るのはここなので、ツールバーの隅だけに
- * 出しても「どこで何が起きているか」が結び付かない）。ビューを覆わないよう、下寄せの小さな箱。
+ * 状態表示。**3D ビューの中央に出す**（処理の結果が出るのはここなので、ツールバーの隅だけに
+ * 出しても「どこで何が起きているか」が結び付かない）。**置き場はここだけ** — 進行・完了・失敗・
+ * 案内を同じ箱が出す。`pointer-events: none` で操作は透かす（出ている間もビューを回せる）。
  */
-#viewport-progress {
+#viewport-status {
   position: absolute;
   left: 50%;
-  bottom: 16px;
-  transform: translateX(-50%);
+  top: 50%;
+  transform: translate(-50%, -50%);
   max-width: min(560px, calc(100% - 32px));
-  padding: 10px 14px;
+  padding: 12px 16px;
   border: 1px solid var(--line);
   border-radius: 6px;
-  background: color-mix(in srgb, var(--panel) 88%, transparent);
+  background: color-mix(in srgb, var(--panel) 92%, transparent);
+  text-align: center;
   pointer-events: none;
 }
 
-#viewport-progress[hidden] {
+#viewport-status[hidden],
+.status-stages[hidden] {
   display: none;
 }
 
-.progress-title {
-  margin: 0 0 6px;
+.status-title {
+  margin: 0;
   font-size: 12px;
   color: var(--text);
+  white-space: pre-line;
 }
 
-.progress-stages {
+.status-title.error {
+  color: var(--error);
+}
+
+.status-stages {
   display: flex;
   flex-wrap: wrap;
+  justify-content: center;
   gap: 4px 10px;
-  margin: 0;
+  margin: 8px 0 0;
   padding: 0;
   list-style: none;
   font-size: 11px;
 }
 
 /* 済んだ段・今の段・まだの段を色で分ける（状態は JS が `data-state` で置く）。 */
-.progress-stages li[data-state='done'] {
+.status-stages li[data-state='done'] {
   color: var(--muted);
 }
 
-.progress-stages li[data-state='done']::before {
+.status-stages li[data-state='done']::before {
   content: '✓ ';
 }
 
-.progress-stages li[data-state='active'] {
+.status-stages li[data-state='active'] {
   color: var(--accent);
   font-weight: 600;
 }
 
-.progress-stages li[data-state='todo'] {
+.status-stages li[data-state='todo'] {
   color: color-mix(in srgb, var(--muted) 55%, transparent);
 }
 
