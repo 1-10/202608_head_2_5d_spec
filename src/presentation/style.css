@@ -425,6 +425,15 @@ button:disabled {
   color: var(--muted);
 }
 
+/* 生の値。読めれば十分なので小さく、等幅で桁を揃える。 */
+.webcam-diagnostics {
+  margin: 4px 0 0;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 10px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
 .webcam-note {
   margin: 0;
   font-size: 11px;

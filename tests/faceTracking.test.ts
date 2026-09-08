@@ -22,7 +22,9 @@ import {
   splitBlinkAndWink,
   strongestPreset,
   WINK_FULL_ASYMMETRY,
+  MAX_WINK_WEIGHT,
   headPoseFromMatrix,
+  mapHeadAngle,
 } from '../src/domain/preview/faceTracking';
 import { loadPreview } from './asset';
 
@@ -343,13 +345,15 @@ describe('頭の姿勢の取り出し', () => {
     expect(pose!.pitchDegrees).toBeCloseTo(0, 4);
   });
 
-  it('yaw と pitch を分けて取り出せる', () => {
+  // **pitch は符号が返る。** 行列の pitch とビューの `HeadPose.headPitchDegrees` は上下が逆で、
+  // そのまま渡すと上を向いたら下を向く（実機でそう見えていた）。
+  it('yaw と pitch を分けて取り出せる（pitch は符号が返る）', () => {
     const pose = headPoseFromMatrix(matrixFor((20 * Math.PI) / 180, (-12 * Math.PI) / 180), false);
     expect(pose!.yawDegrees).toBeCloseTo(20, 3);
-    expect(pose!.pitchDegrees).toBeCloseTo(-12, 3);
+    expect(pose!.pitchDegrees).toBeCloseTo(12, 3);
   });
 
-  it('鏡にすると yaw だけ符号が返る（pitch は変わらない）', () => {
+  it('鏡にすると yaw だけ変わる（pitch は鏡に依らない）', () => {
     const direct = headPoseFromMatrix(matrixFor((20 * Math.PI) / 180, (10 * Math.PI) / 180), false);
     const mirrored = headPoseFromMatrix(matrixFor((20 * Math.PI) / 180, (10 * Math.PI) / 180), true);
     expect(mirrored!.yawDegrees).toBeCloseTo(-direct!.yawDegrees, 6);
@@ -359,5 +363,63 @@ describe('頭の姿勢の取り出し', () => {
   it('短い配列と退化した行列は null（atan2 が 0 を返すのに任せない）', () => {
     expect(headPoseFromMatrix(new Float32Array(4))).toBeNull();
     expect(headPoseFromMatrix(new Float32Array(16))).toBeNull();
+  });
+});
+
+describe('ウィンクの予算は口と分ける', () => {
+  it('口が予算を埋めていてもウィンクは縮まない', () => {
+    const resolved = plan();
+    const weights = new Float64Array(PRESET_NAMES.length);
+    // 口まわりを一斉に立てて合計を上限より大きくし、同時に片目を閉じる。
+    const scores = new Map<string, number>([
+      ['jawOpen', 1],
+      ['mouthPucker', 1],
+      ['mouthFunnel', 1],
+      ['cheekPuff', 1],
+      ['mouthSmileLeft', 1],
+      ['mouthSmileRight', 1],
+      ['eyeBlinkLeft', 1],
+      ['eyeBlinkRight', 0],
+    ]);
+    const result = blendshapesToTargets(resolved, scores, weights);
+    const winkLeft = weights[resolved.presetNames.indexOf('wink_left')];
+    // 口の合計は抑えられているのに、ウィンクは満点近くのまま残る。
+    expect(result.rawTotal).toBeGreaterThan(1.5);
+    expect(winkLeft).toBeCloseTo(MAX_WINK_WEIGHT, 6);
+    const mouthTotal = resolved.mouthIndices.reduce((sum, index) => sum + weights[index], 0);
+    expect(mouthTotal).toBeLessThanOrEqual(1.5 + 1e-9);
+  });
+});
+
+describe('首の角度をリグの可動域へ写す', () => {
+  it('範囲いっぱいで可動域いっぱい、外はクランプ', () => {
+    expect(mapHeadAngle(0, 35, 15)).toBe(0);
+    expect(mapHeadAngle(35, 35, 15)).toBeCloseTo(15, 6);
+    expect(mapHeadAngle(-35, 35, 15)).toBeCloseTo(-15, 6);
+    expect(mapHeadAngle(70, 35, 15)).toBe(15);
+    expect(mapHeadAngle(-70, 35, 15)).toBe(-15);
+  });
+
+  it('範囲の途中は線形（少し振っただけで端に張り付かない）', () => {
+    expect(mapHeadAngle(17.5, 35, 15)).toBeCloseTo(7.5, 6);
+    // 生の角度をそのまま渡していたときは 17.5° で既に上限（15°）に張り付いていた。
+    expect(mapHeadAngle(17.5, 35, 15)).toBeLessThan(15);
+  });
+});
+
+describe('頭の pitch の向き', () => {
+  it('上を向いたら上を向く（ビューの HeadPose と符号が揃う）', () => {
+    // 行優先の Ry(0) * Rx(+10°)。行列から出る pitch とビューの pitch は上下が逆なので、
+    // `headPoseFromMatrix` が符号を返す（そのまま渡すと上を向いて下を向く）。
+    const cx = Math.cos((10 * Math.PI) / 180);
+    const sx = Math.sin((10 * Math.PI) / 180);
+    const matrix = Float32Array.from([
+      1, 0, 0, 0,
+      0, cx, -sx, 0,
+      0, sx, cx, 0,
+      0, 0, 0, 1,
+    ]);
+    const pose = headPoseFromMatrix(matrix, false);
+    expect(pose!.pitchDegrees).toBeCloseTo(-10, 3);
   });
 });
