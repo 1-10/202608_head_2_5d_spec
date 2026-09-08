@@ -18,6 +18,13 @@
 // 占有していない間はビューアーが元から持つ経路で動く（ビューアーの中に「今どのモードか」という
 // 状態を増やさない）。
 //
+// ## 追い始めの 1 フレームを「無表情」として取る
+//
+// 起こした頭は本人の顔と完全には一致しない（identity 253 成分で表せる範囲までしか寄らない）。その
+// 差を表情として解くと無表情のときから顔が歪むので、**追い始めに残差を取り分ける**
+// （`domain/preview/expressionFit.captureNeutralResidual`）。だから始めるときは力を抜いた顔でいる
+// 必要があり、それを画面の案内に出す。追い直すたびに取り直す。
+//
 // ## 映像はミラー、写真は非反転
 //
 // 表示だけを CSS で左右反転する（`style.css` の `.webcam-video`）。`captureWebcamFrame` は
@@ -28,45 +35,59 @@
 import { FaceExpressionTracker } from '../application/ports';
 import { describeFailure } from '../application/exportGuest';
 import {
-  BLINK_TIME_CONSTANT_SECONDS,
-  DEFAULT_TRACKING_GAIN,
-  EXPRESSION_TIME_CONSTANT_SECONDS,
-  MAXIMUM_TRACKING_GAIN,
-  MINIMUM_TRACKING_GAIN,
-  CATEGORY_DEADBAND,
   HEAD_TIME_CONSTANT_SECONDS,
   HEAD_TRACKING_PITCH_RANGE_DEGREES,
   HEAD_TRACKING_YAW_RANGE_DEGREES,
   headPoseFromMatrix,
   mapHeadAngle,
-  TrackingPlan,
-  blendshapesToTargets,
-  missingCategories,
-  resolveTrackingPlan,
   smoothScalar,
-  smoothToward,
   smoothingFactor,
-  strongestPreset,
-} from '../domain/preview/faceTracking';
+} from '../domain/preview/headTracking';
+import {
+  DEFAULT_TRACKING_GAIN,
+  ExpressionFitPlan,
+  ExpressionFitScratch,
+  MAXIMUM_TRACKING_GAIN,
+  MINIMUM_TRACKING_GAIN,
+  captureNeutralResidual,
+  createExpressionFitScratch,
+  observationResidualRatio,
+  smoothCoefficients,
+  solveExpressionCoefficients,
+  toIsotropicLandmarks,
+} from '../domain/preview/expressionFit';
 import { PITCH_LIMIT_DEGREES, YAW_LIMIT_DEGREES } from '../domain/preview/pose';
 import { MAX_RECORDING_SECONDS, serializeRecording } from '../domain/preview/recording';
-import { isVisemePreset } from '../domain/preview/viseme';
 import { RecordingSink } from './recordingPlayer';
 import { PhotoRgb } from '../domain/photo';
 import { InputManager } from './input';
 
 /** ビューアーの表情とまばたきを占有する駆動源。 */
 export interface ExpressionDriver {
-  /** 1 フレームぶんの重みを埋める。返り値は読み出しに出す名前。 */
-  expression(weights: Float64Array, deltaSeconds: number): string | null;
+  /** 1 フレームぶんの係数（表情基底 383 成分）を埋める。返り値は読み出しに出す名前。 */
+  expression(coefficients: Float64Array, deltaSeconds: number): string | null;
   /** まばたき量（0〜1）。 */
   blink(): number;
 }
 
+/**
+ * カメラから表情を解くのに要るもの。**guest ごとに 1 組**（密対応と無表情の点が identity で決まる）。
+ *
+ * パネルは作らない — `plan` を組むには GNM アセットと起こした頭の頂点が要るので、それを持って
+ * いる側（`main`）が作って渡す。
+ */
+export interface TrackingSource {
+  readonly plan: ExpressionFitPlan;
+  /** 係数の意味の正本（録画に載る）。 */
+  readonly componentNames: readonly string[];
+  /** 録画で係数を丸める刻み。 */
+  readonly quanta: Float64Array;
+}
+
 /** パネルが外へ求めるもの。**ビューアーそのものは渡さない**（占有する口だけを渡す）。 */
 export interface WebcamPanelHost {
-  /** 表情プリセット名の並び。3D ビューにシーンが無ければ空。 */
-  presetNames(): readonly string[];
+  /** 表情を解く準備。3D ビューに頭が無ければ `null`。 */
+  trackingSource(): TrackingSource | null;
   /** 表情とまばたきの駆動を占有する / 返す（`null` で返す）。 */
   setExpressionDriver(driver: ExpressionDriver | null): void;
   /** 取り込んだ写真を書き出しへ渡す。 */
@@ -121,13 +142,20 @@ export class WebcamPanel {
   /** トラッカーの準備（モデルの取得）が走っている間だけ true。 */
   private preparing = false;
 
-  /** アセットのプリセットの並びへ解決した対応表（並びが変わったら作り直す）。 */
-  private plan: TrackingPlan | null = null;
-  private planNames: readonly string[] | null = null;
-  private targetWeights = new Float64Array(0);
-  private smoothedWeights = new Float64Array(0);
-  private targetBlink = 0;
-  private smoothedBlink = 0;
+  /** 表情を解く準備（頭が差し替わったら作り直す）。 */
+  private source: TrackingSource | null = null;
+  private fitScratch: ExpressionFitScratch | null = null;
+  private targetCoefficients = new Float64Array(0);
+  private smoothedCoefficients = new Float64Array(0);
+  /** 等方な尺度へ直した点（毎フレーム作らない）。 */
+  private landmarkBuffer = new Float64Array(0);
+  /**
+   * 無表情での残差。**追い始めの 1 フレームで取る。**
+   *
+   * 起こした頭は本人の顔と完全には一致しないので、その差をここで取り分ける（取らないと無表情の
+   * ときから顔が歪む）。`null` なら次のフレームで取る。
+   */
+  private neutralResidual: Float64Array | null = null;
   private faceLostSeconds = 0;
   /** 首の追従（「首も動かす」が入っている間だけ）。 */
   private targetHeadYaw = 0;
@@ -136,18 +164,16 @@ export class WebcamPanel {
   private smoothedHeadPitch = 0;
   /** `<video>` の同じフレームを 2 回推論しない。 */
   private lastVideoTime = -1;
-  /** 対応の取りこぼしは開発者向けに 1 回だけ出す。 */
-  private reportedCategories = false;
   /**
-   * 直近の生の値（診断表示用）。
+   * 直近の診断値。
    *
-   * **合わないときに推測しないため。** 「片目を閉じても閉じない」が、検出が拾えていないのか
-   * 配分の式なのか重みが削られたのかは、数を見ないと分けられない。
+   * **合わないときに推測しないため。** 「点が拾えていない」のか「解いた係数が点の動きを説明
+   * できていない」のかは、数を見ないと分けられない。
    */
+  private lastResidualRatio = 0;
+  private lastPointCount = 0;
   private lastEyeLeft = 0;
   private lastEyeRight = 0;
-  private lastWinkLeft = 0;
-  private lastWinkRight = 0;
 
   private recordSeconds = 0;
   /** 画面の書き換えを毎フレーム行わないための直近値。 */
@@ -155,8 +181,10 @@ export class WebcamPanel {
   private shownDiagnostics = '';
 
   private readonly driver: ExpressionDriver = {
-    expression: (weights, deltaSeconds) => this.advance(weights, deltaSeconds),
-    blink: () => this.smoothedBlink,
+    expression: (coefficients, deltaSeconds) => this.advance(coefficients, deltaSeconds),
+    // **まばたきは返さない。** 瞼は解いた係数に入っている（目の成分）。ここで別に返すと二重に
+    // 掛かって閉じ切ったまま固まる。自動まばたきもトラッキング中は止まる。
+    blink: () => 0,
   };
 
   /** パネルの開閉が変わったときに呼ばれる（ツールバーのボタンの同期）。 */
@@ -242,18 +270,17 @@ export class WebcamPanel {
    * 向きで残る** — 追うのをやめたのに顔が横を向いたままになるので、ここで正面へ返す。
    */
   private resetTrackedFace(): void {
-    this.targetWeights.fill(0);
-    this.smoothedWeights.fill(0);
-    this.targetBlink = 0;
-    this.smoothedBlink = 0;
+    this.targetCoefficients.fill(0);
+    this.smoothedCoefficients.fill(0);
+    this.neutralResidual = null;
     this.targetHeadYaw = 0;
     this.targetHeadPitch = 0;
     this.smoothedHeadYaw = 0;
     this.smoothedHeadPitch = 0;
+    this.lastResidualRatio = 0;
+    this.lastPointCount = 0;
     this.lastEyeLeft = 0;
     this.lastEyeRight = 0;
-    this.lastWinkLeft = 0;
-    this.lastWinkRight = 0;
     this.host.setHeadPose(0, 0);
   }
 
@@ -269,7 +296,7 @@ export class WebcamPanel {
   /** 押せるボタンと表示を今の状態へ合わせる。**3D ビューが変わったら外から呼ぶ。** */
   refresh(): void {
     const elements = this.elements;
-    const hasPresets = this.host.presetNames().length > 0;
+    const hasHead = this.host.trackingSource() !== null;
 
     elements.state.textContent = MODE_LABELS[this.mode];
     elements.state.dataset.mode = this.mode;
@@ -281,7 +308,7 @@ export class WebcamPanel {
     elements.capture.disabled = !this.cameraOn || this.mode === 'recording';
 
     elements.track.textContent = this.preparing ? '準備中…' : '表情トラッキング';
-    elements.track.disabled = this.preparing || !this.cameraOn || !hasPresets;
+    elements.track.disabled = this.preparing || !this.cameraOn || !hasHead;
     elements.track.setAttribute(
       'aria-pressed',
       String(this.mode === 'tracking' || this.mode === 'recording'),
@@ -314,6 +341,11 @@ export class WebcamPanel {
       this.targetHeadPitch = 0;
       if (!elements.head.checked) this.host.setHeadPose(0, 0);
     });
+    // **範囲と既定はドメインの定数が正本。** HTML に数を書くと、意味が変わったとき黙って古くなる
+    // （実際、対応表をやめて誇張の倍率になったので既定が 1.8 → 1 に変わった）。
+    elements.gain.min = String(MINIMUM_TRACKING_GAIN);
+    elements.gain.max = String(MAXIMUM_TRACKING_GAIN);
+    elements.gain.value = String(DEFAULT_TRACKING_GAIN);
     elements.gain.addEventListener('input', () => this.updateTimer(true));
     elements.record.addEventListener('click', () => this.toggleRecording());
     elements.save.addEventListener('click', () => this.save());
@@ -329,7 +361,9 @@ export class WebcamPanel {
       await this.input.startWebcam();
       this.cameraOn = true;
       this.lastVideoTime = -1;
-      this.setNote('正面を向いてください。');
+      // **追い始めの 1 フレームを「無表情」として取る。** 力を抜いた顔でいてもらう必要がある
+      // ので、そのことを画面に出す（黙って取ると「無表情なのに歪む」の原因が分からない）。
+      this.setNote('正面を向いて、力を抜いた顔でいてください（今の顔を無表情として取り込みます）。');
     } catch (error) {
       console.error(error);
       this.reportFailure(error);
@@ -383,7 +417,9 @@ export class WebcamPanel {
       return;
     }
     if (this.mode !== 'tracking') return;
-    this.host.recording.begin(this.host.presetNames());
+    const source = this.ensureSource();
+    if (source === null) return;
+    this.host.recording.begin(source.componentNames, source.quanta);
     this.recordSeconds = 0;
     this.mode = 'recording';
     this.setNote(`最大 ${MAX_RECORDING_SECONDS} 秒で自動的に止まります。`);
@@ -415,11 +451,12 @@ export class WebcamPanel {
   }
 
   private resetTrackingState(): void {
-    this.ensurePlan();
-    this.targetWeights.fill(0);
-    this.smoothedWeights.fill(0);
-    this.targetBlink = 0;
-    this.smoothedBlink = 0;
+    this.ensureSource();
+    this.targetCoefficients.fill(0);
+    this.smoothedCoefficients.fill(0);
+    // **追い直すたびに無表情を取り直す。** 前回の残差を引き継ぐと、そのときの表情が「素の顔」に
+    // なって以降ずっと歪む。
+    this.neutralResidual = null;
     this.targetHeadYaw = 0;
     this.targetHeadPitch = 0;
     this.smoothedHeadYaw = 0;
@@ -428,44 +465,38 @@ export class WebcamPanel {
     this.lastVideoTime = -1;
   }
 
-  /** プリセットの並びが変わっていれば対応表を作り直す。 */
-  private ensurePlan(): TrackingPlan {
-    const names = this.host.presetNames();
-    if (this.plan === null || this.planNames !== names) {
-      this.plan = resolveTrackingPlan(names);
-      this.planNames = names;
-      this.targetWeights = new Float64Array(names.length);
-      this.smoothedWeights = new Float64Array(names.length);
-      this.reportedCategories = false;
-      if (this.plan.unknownPresets.length > 0) {
-        console.warn(
-          '表情の対応表が参照するプリセットがアセットに無い（対応表が古い）: ' +
-            this.plan.unknownPresets.join(', '),
-        );
-      }
-      // **口形（`viseme_*`）は除く。** あれは web 側で足した口の形で、カメラで駆動する対象では
-      // ない（連続再生と手のスライダーが動かす）。混ぜると「ARKit に対応が無い」という診断が
-      // 嘘になる。
-      const undriven = this.plan.unmappedPresets.filter((name) => !isVisemePreset(name));
-      if (undriven.length > 0) {
-        console.info(
-          'カメラでは駆動されない表情プリセット（ARKit 側に対応する項目が無い）: ' +
-            undriven.join(', '),
-        );
-      }
+  /** 頭が差し替わっていれば作業領域を作り直す。 */
+  private ensureSource(): TrackingSource | null {
+    const source = this.host.trackingSource();
+    if (source === null) {
+      this.source = null;
+      this.fitScratch = null;
+      return null;
     }
-    return this.plan;
+    if (source !== this.source) {
+      this.source = source;
+      this.fitScratch = createExpressionFitScratch(source.plan);
+      this.targetCoefficients = new Float64Array(source.plan.componentCount);
+      this.smoothedCoefficients = new Float64Array(source.plan.componentCount);
+      let widest = 0;
+      for (const index of source.plan.pointIndices) widest = Math.max(widest, index);
+      this.landmarkBuffer = new Float64Array((widest + 1) * 3);
+      this.neutralResidual = null;
+    }
+    return source;
   }
 
   /** ビューアーから毎フレーム呼ばれる。 */
-  private advance(weights: Float64Array, deltaSeconds: number): string | null {
+  private advance(coefficients: Float64Array, deltaSeconds: number): string | null {
     if (this.mode !== 'tracking' && this.mode !== 'recording') return null;
-    return this.advanceTracking(weights, deltaSeconds);
+    return this.advanceTracking(coefficients, deltaSeconds);
   }
 
-  private advanceTracking(weights: Float64Array, deltaSeconds: number): string | null {
-    const plan = this.ensurePlan();
-    if (weights.length !== plan.presetCount) return null;
+  private advanceTracking(coefficients: Float64Array, deltaSeconds: number): string | null {
+    const source = this.ensureSource();
+    const scratch = this.fitScratch;
+    if (source === null || scratch === null) return null;
+    if (coefficients.length !== source.plan.componentCount) return null;
 
     const video = this.input.video;
     // 同じ映像フレームを 2 回推論しない（描画は 60fps、カメラは 30fps のことが多い）。
@@ -477,18 +508,34 @@ export class WebcamPanel {
         this.drawTrackingPoints(null);
       } else {
         this.faceLostSeconds = 0;
-        this.targetBlink = blendshapesToTargets(
-          plan,
-          frame.scores,
-          this.targetWeights,
-          CATEGORY_DEADBAND,
-          this.trackingGain(),
-        ).blink;
+        this.lastPointCount = frame.points.length / 3;
         this.lastEyeLeft = frame.scores.get('eyeBlinkLeft') ?? 0;
         this.lastEyeRight = frame.scores.get('eyeBlinkRight') ?? 0;
-        this.lastWinkLeft = this.targetWeights[plan.winkIndices[0] ?? 0] ?? 0;
-        this.lastWinkRight = this.targetWeights[plan.winkIndices[1] ?? 0] ?? 0;
-        this.reportCategories(plan, frame.scores);
+        toIsotropicLandmarks(frame.points, frame.aspect, this.landmarkBuffer);
+        // **追い始めの 1 フレームを無表情として取る。**
+        if (this.neutralResidual === null) {
+          this.neutralResidual = captureNeutralResidual(source.plan, this.landmarkBuffer);
+        }
+        solveExpressionCoefficients(
+          source.plan,
+          this.landmarkBuffer,
+          this.neutralResidual,
+          this.targetCoefficients,
+          scratch,
+        );
+        this.lastResidualRatio = observationResidualRatio(
+          source.plan,
+          this.targetCoefficients,
+          scratch,
+        );
+        // 追従の強さは**解いた後の誇張**。解き方（正則化）は触らない — あちらを動かすと
+        // 「解が保守的になった」のか「弱く出している」のかが分けられなくなる。
+        const gain = this.trackingGain();
+        if (gain !== 1) {
+          for (let index = 0; index < this.targetCoefficients.length; index++) {
+            this.targetCoefficients[index] *= gain;
+          }
+        }
         this.drawTrackingPoints(frame.points);
         if (this.elements.head.checked && frame.headMatrix !== null) {
           const head = headPoseFromMatrix(frame.headMatrix);
@@ -511,24 +558,14 @@ export class WebcamPanel {
       this.faceLostSeconds += deltaSeconds;
     }
     if (this.faceLostSeconds > FACE_LOST_SECONDS) {
-      this.targetWeights.fill(0);
-      this.targetBlink = 0;
+      this.targetCoefficients.fill(0);
       // 顔を見失ったら首も正面へ戻す（最後の向きで固まると「まだ追えている」ように見える）。
       this.targetHeadYaw = 0;
       this.targetHeadPitch = 0;
     }
 
-    smoothToward(
-      this.smoothedWeights,
-      this.targetWeights,
-      smoothingFactor(deltaSeconds, EXPRESSION_TIME_CONSTANT_SECONDS),
-    );
-    this.smoothedBlink = smoothScalar(
-      this.smoothedBlink,
-      this.targetBlink,
-      smoothingFactor(deltaSeconds, BLINK_TIME_CONSTANT_SECONDS),
-    );
-    weights.set(this.smoothedWeights);
+    smoothCoefficients(this.smoothedCoefficients, this.targetCoefficients, deltaSeconds);
+    coefficients.set(this.smoothedCoefficients);
 
     // **首は「首も動かす」が入っているときだけ渡す。** 入っていなければ手のスライダーと
     // マウス追従のものが残る（黙って上書きしない）。
@@ -545,11 +582,7 @@ export class WebcamPanel {
 
     if (this.mode === 'recording') {
       this.recordSeconds += deltaSeconds;
-      const full = this.host.recording.append(
-        this.recordSeconds,
-        this.smoothedWeights,
-        this.smoothedBlink,
-      );
+      const full = this.host.recording.append(this.recordSeconds, this.smoothedCoefficients);
       if (full) {
         this.mode = 'tracking';
         this.setNote(`${MAX_RECORDING_SECONDS} 秒に達したので録画を止めました。`);
@@ -557,14 +590,14 @@ export class WebcamPanel {
       }
     }
     this.updateTimer(false);
-    return strongestPreset(plan, this.smoothedWeights);
+    return 'カメラの表情';
   }
 
   /**
    * 追えている点を映像へ重ねる（`null` で消す）。
    *
-   * **何を追えているかが見えないと、表情が合わない原因が「検出できていない」のか「対応表の
-   * 当て方」なのか分けられない。** 点は正規化座標で来るので、canvas の画素へ引き伸ばすだけ。
+   * **何を追えているかが見えないと、表情が合わない原因が「検出できていない」のか「解き方」なのか
+   * 分けられない。** 点は正規化座標で来るので、canvas の画素へ引き伸ばすだけ（z は使わない）。
    * 映像は CSS で左右反転しているので、canvas も同じ箱に重ねて一緒に反転させる（座標を自分で
    * 反転しない — 二重に反転して合わなくなる）。
    */
@@ -584,26 +617,14 @@ export class WebcamPanel {
     context.clearRect(0, 0, width, height);
     if (points === null || points.length === 0) return;
     context.fillStyle = TRACKING_POINT_COLOR;
-    for (let index = 0; index < points.length / 2; index++) {
-      const x = points[index * 2] * width;
-      const y = points[index * 2 + 1] * height;
+    for (let index = 0; index < points.length / 3; index++) {
+      const x = points[index * 3] * width;
+      const y = points[index * 3 + 1] * height;
       context.fillRect(x - TRACKING_POINT_SIZE / 2, y - TRACKING_POINT_SIZE / 2, TRACKING_POINT_SIZE, TRACKING_POINT_SIZE);
     }
   }
 
   /** 対応表が求めるカテゴリのうち返ってこなかったものを 1 回だけ出す。 */
-  private reportCategories(plan: TrackingPlan, scores: ReadonlyMap<string, number>): void {
-    if (this.reportedCategories) return;
-    this.reportedCategories = true;
-    const missing = missingCategories(plan, scores.keys());
-    if (missing.length > 0) {
-      console.warn(
-        '対応表が参照する blendshape が返ってこない（0 として扱う。モデルの版が違う可能性）: ' +
-          missing.join(', '),
-      );
-    }
-  }
-
   // ---- 表示 ----
 
   private updateTimer(force: boolean): void {
@@ -628,11 +649,14 @@ export class WebcamPanel {
     return Math.min(MAXIMUM_TRACKING_GAIN, Math.max(MINIMUM_TRACKING_GAIN, value));
   }
 
+
+
   /**
    * 診断の 1 行（トラッキング中だけ）。
    *
-   * 生の `eyeBlink` と、そこから作った まばたき / ウィンク、追従の強さ、首の角度を並べる。合わない
-   * ときに**どこで落ちているかを画面から読める**ようにするためで、飾りではない。
+   * **どこで落ちているかを画面から読めるようにする**ためで、飾りではない。点が拾えているか
+   * （点数）、解いた係数が点の動きを説明できているか（残差）、目が動いているか（生の
+   * `eyeBlink`。表情の駆動には使っていないが、検出そのものが拾えているかの目安になる）。
    */
   private diagnosticsText(): string {
     if (this.mode !== 'tracking' && this.mode !== 'recording') return '';
@@ -640,11 +664,11 @@ export class WebcamPanel {
     const head = this.elements.head.checked
       ? `　首 ${this.smoothedHeadYaw.toFixed(1)}° / ${this.smoothedHeadPitch.toFixed(1)}°`
       : '';
+    const neutral = this.neutralResidual === null ? '　無表情の取り込み待ち' : '';
     return (
-      `目 L ${round(this.lastEyeLeft)} R ${round(this.lastEyeRight)}` +
-      `　→ まばたき ${round(this.smoothedBlink)}` +
-      ` / ウィンク L ${round(this.lastWinkLeft)} R ${round(this.lastWinkRight)}` +
-      `　強さ ${this.trackingGain().toFixed(1)}${head}`
+      `点 ${this.lastPointCount}　残差 ${round(this.lastResidualRatio)}` +
+      `　目 L ${round(this.lastEyeLeft)} R ${round(this.lastEyeRight)}` +
+      `　強さ ${this.trackingGain().toFixed(1)}${head}${neutral}`
     );
   }
 

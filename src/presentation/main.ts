@@ -31,8 +31,9 @@ import { Viewer } from './viewer';
 import { ViewSettings } from './viewSettings';
 import { RecordingPlayer } from './recordingPlayer';
 import { VisemeDriver } from './visemeDriver';
-import { ExpressionDriver, WebcamPanel } from './webcamPanel';
-import { parseRecording } from '../domain/preview/recording';
+import { ExpressionDriver, TrackingSource, WebcamPanel } from './webcamPanel';
+import { buildExpressionFitPlan } from '../domain/preview/expressionFit';
+import { coefficientQuanta, parseRecording } from '../domain/preview/recording';
 
 const elements = {
   buttonWebcam: requireElement<HTMLButtonElement>('btn-webcam'),
@@ -124,6 +125,13 @@ const recordingPlayer = new RecordingPlayer();
 
 let photo: PhotoRgb | null = null;
 let bundle: GnmAssetBundle | null = null;
+/**
+ * カメラから表情を解く準備。**頭が出るたびに作り直す**（密対応と無表情の点が identity で決まる）。
+ *
+ * 作るのに 0.1 秒ほどかかる（383×383 の正規方程式と Cholesky）ので、毎フレームではなく書き出しが
+ * 終わった所で 1 回だけ組む。
+ */
+let trackingSource: TrackingSource | null = null;
 let busy = false;
 /** Webカメラが表情の駆動を握っているときの差し込み口（握っていなければ `null`）。 */
 let webcamDriver: ExpressionDriver | null = null;
@@ -135,7 +143,7 @@ let webcamDriver: ExpressionDriver | null = null;
  * 触らせないので、駆動源が増えても配線の形は変わらない。
  */
 const webcamPanel = new WebcamPanel(inputManager, createFaceExpressionTracker(), {
-  presetNames: () => viewer.expressionNames(),
+  trackingSource: () => trackingSource,
   setExpressionDriver: (driver) => {
     webcamDriver = driver;
     // カメラが顔を取ったら他の駆動源は止める（**駆動源はひとつだけ**）。黙って無視すると、
@@ -297,7 +305,7 @@ async function loadRecording(file: File): Promise<void> {
   // **読み込む前に、まだ 3D ビューへ頭が出ていないなら断る。** プリセット名が空のまま
   // `parseRecording` へ渡すと「一致する名前が 1 つも無い」枝へ落ち、**別のアセットで録った**という
   // 嘘の理由が出る（ページを開いて最初に押すだけで踏める）。
-  if (viewer.expressionNames().length === 0) {
+  if (viewer.componentNames().length === 0) {
     setStatus('先に写真を通してください（収録の表情を当てる頭がまだありません）。', true);
     return;
   }
@@ -306,14 +314,16 @@ async function loadRecording(file: File): Promise<void> {
   stopOtherDrivers('recording');
   webcamPanel.stopRecording();
   try {
-    const loaded = parseRecording(await file.text(), viewer.expressionNames());
+    const loaded = parseRecording(await file.text(), viewer.componentNames());
     recordingPlayer.setRecording(loaded.recording);
     applyExpressionDriver();
     const notes = [
       `収録を読み込みました（${loaded.recording.frames.length} フレーム）。`,
     ];
-    if (loaded.droppedPresets.length > 0) {
-      notes.push(`今のアセットに無い表情を落としました: ${loaded.droppedPresets.join(', ')}`);
+    if (loaded.droppedComponents.length > 0) {
+      notes.push(
+        `今のアセットに無い成分 ${loaded.droppedComponents.length} 本を落としました。`,
+      );
     }
     if (loaded.truncated) notes.push('上限を超えるぶんは切りました。');
     if (loaded.droppedFrames > 0) {
@@ -575,6 +585,11 @@ async function runExport(): Promise<void> {
       triangles: source.asset.mesh.triangles,
       uvSplitSource: source.asset.mesh.uvSplitSource,
     });
+    trackingSource = {
+      plan: buildExpressionFitPlan(source.asset, bundle.preview, source.vertices),
+      componentNames: bundle.preview.expressionComponentNames,
+      quanta: coefficientQuanta(bundle.preview.expressionBasisScales),
+    };
     // シーンを差し替えると表示状態と姿勢が初期化されるので、パネルを合わせ直す。
     for (const layer of LAYER_ORDER) {
       viewer.setLayerVisible(layer, panelState.visibleLayers[layer]);

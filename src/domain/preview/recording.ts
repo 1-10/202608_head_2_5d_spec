@@ -1,14 +1,19 @@
 // 表情アニメーションの収録と再生（純粋計算）。
 //
-// 収録するのは**プリセットの重みとまばたき量**だけで、カメラ映像も landmark も残さない。3D ビューを
+// 収録するのは**表情基底 383 成分の係数**だけで、カメラ映像も landmark も残さない。3D ビューを
 // 駆動するのに要るのはそれだけであり、顔の画像を保存しないで済む方が扱いが軽い。
 //
-// ## 重みは名前で持つ
+// ## なぜ係数で持つのか（v1 はプリセットの重みだった）
 //
-// 保存するのは「重みの並び」ではなく「プリセット名 → 重み」。アセットのプリセットが増減・並び替え
-// されると、index で持った重みは**黙って別の表情になる**（`viseme_*` のようなプリセットが後から
-// 足されるのは実際に起きる）。名前で突き合わせて、**アセットに無い名前は落とす** — 黙って別の顔に
-// なるより、その表情が出ない方がよい。
+// v1 は「プリセット名 → 重み」で持っていた。あれは web 側の 25 本（うち口形 5 本は web 固有）に
+// 依存する形で、**Unity では再生できない**。係数なら公式の基底そのものへの指示なので、同じ基底を
+// 持つ側はどこでも同じ顔を出せる。まばたきも係数へ畳んであるので、専用の経路が要らない。
+//
+// ## 係数は成分名で持つ
+//
+// 保存するのは「係数の並び」ではなく「成分名の並び + その順の係数」。公式アセットの版が上がって
+// 成分が増減すると、index で持った係数は**黙って別の表情になる**。名前で突き合わせて、**今の
+// アセットに無い名前は落とす** — 黙って別の顔になるより、その成分が出ない方がよい。
 //
 // ## 時刻は等間隔ではない
 //
@@ -19,43 +24,59 @@
 import { RecordingFileError } from '../errors';
 
 /** 収録データの形式。**互換を壊す変更のたびに上げる**（読む側は一致しなければ落とす）。 */
-export const RECORDING_FORMAT_VERSION = 1;
+export const RECORDING_FORMAT_VERSION = 2;
 
 /** 収録の上限（秒）。これを超える時刻のフレームは積まない。 */
 export const MAX_RECORDING_SECONDS = 30;
 
+/** 時刻の刻み（秒）。 */
+export const TIME_QUANTUM = 0.001;
+
 /**
- * 保存する重みの刻み。
+ * 係数を丸める基準にする変位（メートル）。
  *
- * 60fps × 30 秒 × プリセット数のぶんだけ数が並ぶので、桁を落とさないと JSON が無駄に太る。
- * **積む時点で丸める** — 保存してから読み直すと動きが変わる、という差を作らないため。
- * 1/1000 は変位にすると 0.1mm 未満で、画面では見えない。
+ * 383 成分 × 60fps × 30 秒ぶんの数が並ぶので、桁を落とさないと JSON が無駄に太る。**成分ごとに
+ * 刻みを変える** — 係数 1 あたりの変位は成分によって 100 倍近く違うので（実測 0.13mm 〜 11.5mm）、
+ * 一律の刻みだと小さい成分に無駄な桁を使い、大きい成分は粗くなる。
+ *
+ * 1um は頭部の寸法 0.3m に対して 3ppm で、画面では見えない。**積む時点で丸める** — 保存してから
+ * 読み直すと動きが変わる、という差を作らないため。
  */
-export const WEIGHT_QUANTUM = 0.001;
+export const DISPLACEMENT_QUANTUM_METERS = 1e-6;
+
+/** 成分ごとの刻みを、成分ごとの「係数 1 あたりの最大変位」から作る。 */
+export function coefficientQuanta(
+  scalesMeters: Float64Array | readonly number[],
+): Float64Array {
+  const quanta = new Float64Array(scalesMeters.length);
+  for (let index = 0; index < quanta.length; index++) {
+    const scale = scalesMeters[index];
+    quanta[index] = scale > 0 ? DISPLACEMENT_QUANTUM_METERS / scale : DISPLACEMENT_QUANTUM_METERS;
+  }
+  return quanta;
+}
 
 /** 1 フレーム。 */
 export interface RecordedFrame {
   /** 収録開始からの秒。**厳密に増加する**（同じ時刻・逆行は積む側で落とす）。 */
   readonly timeSeconds: number;
-  /** プリセットごとの重み。並びは `ExpressionRecording.presetNames`。 */
-  readonly weights: readonly number[];
-  /** まばたき量（0〜1）。 */
-  readonly blink: number;
+  /** 成分ごとの係数。並びは `ExpressionRecording.componentNames`。 */
+  readonly coefficients: readonly number[];
 }
 
 /** 収録したもの。**そのまま JSON にできる形**にしておく（保存の段で詰め替えない）。 */
 export interface ExpressionRecording {
   readonly formatVersion: number;
-  /** 収録時のプリセット名の並び（重みの意味の正本）。 */
-  readonly presetNames: readonly string[];
+  /** 収録時の成分名の並び（係数の意味の正本）。 */
+  readonly componentNames: readonly string[];
   readonly frames: readonly RecordedFrame[];
 }
 
 /** 空の収録を作る。 */
-export function startRecording(presetNames: readonly string[]): ExpressionRecording {
+export function startRecording(componentNames: readonly string[]): ExpressionRecording {
   return {
     formatVersion: RECORDING_FORMAT_VERSION,
-    presetNames: [...presetNames],
+    componentNames: [...componentNames],
     frames: [],
   };
 }
@@ -76,8 +97,8 @@ export function recordingDurationSeconds(recording: ExpressionRecording): number
 export function appendFrame(
   recording: ExpressionRecording,
   timeSeconds: number,
-  weights: Float64Array | readonly number[],
-  blink: number,
+  coefficients: Float64Array | readonly number[],
+  quanta: Float64Array | readonly number[],
   maximumSeconds = MAX_RECORDING_SECONDS,
 ): { recording: ExpressionRecording; full: boolean } {
   if (!Number.isFinite(timeSeconds) || timeSeconds < 0) return { recording, full: false };
@@ -88,55 +109,60 @@ export function appendFrame(
   // 0.00201 のように「生では増えているが丸めると同じ」フレームが並び、`timeSeconds` が厳密に
   // 増加するという契約が破れる（保存 → 読み込みで `parseRecording` が逆行として落とすため、
   // 録ったものと読み直したものが食い違う）。
-  const quantized = quantize(timeSeconds);
+  const quantized = round(timeSeconds, TIME_QUANTUM);
   if (last !== null && quantized <= last.timeSeconds) return { recording, full: false };
-  if (weights.length !== recording.presetNames.length) {
-    throw new Error(
-      `重みが ${weights.length} 個（期待 ${recording.presetNames.length}）`,
-    );
+  if (coefficients.length !== recording.componentNames.length) {
+    throw new Error(`係数が ${coefficients.length} 個（期待 ${recording.componentNames.length}）`);
+  }
+  if (quanta.length !== coefficients.length) {
+    throw new Error(`刻みが ${quanta.length} 個（期待 ${coefficients.length}）`);
   }
   const rounded: number[] = [];
-  for (let index = 0; index < weights.length; index++) rounded.push(quantize(weights[index]));
+  for (let index = 0; index < coefficients.length; index++) {
+    rounded.push(round(coefficients[index], quanta[index]));
+  }
   return {
     recording: {
       ...recording,
-      frames: [
-        ...frames,
-        { timeSeconds: quantized, weights: rounded, blink: quantize(clamp01(blink)) },
-      ],
+      frames: [...frames, { timeSeconds: quantized, coefficients: rounded }],
     },
     full: false,
   };
 }
 
-function quantize(value: number): number {
-  if (!Number.isFinite(value)) return 0;
-  return Math.round(value / WEIGHT_QUANTUM) * WEIGHT_QUANTUM;
+function round(value: number, quantum: number): number {
+  if (!Number.isFinite(value) || !(quantum > 0)) return 0;
+  return Math.round(value / quantum) * quantum;
 }
 
 /**
- * 任意の時刻の重みを取り出す（`weights` を破壊的に埋める）。
+ * 任意の時刻の係数を取り出す（`coefficients` を破壊的に埋める）。
  *
  * フレーム間は線形補間する。**等間隔を仮定しない**（前後のフレームの時刻から比を作る）。範囲外は
  * 端のフレームで留める。
  *
- * @param weights 長さは `recording.presetNames.length`
- * @returns その時刻のまばたき量
+ * @param coefficients 長さは `recording.componentNames.length`
  */
 export function sampleRecording(
   recording: ExpressionRecording,
   timeSeconds: number,
-  weights: Float64Array,
-): number {
+  coefficients: Float64Array,
+): void {
   const frames = recording.frames;
-  if (weights.length !== recording.presetNames.length) {
-    throw new Error(`重みが ${weights.length} 個（期待 ${recording.presetNames.length}）`);
+  if (coefficients.length !== recording.componentNames.length) {
+    throw new Error(`係数が ${coefficients.length} 個（期待 ${recording.componentNames.length}）`);
   }
-  weights.fill(0);
-  if (frames.length === 0) return 0;
-  if (timeSeconds <= frames[0].timeSeconds) return copyFrame(frames[0], weights);
+  coefficients.fill(0);
+  if (frames.length === 0) return;
+  if (timeSeconds <= frames[0].timeSeconds) {
+    copyFrame(frames[0], coefficients);
+    return;
+  }
   const lastFrame = frames[frames.length - 1];
-  if (timeSeconds >= lastFrame.timeSeconds) return copyFrame(lastFrame, weights);
+  if (timeSeconds >= lastFrame.timeSeconds) {
+    copyFrame(lastFrame, coefficients);
+    return;
+  }
 
   // 時刻で二分探索（フレームは厳密増加）。`high` が「時刻を超える最初のフレーム」になる。
   let low = 0;
@@ -150,15 +176,16 @@ export function sampleRecording(
   const after = frames[high];
   const span = after.timeSeconds - before.timeSeconds;
   const t = span > 0 ? (timeSeconds - before.timeSeconds) / span : 0;
-  for (let index = 0; index < weights.length; index++) {
-    weights[index] = before.weights[index] + (after.weights[index] - before.weights[index]) * t;
+  for (let index = 0; index < coefficients.length; index++) {
+    coefficients[index] =
+      before.coefficients[index] + (after.coefficients[index] - before.coefficients[index]) * t;
   }
-  return before.blink + (after.blink - before.blink) * t;
 }
 
-function copyFrame(frame: RecordedFrame, weights: Float64Array): number {
-  for (let index = 0; index < weights.length; index++) weights[index] = frame.weights[index];
-  return frame.blink;
+function copyFrame(frame: RecordedFrame, coefficients: Float64Array): void {
+  for (let index = 0; index < coefficients.length; index++) {
+    coefficients[index] = frame.coefficients[index];
+  }
 }
 
 /** 保存する形（JSON 文字列）。 */
@@ -170,8 +197,8 @@ export function serializeRecording(recording: ExpressionRecording): string {
 export interface LoadedRecording {
   /** 今のアセットの並びへ移し替えた収録。 */
   readonly recording: ExpressionRecording;
-  /** 今のアセットに無くて落としたプリセット名。 */
-  readonly droppedPresets: readonly string[];
+  /** 今のアセットに無くて落とした成分名。 */
+  readonly droppedComponents: readonly string[];
   /** 時刻が逆行・重複していて落としたフレーム数。 */
   readonly droppedFrames: number;
   /** 上限を超えて切り捨てたか。 */
@@ -179,7 +206,7 @@ export interface LoadedRecording {
 }
 
 /**
- * 保存したものを読み、**今のアセットのプリセットの並びへ移し替える**。
+ * 保存したものを読み、**今のアセットの成分の並びへ移し替える**。
  *
  * 壊れていれば `RecordingFileError` を投げる。名前が 1 つも一致しなければ「別のアセットで録ったもの」
  * として落とす — 全部 0 の収録を黙って再生すると、無表情なのが「そういう収録」なのか「読み違え」なのか
@@ -187,7 +214,7 @@ export interface LoadedRecording {
  */
 export function parseRecording(
   text: string,
-  presetNames: readonly string[],
+  componentNames: readonly string[],
   maximumSeconds = MAX_RECORDING_SECONDS,
 ): LoadedRecording {
   let raw: unknown;
@@ -206,22 +233,22 @@ export function parseRecording(
         `読めるのは ${RECORDING_FORMAT_VERSION}）。`,
     );
   }
-  const sourceNames = record.presetNames;
+  const sourceNames = record.componentNames;
   if (!Array.isArray(sourceNames) || sourceNames.some((name) => typeof name !== 'string')) {
-    throw new RecordingFileError('presetNames がプリセット名の配列ではありません。');
+    throw new RecordingFileError('componentNames が成分名の配列ではありません。');
   }
   const rawFrames = record.frames;
   if (!Array.isArray(rawFrames)) {
     throw new RecordingFileError('frames が配列ではありません。');
   }
 
-  // 収録時の index → 今の index。無い名前は -1（重みを捨てる）。
+  // 収録時の index → 今の index。無い名前は -1（係数を捨てる）。
   const names = sourceNames as string[];
-  const mapping = names.map((name) => presetNames.indexOf(name));
-  const droppedPresets = names.filter((_, index) => mapping[index] < 0);
-  if (droppedPresets.length === names.length) {
+  const mapping = names.map((name) => componentNames.indexOf(name));
+  const droppedComponents = names.filter((_, index) => mapping[index] < 0);
+  if (droppedComponents.length === names.length) {
     throw new RecordingFileError(
-      '今のアセットと一致するプリセット名が 1 つもありません（別のアセットで録ったもの）。',
+      '今のアセットと一致する成分名が 1 つもありません（別のアセットで録ったもの）。',
     );
   }
 
@@ -234,13 +261,13 @@ export function parseRecording(
     }
     const frame = item as Record<string, unknown>;
     const timeSeconds = frame.timeSeconds;
-    const sourceWeights = frame.weights;
+    const source = frame.coefficients;
     if (typeof timeSeconds !== 'number' || !Number.isFinite(timeSeconds) || timeSeconds < 0) {
       throw new RecordingFileError('frames の timeSeconds が 0 以上の数ではありません。');
     }
-    if (!Array.isArray(sourceWeights) || sourceWeights.length !== names.length) {
+    if (!Array.isArray(source) || source.length !== names.length) {
       throw new RecordingFileError(
-        `frames の weights が presetNames と同じ長さ（${names.length}）ではありません。`,
+        `frames の coefficients が componentNames と同じ長さ（${names.length}）ではありません。`,
       );
     }
     if (timeSeconds > maximumSeconds) {
@@ -252,22 +279,17 @@ export function parseRecording(
       droppedFrames++;
       continue;
     }
-    const weights = new Array<number>(presetNames.length).fill(0);
+    const coefficients = new Array<number>(componentNames.length).fill(0);
     for (let index = 0; index < names.length; index++) {
       const target = mapping[index];
       if (target < 0) continue;
-      const value = sourceWeights[index];
+      const value = source[index];
       if (typeof value !== 'number' || !Number.isFinite(value)) {
-        throw new RecordingFileError('frames の weights に数でない値があります。');
+        throw new RecordingFileError('frames の coefficients に数でない値があります。');
       }
-      weights[target] = value;
+      coefficients[target] = value;
     }
-    const blink = frame.blink;
-    frames.push({
-      timeSeconds,
-      weights,
-      blink: typeof blink === 'number' ? clamp01(blink) : 0,
-    });
+    frames.push({ timeSeconds, coefficients });
   }
   if (frames.length === 0) {
     throw new RecordingFileError('再生できるフレームがありません。');
@@ -275,16 +297,11 @@ export function parseRecording(
   return {
     recording: {
       formatVersion: RECORDING_FORMAT_VERSION,
-      presetNames: [...presetNames],
+      componentNames: [...componentNames],
       frames,
     },
-    droppedPresets,
+    droppedComponents,
     droppedFrames,
     truncated,
   };
-}
-
-function clamp01(value: number): number {
-  if (!Number.isFinite(value)) return 0;
-  return Math.min(1, Math.max(0, value));
 }
