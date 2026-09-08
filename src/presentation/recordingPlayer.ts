@@ -18,6 +18,7 @@ import {
   sampleRecording,
   startRecording,
 } from '../domain/preview/recording';
+import { ExpressionSlots } from './viewer';
 
 /** 録る側が使う口。**積むだけ** — クリップを持たせない。 */
 export interface RecordingSink {
@@ -132,9 +133,11 @@ export class RecordingPlayer implements RecordingSink {
   }
 
   /** 1 フレームぶんの係数を埋め、読み出しに出す名前を返す。 */
-  expression(coefficients: Float64Array, deltaSeconds: number): string | null {
+  expression(slots: ExpressionSlots, deltaSeconds: number): string | null {
     const recording = this.recording;
     if (!this.playing || recording === null) return null;
+    // 収録は**係数**で持っている（プリセットの重みへは戻せない）。速い経路には乗らない。
+    const coefficients = slots.coefficients;
     // クリップは**成分名で**係数を持つ。アセットが差し替わって成分数が変わったら鳴らさない
     // （黙って別の表情になるより出ない方がよい）。読み込みの段で名前を突き合わせてある。
     if (coefficients.length !== recording.componentNames.length) return null;

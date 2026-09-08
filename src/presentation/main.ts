@@ -222,7 +222,7 @@ function applyViewSettings(view: ViewSettings): void {
 function applyExpressionDriver(): void {
   const driver = webcamDriver ?? (recordingPlayer.isPlaying ? recordingPlayer : null);
   if (driver !== null) {
-    viewer.expressionOverride = (weights, delta) => driver.expression(weights, delta);
+    viewer.expressionOverride = (slots, delta) => driver.expression(slots, delta);
     viewer.blinkOverride = () => driver.blink();
     return;
   }

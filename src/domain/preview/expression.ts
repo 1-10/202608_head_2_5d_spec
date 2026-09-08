@@ -292,3 +292,149 @@ export function weightsFor(
   }
   return weights;
 }
+
+/**
+ * プリセットの変位を実行時に作って持つもの。
+ *
+ * **アセットには焼かない。** 焼くと GNM 本来の「基底 × 係数」が web の中だけで消え、Unity へ
+ * 持って行けない（一度そうなっていた）。ここは**同じ計算を毎フレームやり直さないための控え**で、
+ * 中身は基底から作る。
+ *
+ * ## なぜ要るのか
+ *
+ * `addExpression` は 383 成分ぶんを常に舐めるので、プリセット 1 本を立てるだけでも実測 3.7ms
+ * かかる（プリセットの係数の行は密なので間引けない）。控えを持てば「立っている本数 × 頂点数」
+ * で済み、実測 0.2〜1.0ms。**トラッキング中は毎フレーム作り直すので、この差がそのまま滑らかさに出る**
+ * （実機で「#17 より滑らかでない」と見えていたのがこれ）。
+ *
+ * ## まばたきのぶんを別に持つ理由
+ *
+ * まばたきは目の成分の**置き換え**なので、重みに対して線形でない。展開すると
+ *
+ *     変位 = Σ w_p · 全体_p − t · Σ w_p · 目だけ_p + t · まばたき
+ *
+ * になるので、「プリセットの目の成分だけの変位」も控えに持つ。目の成分が動かす頂点だけ持てば済む。
+ */
+export interface PresetDisplacementCache {
+  /** (プリセット数, 頂点数 × 3) 全体の変位。 */
+  readonly full: Float32Array;
+  /** (E,) 目の成分が動かす split 頂点。 */
+  readonly eyeVertices: Int32Array;
+  /** (プリセット数, E × 3) 目の成分だけの変位。 */
+  readonly eyeOnly: Float32Array;
+  /** (E × 3) まばたきの変位。 */
+  readonly blinkEye: Float32Array;
+}
+
+/** 控えを作る（頭が差し替わったら作り直す。実測 0.2 秒 / 6.6MB）。 */
+export function buildPresetDisplacementCache(preview: GnmPreviewAsset): PresetDisplacementCache {
+  const stride = preview.vertexCount * 3;
+  const eyeSet = new Set<number>();
+  const end = preview.blinkComponentOffset + preview.blinkComponentCount;
+  for (const region of preview.expressionBasisRegions) {
+    const inside =
+      region.componentOffset >= preview.blinkComponentOffset &&
+      region.componentOffset + region.componentCount <= end;
+    if (!inside) continue;
+    for (let slot = 0; slot < region.vertexCount; slot++) {
+      eyeSet.add(preview.expressionBasisVertices[region.vertexOffset + slot]);
+    }
+  }
+  const eyeVertices = Int32Array.from(eyeSet).sort();
+
+  const full = new Float32Array(preview.presetCount * stride);
+  const eyeOnly = new Float32Array(preview.presetCount * eyeVertices.length * 3);
+  const scratch = new Float64Array(stride);
+  const coefficients = zeroCoefficients(preview);
+  const weights = new Float64Array(preview.presetCount);
+  for (let preset = 0; preset < preview.presetCount; preset++) {
+    weights.fill(0);
+    weights[preset] = 1;
+    coefficients.fill(0);
+    addPresetCoefficients(preview, coefficients, weights);
+    scratch.fill(0);
+    addExpression(preview, scratch, coefficients);
+    full.set(scratch, preset * stride);
+
+    // 目の成分だけを残した係数の変位。
+    for (let component = 0; component < coefficients.length; component++) {
+      if (component < preview.blinkComponentOffset || component >= end) coefficients[component] = 0;
+    }
+    scratch.fill(0);
+    addExpression(preview, scratch, coefficients);
+    const base = preset * eyeVertices.length * 3;
+    for (let slot = 0; slot < eyeVertices.length; slot++) {
+      const vertex = eyeVertices[slot] * 3;
+      eyeOnly[base + slot * 3] = scratch[vertex];
+      eyeOnly[base + slot * 3 + 1] = scratch[vertex + 1];
+      eyeOnly[base + slot * 3 + 2] = scratch[vertex + 2];
+    }
+  }
+
+  coefficients.fill(0);
+  for (let component = preview.blinkComponentOffset; component < end; component++) {
+    coefficients[component] = preview.blinkCoefficients[component];
+  }
+  scratch.fill(0);
+  addExpression(preview, scratch, coefficients);
+  const blinkEye = new Float32Array(eyeVertices.length * 3);
+  for (let slot = 0; slot < eyeVertices.length; slot++) {
+    const vertex = eyeVertices[slot] * 3;
+    blinkEye[slot * 3] = scratch[vertex];
+    blinkEye[slot * 3 + 1] = scratch[vertex + 1];
+    blinkEye[slot * 3 + 2] = scratch[vertex + 2];
+  }
+
+  return { full, eyeVertices, eyeOnly, blinkEye };
+}
+
+/**
+ * プリセットの重みとまばたきを頂点へ加算する（`vertices` を破壊的に更新）。
+ *
+ * **`addExpression` に係数を渡した結果と一致する**（検査で縛ってある）。速いのは控えを持っている
+ * ぶんだけで、出る顔は同じ。
+ *
+ * @param blinkAmount 0（開眼）〜1（閉眼）
+ */
+export function addPresetDisplacement(
+  preview: GnmPreviewAsset,
+  cache: PresetDisplacementCache,
+  vertices: Float64Array,
+  weights: Float64Array,
+  blinkAmount: number,
+): void {
+  if (weights.length !== preview.presetCount) {
+    throw new Error(`表情の重みが ${weights.length} 個（期待 ${preview.presetCount}）`);
+  }
+  const stride = preview.vertexCount * 3;
+  for (let preset = 0; preset < preview.presetCount; preset++) {
+    const weight = weights[preset];
+    if (weight === 0) continue;
+    const base = preset * stride;
+    for (let index = 0; index < stride; index++) {
+      vertices[index] += cache.full[base + index] * weight;
+    }
+  }
+
+  const blend = Math.min(1, Math.max(0, blinkAmount));
+  if (blend <= 0) return;
+  // 目の成分ぶんを差し引いて、まばたきのぶんを足す（= 置き換え）。
+  const eyeCount = cache.eyeVertices.length;
+  for (let slot = 0; slot < eyeCount; slot++) {
+    let x = 0;
+    let y = 0;
+    let z = 0;
+    for (let preset = 0; preset < preview.presetCount; preset++) {
+      const weight = weights[preset];
+      if (weight === 0) continue;
+      const from = (preset * eyeCount + slot) * 3;
+      x += cache.eyeOnly[from] * weight;
+      y += cache.eyeOnly[from + 1] * weight;
+      z += cache.eyeOnly[from + 2] * weight;
+    }
+    const to = cache.eyeVertices[slot] * 3;
+    vertices[to] += blend * (cache.blinkEye[slot * 3] - x);
+    vertices[to + 1] += blend * (cache.blinkEye[slot * 3 + 1] - y);
+    vertices[to + 2] += blend * (cache.blinkEye[slot * 3 + 2] - z);
+  }
+}
