@@ -289,15 +289,16 @@ button:disabled {
  * `captureWebcamFrame` は video の画素をそのまま読むので、写真は非反転のまま — 表示だけを返す。
  */
 /*
- * 状態表示。**3D ビューの中央に出す**（処理の結果が出るのはここなので、ツールバーの隅だけに
- * 出しても「どこで何が起きているか」が結び付かない）。**置き場はここだけ** — 進行・完了・失敗・
- * 案内を同じ箱が出す。`pointer-events: none` で操作は透かす（出ている間もビューを回せる）。
+ * 状態表示。**3D ビューの上端中央に出す**（処理の結果が出るのはここなので、ツールバーの隅だけに
+ * 出しても「どこで何が起きているか」が結び付かない）。真ん中に置くと顔に重なって邪魔なので、
+ * 見る対象を隠さない上端へ寄せる。**置き場はここだけ** — 進行・完了・失敗・案内を同じ箱が出す。
+ * `pointer-events: none` で操作は透かす（出ている間もビューを回せる）。
  */
 #viewport-status {
   position: absolute;
   left: 50%;
-  top: 50%;
-  transform: translate(-50%, -50%);
+  top: 12px;
+  transform: translateX(-50%);
   max-width: min(560px, calc(100% - 32px));
   padding: 12px 16px;
   border: 1px solid var(--line);
