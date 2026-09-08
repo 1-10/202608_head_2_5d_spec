@@ -17,7 +17,7 @@ import {
   describeFailure,
   isPipelineError,
 } from '../application/exportGuest';
-import { Exporter, GnmAssetBundle, buildGuestZip, createFaceExpressionTracker } from '../composition';
+import { Exporter, GnmAssetBundle, createFaceExpressionTracker } from '../composition';
 import {
   GuiHandle,
   createPanelState,
@@ -37,8 +37,6 @@ import { parseRecording } from '../domain/preview/recording';
 const elements = {
   buttonWebcam: requireElement<HTMLButtonElement>('btn-webcam'),
   buttonUpload: requireElement<HTMLButtonElement>('btn-upload'),
-  buttonReset: requireElement<HTMLButtonElement>('btn-reset'),
-  buttonExport: requireElement<HTMLButtonElement>('btn-export'),
   fileInput: requireElement<HTMLInputElement>('file-input'),
   recordingInput: requireElement<HTMLInputElement>('recording-input'),
   statusBox: requireElement<HTMLElement>('viewport-status'),
@@ -46,7 +44,6 @@ const elements = {
   statusStages: requireElement<HTMLElement>('status-stages'),
   report: requireElement<HTMLElement>('report'),
   viewport: requireElement<HTMLElement>('canvas-head'),
-  viewReadout: requireElement<HTMLElement>('readout-view'),
   video: requireElement<HTMLVideoElement>('webcam-video'),
   guiExport: requireElement<HTMLElement>('gui-export'),
   guiView: requireElement<HTMLElement>('gui-view'),
@@ -125,7 +122,6 @@ const visemeDriver = new VisemeDriver();
 const recordingPlayer = new RecordingPlayer();
 
 let photo: PhotoRgb | null = null;
-let outcome: ExportOutcome | null = null;
 let bundle: GnmAssetBundle | null = null;
 let busy = false;
 /** Webカメラが表情の駆動を握っているときの差し込み口（握っていなければ `null`）。 */
@@ -363,7 +359,6 @@ recordingPlayer.onFinished = (): void => {
 recordingPlayer.onRecordingChanged = (): void => syncPlaybackControls();
 
 viewer.onViewChanged = (): void => {
-  updateViewReadout();
   gui.syncViewControls(viewer.layerStates(), viewer.textureStates());
   gui.syncHeadPose(viewer.headPose);
   gui.syncCameraPose(viewer.cameraPose);
@@ -406,6 +401,16 @@ const status = {
     }
   },
 
+  /**
+   * 段ごとの所要（秒）。**画面に出すために測る** — どの段が重いかは、写真の大きさや実行環境で
+   * 変わるので、都度見えないと当てられない。
+   */
+  timings: [] as { stage: string; seconds: number }[],
+  /** 今の段が始まった時刻（`performance.now()`）。 */
+  startedAtMs: 0,
+  /** 書き出し全体が始まった時刻。 */
+  runStartedAtMs: 0,
+
   /** ひとこと出す。空文字で閉じる（段の一覧も隠す）。 */
   message(text: string, isError = false): void {
     elements.statusTitle.textContent = text;
@@ -414,11 +419,30 @@ const status = {
     elements.statusBox.hidden = text === '';
   },
 
-  /** 今の段を出す（段の一覧つき）。 */
+  /** 書き出しを始める（時計を初期化する）。 */
+  beginRun(): void {
+    status.timings = [];
+    status.runStartedAtMs = performance.now();
+    status.startedAtMs = status.runStartedAtMs;
+  },
+
+  /** 今の段を出す（段の一覧つき）。前の段の所要をここで締める。 */
   stage(stage: string): void {
+    const now = performance.now();
+    const previous = STAGE_NAMES.indexOf(stage) - 1;
+    if (previous >= 0 && status.timings.length === previous) {
+      status.timings.push({
+        stage: STAGE_NAMES[previous],
+        seconds: (now - status.startedAtMs) / 1000,
+      });
+    }
+    status.startedAtMs = now;
     const index = STAGE_NAMES.indexOf(stage);
+    const elapsed = ((now - status.runStartedAtMs) / 1000).toFixed(1);
     elements.statusTitle.textContent =
-      index < 0 ? stage : `${stage}（${index + 1} / ${STAGE_NAMES.length}）`;
+      index < 0
+        ? stage
+        : `${stage}（${index + 1} / ${STAGE_NAMES.length}）　経過 ${elapsed}s`;
     elements.statusTitle.classList.remove('error');
     for (const [name, item] of status.items) {
       const at = STAGE_NAMES.indexOf(name);
@@ -438,9 +462,40 @@ const status = {
     elements.statusBox.hidden = false;
   },
 
-  /** 段の一覧を「まだ」へ戻して閉じる。 */
+  /**
+   * 書き出しが終わったことと、かかった時間を出す。
+   *
+   * **閉じない。** 段の一覧を全部「済んだ」にして残す — どの段に時間がかかったかは、次に触る値を
+   * 決めるのに使う（重いのがアトラスなら一辺を落とす、など）。
+   */
+  finishRun(): void {
+    const now = performance.now();
+    const last = STAGE_NAMES.length - 1;
+    if (status.timings.length === last) {
+      status.timings.push({
+        stage: STAGE_NAMES[last],
+        seconds: (now - status.startedAtMs) / 1000,
+      });
+    }
+    const total = ((now - status.runStartedAtMs) / 1000).toFixed(1);
+    elements.statusTitle.textContent = `書き出し完了　${total}s`;
+    elements.statusTitle.classList.remove('error');
+    for (const [name, item] of status.items) {
+      const timing = status.timings.find((entry) => entry.stage === name);
+      item.textContent = timing === undefined ? name : `${name} ${timing.seconds.toFixed(1)}s`;
+      item.dataset.state = 'done';
+    }
+    elements.statusStages.hidden = false;
+    elements.statusBox.hidden = false;
+  },
+
+  /** 段の一覧を「まだ」へ戻して閉じる（名前も所要を外した形へ戻す）。 */
   reset(): void {
-    for (const item of status.items.values()) item.dataset.state = 'todo';
+    for (const [name, item] of status.items) {
+      item.textContent = name;
+      item.dataset.state = 'todo';
+    }
+    status.timings = [];
     status.message('');
   },
 };
@@ -450,38 +505,17 @@ function setStatus(message: string, isError = false): void {
   status.message(message, isError);
 }
 
-function updateViewReadout(): void {
-  const pose = viewer.headPose;
-  // **パネルと同じ言い方にする。** 右パネルの「カメラ」節に出るのと同じ位置 (m) と回転 (°) で、
-  // 別の言い換え（拡大率など）をここだけで作らない。
-  const camera = viewer.cameraPose;
-  const meters = (value: number): string => value.toFixed(3);
-  // **駆動源の名前はそのまま出す。** 表情の自動再生はプリセット名（英字）を返し、口形の連続再生は
-  // 「口形 あ」と自分で名乗る。ここで「表情」と決め打ちすると、別の駆動源が差さったときに黙って
-  // 嘘のラベルになる。
-  const expression = viewer.currentExpression === null ? '' : ` / ${viewer.currentExpression}`;
-  elements.viewReadout.textContent =
-    `カメラ 位置 ${meters(camera.position[0])}, ${meters(camera.position[1])},` +
-    ` ${meters(camera.position[2])} m /` +
-    ` 回転 X ${camera.pitchDegrees.toFixed(1)}° / Y ${camera.yawDegrees.toFixed(1)}°` +
-    ` — 首 ${pose.headYawDegrees.toFixed(1)}° / ${pose.headPitchDegrees.toFixed(1)}° /` +
-    ` 視線 ${pose.gazeYawDegrees.toFixed(1)}° / ${pose.gazePitchDegrees.toFixed(1)}°${expression}`;
-}
 
-function updateButtons(): void {
-  elements.buttonExport.disabled = busy || photo === null;
-}
 
 /** 書き出しを走らせ、3Dビューと検査画像と内訳を更新する。 */
 async function runExport(): Promise<void> {
   if (photo === null || busy) return;
   busy = true;
-  updateButtons();
+  status.beginRun();
   try {
     const result = await exporter.run(photo, toExportSettings(panelState), (stage) =>
       status.stage(stage),
     );
-    outcome = result;
     if (bundle === null) throw new Error('アセットが読めていない');
     const source = result.previewSceneSource;
     const scene = buildPreviewScene({
@@ -536,7 +570,7 @@ async function runExport(): Promise<void> {
     webcamPanel.refresh();
     renderInspection(elements.inspection, result.inspection);
     elements.report.textContent = buildReport(result);
-    status.reset();
+    status.finishRun();
   } catch (error) {
     console.error(error);
     const report = describeFailure(error);
@@ -546,7 +580,6 @@ async function runExport(): Promise<void> {
     if (!isPipelineError(error)) console.warn('想定外の失敗（バグの可能性）', error);
   } finally {
     busy = false;
-    updateButtons();
   }
 }
 
@@ -584,26 +617,21 @@ function buildReport(result: ExportOutcome): string {
   }
   const provider = exporter.depthNormalProvider;
   if (provider !== null) lines.push(`DAViD の実行環境: ${provider}`);
+  // 段ごとの所要も内訳へ。画面の一覧は次の書き出しで消えるが、こちらは残して見比べられる。
+  if (status.timings.length > 0) {
+    const total = status.timings.reduce((sum, entry) => sum + entry.seconds, 0);
+    lines.push(
+      `所要 ${total.toFixed(1)}s（` +
+        status.timings.map((entry) => `${entry.stage} ${entry.seconds.toFixed(1)}s`).join(' / ') +
+        '）',
+    );
+  }
   return lines.join('\n');
-}
-
-/** guest zip をダウンロードさせる。 */
-async function downloadZip(): Promise<void> {
-  if (outcome === null) return;
-  const { blob, filename } = await buildGuestZip(outcome.artifacts);
-  const anchor = document.createElement('a');
-  anchor.href = URL.createObjectURL(blob);
-  anchor.download = filename;
-  anchor.click();
-  URL.revokeObjectURL(anchor.href);
-  setStatus(`書き出し完了: ${filename}（${(blob.size / 1024 / 1024).toFixed(1)}MB）`);
 }
 
 async function acceptPhoto(next: PhotoRgb): Promise<void> {
   photo = next;
-  outcome = null;
   elements.report.textContent = '';
-  updateButtons();
   await runExport();
 }
 
@@ -629,25 +657,6 @@ elements.recordingInput.addEventListener('change', async () => {
 
 elements.buttonWebcam.addEventListener('click', () => webcamPanel.toggle());
 
-elements.buttonReset.addEventListener('click', () => {
-  webcamPanel.reset();
-  photo = null;
-  outcome = null;
-  viewer.dispose();
-  elements.inspection.replaceChildren();
-  elements.report.textContent = '';
-  status.reset();
-  overlay.close();
-  webcamPanel.refresh();
-  updateButtons();
-  setStatus('');
-});
-
-elements.buttonExport.addEventListener('click', () => {
-  if (outcome === null) void runExport().then(() => downloadZip());
-  else void downloadZip();
-});
-
 window.addEventListener('resize', () => viewer.resize());
 
 function animate(): void {
@@ -661,8 +670,6 @@ elements.buttonReport.addEventListener('click', () => overlay.toggle('report'));
 elements.buttonOverlayClose.addEventListener('click', () => overlay.close());
 status.build();
 overlay.syncButtons();
-updateViewReadout();
-updateButtons();
 animate();
 
 // GNM アセットは 32MB あるので、写真を待たずに落とし始める（初回の書き出しの待ちを短くする）。

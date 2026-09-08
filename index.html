@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>GNM Head Exporter (Web)</title>
+    <title>GNM Head Studio</title>
     <!--
       **スタイルは head から読む。** `main.ts` の `import './style.css'` に任せると、JS の
       モジュールグラフが解けてから注入されるので、それまで既定の白い面が一瞬出る（実際にそう
@@ -14,7 +14,7 @@
   <body>
     <div id="app">
       <header id="toolbar">
-        <h1>GNM Head Exporter <span class="subtitle">(Web)</span></h1>
+        <h1>GNM Head Studio <span class="subtitle">写真 1 枚から頭を起こして動かす</span></h1>
         <div class="toolbar-actions">
           <button id="btn-webcam" aria-pressed="false">Webカメラ</button>
           <button id="btn-upload">写真を選ぶ</button>
@@ -25,8 +25,6 @@
             ブラウザ任せになる。操作するボタンは右パネルの「表情アニメーション」にある。
           -->
           <input id="recording-input" type="file" accept="application/json,.json" hidden />
-          <button id="btn-reset">Reset</button>
-          <button id="btn-export" disabled>guest zip を書き出す</button>
           <button id="btn-inspection" aria-pressed="false">検査画像</button>
           <button id="btn-report" aria-pressed="false">内訳</button>
         </div>
@@ -37,11 +35,15 @@
 
         <main id="viewport-row">
           <section class="viewport-pane">
+            <!--
+              **今の値は読み出しに出さない。** カメラの位置・回転と首・視線は右パネルが持っており、
+              同じ数を 2 か所へ出すと片方だけ古くなる（触った側しか動かない）。ここは操作の割り当て
+              だけを出す。
+            -->
             <div class="pane-label">
               3D ビュー（左ドラッグでカメラ周回 / Shift+左で首と視線 / 右ドラッグで平行移動 /
               ホイールで拡大。1-4 で層、A/S/D/F でテクスチャ、T で全テクスチャ、W でワイヤー、
               R で正面・無表情）
-              <span class="readouts" id="readout-view"></span>
             </div>
             <div class="pane-canvas" id="canvas-head">
               <!--
