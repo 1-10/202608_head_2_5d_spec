@@ -14,24 +14,13 @@
 // 検証できる）。1 回だけの検出で済ませてはいけない — 大きな写真では顔幅が数十画素になり、口の位置
 // がずれる。
 
-import { FaceLandmarker, FilesetResolver } from '@mediapipe/tasks-vision';
+import { FaceLandmarker } from '@mediapipe/tasks-vision';
 import { FaceNotDetectedError, ModelFileNotFoundError } from '../domain/errors';
 import { detectTwoPass } from '../domain/faceLadder';
 import { PhotoRgb } from '../domain/photo';
 import { FACE_LANDMARK_COUNT, FACE_MESH_LANDMARK_COUNT, FaceLandmarkDetector } from '../application/ports';
+import { FACE_LANDMARKER_MODEL_URL, visionFileset } from './mediapipeVision';
 import { photoToCanvas } from './photoCanvas';
-
-const WASM_BASE_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.17/wasm';
-
-/**
- * モデルの取得元。**バージョン付きパス**（`/1/`）を使う。
- *
- * `/latest/` は中身が動くので使わない（デスクトップ側の `tools/fetch_models.py` が同じ URL を
- * ハッシュ付きで固定している）。
- */
-const MODEL_ASSET_URL =
-  'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker' +
-  '/float16/1/face_landmarker.task';
 
 /**
  * 検出させる顔の数の上限（デスクトップ側 `MAX_DETECTED_FACES` と同値）。
@@ -47,9 +36,9 @@ export class MediaPipeFaceLandmarkDetector implements FaceLandmarkDetector {
   async init(): Promise<void> {
     if (this.landmarker !== null) return;
     try {
-      const vision = await FilesetResolver.forVisionTasks(WASM_BASE_URL);
+      const vision = await visionFileset();
       this.landmarker = await FaceLandmarker.createFromOptions(vision, {
-        baseOptions: { modelAssetPath: MODEL_ASSET_URL, delegate: 'GPU' },
+        baseOptions: { modelAssetPath: FACE_LANDMARKER_MODEL_URL, delegate: 'GPU' },
         runningMode: 'IMAGE',
         numFaces: MAX_FACES,
         // 虹彩 10 点は refine 有効時にしか出ない。眼球テクスチャの半径と中心がこれで決まる。

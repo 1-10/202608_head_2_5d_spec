@@ -10,9 +10,15 @@
       <header id="toolbar">
         <h1>GNM Head Exporter <span class="subtitle">(Web)</span></h1>
         <div class="toolbar-actions">
-          <button id="btn-webcam">Webcam</button>
+          <button id="btn-webcam" aria-pressed="false">Webカメラ</button>
           <button id="btn-upload">写真を選ぶ</button>
           <input id="file-input" type="file" accept="image/*" hidden />
+          <!--
+            収録した表情アニメーションの読み込み。**Webカメラのパネルの中へ置かない** — パネルを
+            閉じると `display: none` の中に入り、そこから programmatic に開くダイアログの扱いが
+            ブラウザ任せになる。操作するボタンは右パネルの「表情アニメーション」にある。
+          -->
+          <input id="recording-input" type="file" accept="application/json,.json" hidden />
           <button id="btn-reset">Reset</button>
           <button id="btn-export" disabled>guest zip を書き出す</button>
           <button id="btn-inspection" aria-pressed="false">検査画像</button>
@@ -51,14 +57,48 @@
               <pre id="report" hidden></pre>
             </div>
           </div>
+
+          <!--
+            Webカメラは 3D ビューへ重ねるが**覆わない**。自分の顔と 3D の顔を同時に見るのが
+            表情トラッキングの目的なので、検査画像のような全面のオーバーレイにはできない。かといって
+            常設の欄にすると、カメラを使わない間もずっと画面を取る。小さな箱を隅へ浮かせる。
+          -->
+          <aside id="webcam-panel" hidden>
+            <div class="webcam-bar">
+              <span class="webcam-title">Webカメラ</span>
+              <span id="webcam-state" class="webcam-state">停止中</span>
+              <button id="btn-webcam-close" class="overlay-close" title="閉じる">&times;</button>
+            </div>
+            <div class="webcam-body">
+              <video id="webcam-video" class="webcam-video" autoplay playsinline muted></video>
+
+              <div class="webcam-row">
+                <button id="btn-camera">カメラ開始</button>
+                <button id="btn-capture" disabled>写真として取り込む</button>
+              </div>
+
+              <div class="webcam-row">
+                <button id="btn-track" aria-pressed="false" disabled>表情トラッキング</button>
+              </div>
+
+              <div class="webcam-row">
+                <button id="btn-record" disabled>録画</button>
+                <span id="webcam-timer" class="webcam-timer"></span>
+              </div>
+
+              <div class="webcam-row">
+                <button id="btn-save" disabled>保存</button>
+              </div>
+
+              <p id="webcam-note" class="webcam-note"></p>
+            </div>
+          </aside>
         </main>
 
         <div class="gui-column" id="gui-view"></div>
       </div>
 
     </div>
-
-    <video id="webcam-video" autoplay playsinline muted hidden></video>
 
     <script type="module" src="/src/presentation/main.ts"></script>
   </body>

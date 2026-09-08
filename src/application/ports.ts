@@ -49,6 +49,37 @@ export interface FaceLandmarkDetector {
   detect(photo: PhotoRgb): Promise<Float64Array>;
 }
 
+/**
+ * 動画 1 フレームの入力元。
+ *
+ * `<video>` そのものを渡す（フレームを画像へ写してから渡す形にすると、毎フレーム canvas を経由する
+ * ぶんだけ遅れる）。canvas と `ImageBitmap` も許すのは、テストや将来の別経路のため。
+ */
+export type VideoFrameSource = HTMLVideoElement | HTMLCanvasElement | ImageBitmap;
+
+/**
+ * 動画から**表情の強さ**（blendshape）を取り続ける能力。
+ *
+ * **`FaceLandmarkDetector` と別の port にする。** あちらは書き出しのための「静止画 1 枚から
+ * 478 点」で、主役の選定と二段検出という別の関心を持つ。同じ検出器へ相乗りさせると、リアルタイムの
+ * 都合（1 顔・毎フレーム・blendshape）が書き出しの経路を歪める。
+ *
+ * 返すのは**カテゴリ名 → スコア**（0〜1）だけ。カテゴリ名の一覧は実行時に返ってくるものが正本なので、
+ * 契約に焼かない。顔が写っていなければ `null`。
+ */
+export interface FaceExpressionTracker {
+  /** 使えるようにする（モデルの取得を含む）。失敗は `domain/errors` の型で投げる。 */
+  start(): Promise<void>;
+  /**
+   * 1 フレーム見る。
+   *
+   * @param timestampMs 単調増加する時刻（ミリ秒）。**同じ値を 2 回渡さない**
+   */
+  detect(source: VideoFrameSource, timestampMs: number): ReadonlyMap<string, number> | null;
+  /** 資源を返す。 */
+  stop(): void;
+}
+
 /** 写真から人物のクラス別の領域を取る能力。 */
 export interface PersonSegmenter {
   /**

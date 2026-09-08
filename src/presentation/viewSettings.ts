@@ -80,6 +80,8 @@ export interface ViewSettings {
   readonly visemeHoldSeconds: number;
   /** 連続再生を お の次に あ へ戻すか。 */
   readonly visemeLoop: boolean;
+  /** 収録した表情アニメーションをループ再生するか。 */
+  readonly recordingLoop: boolean;
 }
 
 export const DEFAULT_VIEW_SETTINGS: ViewSettings = {
@@ -105,4 +107,5 @@ export const DEFAULT_VIEW_SETTINGS: ViewSettings = {
   visemeFadeSeconds: VISEME_FADE_SECONDS,
   visemeHoldSeconds: VISEME_HOLD_SECONDS,
   visemeLoop: true,
+  recordingLoop: false,
 };

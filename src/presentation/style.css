@@ -226,6 +226,135 @@ button:disabled {
 }
 
 /*
+ * Webカメラのパネル。**3D ビューへ重ねるが覆わない。**
+ *
+ * 検査画像（`#overlay`）と違い、見ている間ずっと 3D ビューを見ている必要がある（自分の顔と 3D の
+ * 顔を見比べるのが表情トラッキングの目的）。だから全面のオーバーレイにはできない。一方で常設の欄に
+ * すると、カメラを使わない間もずっと画面を取る — 使う時間の方が短い。**隅へ浮かせる小さな箱**が
+ * 両方を満たす。
+ *
+ * 検査画像より下（`z-index` が `#overlay` の 5 より小さい）に置く。検査画像は「書き出した直後に一度
+ * だけ全部を見る」もので、そのとき Webカメラの操作が上に残っていても邪魔にしかならない。
+ *
+ * **ページを流さない。** 高さは 3D ビューの中に収め、はみ出したら中身側がスクロールする。
+ */
+#webcam-panel {
+  position: absolute;
+  left: 12px;
+  bottom: 12px;
+  z-index: 4;
+  display: flex;
+  flex-direction: column;
+  width: 260px;
+  max-height: calc(100% - 24px);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: rgba(20, 22, 26, 0.94);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
+}
+
+#webcam-panel[hidden] {
+  display: none;
+}
+
+.webcam-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  padding: 4px 4px 4px 10px;
+  border-bottom: 1px solid var(--line);
+}
+
+.webcam-title {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+/* 今の状態を一目で分かるようにする（停止中 / トラッキング中 / 録画中 / 再生中）。 */
+.webcam-state {
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.webcam-state[data-mode='tracking'],
+.webcam-state[data-mode='playing'] {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.webcam-state[data-mode='recording'] {
+  border-color: var(--error);
+  color: var(--error);
+}
+
+.webcam-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 10px;
+}
+
+/*
+ * 映像は**ミラー表示**（自分が動いた向きと画面の向きが揃っていないと合わせられない）。
+ * `captureWebcamFrame` は video の画素をそのまま読むので、写真は非反転のまま — 表示だけを返す。
+ */
+.webcam-video {
+  display: block;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: #000;
+  object-fit: cover;
+  transform: scaleX(-1);
+}
+
+.webcam-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.webcam-row button {
+  padding: 5px 9px;
+  font-size: 12px;
+}
+
+.webcam-check {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.webcam-timer {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.webcam-note {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--muted);
+  white-space: pre-line;
+}
+
+.webcam-note.error {
+  color: var(--error);
+}
+
+/*
  * `#inspection` の `display: flex` は ID 指定なので、クラスの `[hidden]` では消せない
  * （詳細度が負ける）。**同じ ID 指定で書く。**
  */

@@ -5,12 +5,14 @@
 // もう片方は動き続けるので気づけない**。
 
 import { ExportOutcome, exportGuest } from './application/exportGuest';
+import { FaceExpressionTracker } from './application/ports';
 import { ExportSettings } from './application/settings';
 
 import { PhotoRgb } from './domain/photo';
 import { CachingAtlasBaker } from './infrastructure/atlasBaker';
 import { DavidDepthNormalEstimator } from './infrastructure/depthNormal';
 import { MediaPipeFaceLandmarkDetector } from './infrastructure/faceLandmarks';
+import { MediaPipeFaceExpressionTracker } from './infrastructure/faceTracker';
 import {
   DEFAULT_ASSET_URL,
   GnmAssetBundle,
@@ -68,6 +70,16 @@ export class Exporter {
       onStage,
     });
   }
+}
+
+/**
+ * リアルタイム表情トラッカーを作る。
+ *
+ * **`Exporter` の中へ入れない。** 書き出しの一式とは寿命が別で（カメラを使っている間だけ
+ * 生きている）、書き出しの経路はこれを 1 つも使わない。
+ */
+export function createFaceExpressionTracker(): FaceExpressionTracker {
+  return new MediaPipeFaceExpressionTracker();
 }
 
 /** インストール済みのバージョン。取れなければ既定値。 */

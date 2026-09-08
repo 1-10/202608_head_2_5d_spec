@@ -59,3 +59,21 @@ export class GpuUnavailableError extends RuntimeEnvironmentError {}
  * に当たるのが、こちらでは「fetch が失敗した」）。
  */
 export class ModelFileNotFoundError extends RuntimeEnvironmentError {}
+
+/**
+ * カメラが使えない（拒否された・繋がっていない・他のアプリが掴んでいる）。
+ *
+ * 写真を変えても直らないので `RuntimeEnvironmentError` の側。**`InputImageError` にしない** —
+ * あちらは「撮り直し・選び直しを促す」失敗で、UI が出すべき案内が違う（こちらはブラウザの
+ * 権限設定を見てもらう必要がある）。
+ */
+export class CameraUnavailableError extends RuntimeEnvironmentError {}
+
+/**
+ * 収録した表情アニメーションを読めない。
+ *
+ * 写真でも実行環境でもなく**利用者が選んだファイルの中身**の失敗なので、どちらの枝にも入れず
+ * `ExporterError` の直下に置く。壊れた JSON・形式のバージョン違い・別のアセットで録ったもの
+ * （プリセット名が 1 つも一致しない）がここに入る。
+ */
+export class RecordingFileError extends ExporterError {}
