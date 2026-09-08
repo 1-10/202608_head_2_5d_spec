@@ -1,7 +1,11 @@
-// Webカメラのパネル（映像・写真の取り込み・表情トラッキング・録画・再生）。
+// Webカメラのパネル（映像・写真の取り込み・表情トラッキング・録画・保存）。
+//
+// **再生と読み込みはここに置かない。** どちらも `<video>` を一切見ない（カメラが繋がっていなくても
+// 動く）ので、カメラの箱に置くと「カメラの機能」に見える。置き場は 3D ビューのパネルで、クリップの
+// 持ち主は `presentation/recordingPlayer`。ここは**録って積む側**。
 //
 // **右パネル（lil-gui）へ足さない。** あちらは「書き出しの値」と「見え方の値」を並べる一覧で、
-// カメラは値ではなく**状態を持つ装置**（開始 / 停止・録画中・再生中）。同じ列に混ぜると、スライダー
+// カメラは値ではなく**状態を持つ装置**（開始 / 停止・トラッキング中・録画中）。同じ列に混ぜると、スライダー
 // の間に「今なにが動いているか」が埋もれる。独立した箱にして、状態を箱の頭に出す。
 //
 // **判断はここが持つ。** どの状態でどのボタンが押せるか、どの駆動源がビューを占有しているかは
@@ -35,16 +39,8 @@ import {
   smoothingFactor,
   strongestPreset,
 } from '../domain/preview/faceTracking';
-import {
-  ExpressionRecording,
-  MAX_RECORDING_SECONDS,
-  appendFrame,
-  parseRecording,
-  recordingDurationSeconds,
-  sampleRecording,
-  serializeRecording,
-  startRecording,
-} from '../domain/preview/recording';
+import { MAX_RECORDING_SECONDS, serializeRecording } from '../domain/preview/recording';
+import { RecordingSink } from './recordingPlayer';
 import { PhotoRgb } from '../domain/photo';
 import { InputManager } from './input';
 
@@ -66,16 +62,22 @@ export interface WebcamPanelHost {
   acceptPhoto(photo: PhotoRgb): Promise<void>;
   /** ツールバーの状態表示。 */
   setStatus(message: string, isError?: boolean): void;
+  /**
+   * 収録の置き場。**録る側は積むだけで、クリップは持たない。**
+   *
+   * 再生と読み込みは別の画面（3D ビューのパネル）にある — カメラを使わない操作なので。持ち主を
+   * 分けると、読み込んだ後に「保存」を押したときどちらのクリップが出るか分からなくなる。
+   */
+  readonly recording: RecordingSink;
 }
 
-/** 今なにが動いているか。**カメラの開閉とは別**（再生はカメラを使わない）。 */
-type WebcamMode = 'off' | 'tracking' | 'recording' | 'playing';
+/** 今なにが動いているか。**録画の再生はここに無い**（カメラを使わないので別の画面が持つ）。 */
+type WebcamMode = 'off' | 'tracking' | 'recording';
 
 const MODE_LABELS: Readonly<Record<WebcamMode, string>> = {
   off: '停止中',
   tracking: 'トラッキング中',
   recording: '録画中',
-  playing: '再生中',
 };
 
 /**
@@ -110,9 +112,7 @@ export class WebcamPanel {
   /** 対応の取りこぼしは開発者向けに 1 回だけ出す。 */
   private reportedCategories = false;
 
-  private recording: ExpressionRecording | null = null;
   private recordSeconds = 0;
-  private playSeconds = 0;
   /** 画面の書き換えを毎フレーム行わないための直近値。 */
   private shownTimer = '';
 
@@ -180,13 +180,11 @@ export class WebcamPanel {
     this.refresh();
   }
 
-  /** Reset で呼ぶ。カメラも収録も捨てる。 */
+  /** Reset で呼ぶ。カメラを止めて表示を戻す（**クリップは持っていないので捨てない**）。 */
   reset(): void {
     this.releaseDriver('off');
     this.stopCamera();
-    this.recording = null;
     this.recordSeconds = 0;
-    this.playSeconds = 0;
     this.setNote('');
     this.refresh();
   }
@@ -195,7 +193,6 @@ export class WebcamPanel {
   refresh(): void {
     const elements = this.elements;
     const hasPresets = this.host.presetNames().length > 0;
-    const hasRecording = this.recording !== null;
 
     elements.state.textContent = MODE_LABELS[this.mode];
     elements.state.dataset.mode = this.mode;
@@ -204,12 +201,10 @@ export class WebcamPanel {
     elements.camera.disabled = this.preparing;
     // 録画中は取り込ませない。書き出しの間 3D ビューが止まる（シーンを差し替える）ので、
     // 録画にだけ「時計は進まないのにフレームが飛ぶ」穴が空く。
-    elements.capture.disabled =
-      !this.cameraOn || this.mode === 'playing' || this.mode === 'recording';
+    elements.capture.disabled = !this.cameraOn || this.mode === 'recording';
 
     elements.track.textContent = this.preparing ? '準備中…' : '表情トラッキング';
-    elements.track.disabled =
-      this.preparing || !this.cameraOn || !hasPresets || this.mode === 'playing';
+    elements.track.disabled = this.preparing || !this.cameraOn || !hasPresets;
     elements.track.setAttribute(
       'aria-pressed',
       String(this.mode === 'tracking' || this.mode === 'recording'),
@@ -218,10 +213,9 @@ export class WebcamPanel {
     elements.record.textContent = this.mode === 'recording' ? '録画停止' : '録画';
     elements.record.disabled = this.mode !== 'tracking' && this.mode !== 'recording';
 
-    elements.play.textContent = this.mode === 'playing' ? '停止' : '再生';
-    elements.play.disabled = !hasRecording || (!hasPresets && this.mode !== 'playing');
-    elements.save.disabled = !hasRecording;
-    elements.load.disabled = !hasPresets;
+    // **録画中は保存させない。** 押せると途中までのクリップが落ちてきて、しかも録画は続くので
+    // 「保存したもの」と「録り終えたもの」が食い違う。止めてから保存する。
+    elements.save.disabled = this.mode === 'recording' || !this.host.recording.current();
 
     this.updateTimer(true);
   }
@@ -235,10 +229,7 @@ export class WebcamPanel {
     elements.capture.addEventListener('click', () => void this.capture());
     elements.track.addEventListener('click', () => void this.toggleTracking());
     elements.record.addEventListener('click', () => this.toggleRecording());
-    elements.play.addEventListener('click', () => this.togglePlayback());
     elements.save.addEventListener('click', () => this.save());
-    elements.load.addEventListener('click', () => elements.file.click());
-    elements.file.addEventListener('change', () => void this.load());
   }
 
   private async toggleCamera(): Promise<void> {
@@ -295,69 +286,31 @@ export class WebcamPanel {
   private toggleRecording(): void {
     if (this.mode === 'recording') {
       this.mode = 'tracking';
-      this.setNote(`録画しました（${recordingDurationSeconds(this.recording!).toFixed(1)} 秒）。`);
+      this.setNote(
+        `録画しました（${this.host.recording.durationSeconds().toFixed(1)} 秒）。` +
+          '再生と読み込みは右の「表情アニメーション」にあります。',
+      );
       this.refresh();
       return;
     }
     if (this.mode !== 'tracking') return;
-    this.recording = startRecording(this.host.presetNames());
+    this.host.recording.begin(this.host.presetNames());
     this.recordSeconds = 0;
     this.mode = 'recording';
     this.setNote(`最大 ${MAX_RECORDING_SECONDS} 秒で自動的に止まります。`);
     this.refresh();
   }
 
-  private togglePlayback(): void {
-    if (this.mode === 'playing') {
-      this.releaseDriver('off');
-      this.refresh();
-      return;
-    }
-    if (this.recording === null) return;
-    // 再生はカメラを使わないが、**トラッキング中なら止める**（駆動源はひとつだけ）。
-    if (this.mode === 'recording') this.mode = 'tracking';
-    this.ensurePlan();
-    this.playSeconds = 0;
-    this.smoothedBlink = 0;
-    this.takeDriver('playing');
-    this.refresh();
-  }
-
   private save(): void {
-    if (this.recording === null) return;
-    const blob = new Blob([serializeRecording(this.recording)], { type: 'application/json' });
+    const recording = this.host.recording.current();
+    if (recording === null) return;
+    const blob = new Blob([serializeRecording(recording)], { type: 'application/json' });
     const anchor = document.createElement('a');
     anchor.href = URL.createObjectURL(blob);
     anchor.download = `expression-${timestamp()}.json`;
     anchor.click();
     URL.revokeObjectURL(anchor.href);
     this.setNote(`保存しました（${anchor.download}）。`);
-  }
-
-  private async load(): Promise<void> {
-    const file = this.elements.file.files?.[0];
-    this.elements.file.value = '';
-    if (file === undefined) return;
-    try {
-      const loaded = parseRecording(await file.text(), this.host.presetNames());
-      if (this.mode === 'playing') this.releaseDriver('off');
-      this.recording = loaded.recording;
-      this.playSeconds = 0;
-      const notes = [
-        `読み込みました（${recordingDurationSeconds(loaded.recording).toFixed(1)} 秒 /` +
-          ` ${loaded.recording.frames.length} フレーム）。`,
-      ];
-      if (loaded.droppedPresets.length > 0) {
-        notes.push(`今のアセットに無い表情を落としました: ${loaded.droppedPresets.join(', ')}`);
-      }
-      if (loaded.truncated) notes.push(`${MAX_RECORDING_SECONDS} 秒を超えるぶんは切りました。`);
-      if (loaded.droppedFrames > 0) notes.push(`時刻が逆行した ${loaded.droppedFrames} フレームを落としました。`);
-      this.setNote(notes.join('\n'));
-    } catch (error) {
-      console.error(error);
-      this.reportFailure(error);
-    }
-    this.refresh();
   }
 
   // ---- 駆動 ----
@@ -409,7 +362,6 @@ export class WebcamPanel {
 
   /** ビューアーから毎フレーム呼ばれる。 */
   private advance(weights: Float64Array, deltaSeconds: number): string | null {
-    if (this.mode === 'playing') return this.advancePlayback(weights, deltaSeconds);
     if (this.mode !== 'tracking' && this.mode !== 'recording') return null;
     return this.advanceTracking(weights, deltaSeconds);
   }
@@ -450,16 +402,14 @@ export class WebcamPanel {
     );
     weights.set(this.smoothedWeights);
 
-    if (this.mode === 'recording' && this.recording !== null) {
+    if (this.mode === 'recording') {
       this.recordSeconds += deltaSeconds;
-      const step = appendFrame(
-        this.recording,
+      const full = this.host.recording.append(
         this.recordSeconds,
         this.smoothedWeights,
         this.smoothedBlink,
       );
-      this.recording = step.recording;
-      if (step.full) {
+      if (full) {
         this.mode = 'tracking';
         this.setNote(`${MAX_RECORDING_SECONDS} 秒に達したので録画を止めました。`);
         this.refresh();
@@ -467,27 +417,6 @@ export class WebcamPanel {
     }
     this.updateTimer(false);
     return strongestPreset(plan, this.smoothedWeights);
-  }
-
-  private advancePlayback(weights: Float64Array, deltaSeconds: number): string | null {
-    const recording = this.recording;
-    const plan = this.ensurePlan();
-    if (recording === null || weights.length !== recording.presetNames.length) return null;
-    const duration = recordingDurationSeconds(recording);
-    this.playSeconds += deltaSeconds;
-    if (this.playSeconds > duration) {
-      if (this.elements.loop.checked && duration > 0) this.playSeconds %= duration;
-      else {
-        this.playSeconds = duration;
-        this.smoothedBlink = sampleRecording(recording, duration, weights);
-        this.releaseDriver('off');
-        this.refresh();
-        return null;
-      }
-    }
-    this.smoothedBlink = sampleRecording(recording, this.playSeconds, weights);
-    this.updateTimer(false);
-    return strongestPreset(plan, weights);
   }
 
   /** 対応表が求めるカテゴリのうち返ってこなかったものを 1 回だけ出す。 */
@@ -516,12 +445,9 @@ export class WebcamPanel {
     if (this.mode === 'recording') {
       return `録画 ${this.recordSeconds.toFixed(1)} / ${MAX_RECORDING_SECONDS.toFixed(1)} s`;
     }
-    if (this.recording === null) return '未収録';
-    const duration = recordingDurationSeconds(this.recording);
-    if (this.mode === 'playing') {
-      return `再生 ${this.playSeconds.toFixed(1)} / ${duration.toFixed(1)} s`;
-    }
-    return `収録 ${duration.toFixed(1)} s / ${this.recording.frames.length} フレーム`;
+    const frames = this.host.recording.frameCount();
+    if (frames === 0) return '未収録';
+    return `収録 ${this.host.recording.durationSeconds().toFixed(1)} s / ${frames} フレーム`;
   }
 
   private setNote(message: string, isError = false): void {
@@ -546,11 +472,7 @@ interface PanelElements {
   readonly capture: HTMLButtonElement;
   readonly track: HTMLButtonElement;
   readonly record: HTMLButtonElement;
-  readonly play: HTMLButtonElement;
   readonly save: HTMLButtonElement;
-  readonly load: HTMLButtonElement;
-  readonly loop: HTMLInputElement;
-  readonly file: HTMLInputElement;
   readonly timer: HTMLElement;
   readonly note: HTMLElement;
 }
@@ -564,11 +486,7 @@ function collectElements(): PanelElements {
     capture: requireElement<HTMLButtonElement>('btn-capture'),
     track: requireElement<HTMLButtonElement>('btn-track'),
     record: requireElement<HTMLButtonElement>('btn-record'),
-    play: requireElement<HTMLButtonElement>('btn-play'),
     save: requireElement<HTMLButtonElement>('btn-save'),
-    load: requireElement<HTMLButtonElement>('btn-load'),
-    loop: requireElement<HTMLInputElement>('chk-loop'),
-    file: requireElement<HTMLInputElement>('recording-input'),
     timer: requireElement<HTMLElement>('webcam-timer'),
     note: requireElement<HTMLElement>('webcam-note'),
   };

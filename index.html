@@ -13,6 +13,12 @@
           <button id="btn-webcam" aria-pressed="false">Webカメラ</button>
           <button id="btn-upload">写真を選ぶ</button>
           <input id="file-input" type="file" accept="image/*" hidden />
+          <!--
+            収録した表情アニメーションの読み込み。**Webカメラのパネルの中へ置かない** — パネルを
+            閉じると `display: none` の中に入り、そこから programmatic に開くダイアログの扱いが
+            ブラウザ任せになる。操作するボタンは右パネルの「表情アニメーション」にある。
+          -->
+          <input id="recording-input" type="file" accept="application/json,.json" hidden />
           <button id="btn-reset">Reset</button>
           <button id="btn-export" disabled>guest zip を書き出す</button>
           <button id="btn-inspection" aria-pressed="false">検査画像</button>
@@ -81,13 +87,7 @@
               </div>
 
               <div class="webcam-row">
-                <button id="btn-play" disabled>再生</button>
-                <label class="webcam-check">
-                  <input id="chk-loop" type="checkbox" />ループ
-                </label>
                 <button id="btn-save" disabled>保存</button>
-                <button id="btn-load">読み込み</button>
-                <input id="recording-input" type="file" accept="application/json,.json" hidden />
               </div>
 
               <p id="webcam-note" class="webcam-note"></p>
