@@ -167,6 +167,7 @@ const gui: GuiHandle = setupGui(
     onAllTexturesToggled: () => viewer.toggleAllTextures(),
     onResetView: () => viewer.resetView(),
     onLookAtTarget: () => viewer.lookAtTarget(),
+    onResetCamera: () => viewer.resetCamera(),
     onViewSettingsChanged: (view) => applyViewSettings(view),
     onExpressionChanged: (name, weight) => viewer.setManualExpression(name, weight),
     onVisemePlayToggled: () => toggleVisemePlayback(),

@@ -601,10 +601,21 @@ export class Viewer {
     this.applyLighting();
   }
 
-  /** 正面・既定の距離・無表情に戻す。 */
-  resetView(): void {
+  /**
+   * カメラだけを既定へ戻す（位置・回転・周回半径・画角）。
+   *
+   * **光も首も表情も触らない。** 打ち込んだ transform を戻したいだけのときに、他の調整まで巻き
+   * 添えにしない。全部戻すのは `resetView`（`R`）。
+   */
+  resetCamera(): void {
     this.cameraPose = cameraPoseAt(this.target);
     this.fovDegrees = DEFAULT_FOV_DEGREES;
+    this.onViewChanged?.();
+  }
+
+  /** 正面・既定の距離・無表情に戻す。 */
+  resetView(): void {
+    this.resetCamera();
     this.lightColor = DEFAULT_LIGHT_COLOR;
     this.lightIntensity = DEFAULT_LIGHT_INTENSITY;
     this.ambientColor = DEFAULT_AMBIENT_COLOR;

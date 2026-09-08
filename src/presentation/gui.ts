@@ -212,6 +212,8 @@ export interface GuiCallbacks {
   onResetView: () => void;
   /** カメラを注視点（頭部の中心）へ向け直す。 */
   onLookAtTarget: () => void;
+  /** カメラ（位置・回転・周回半径・画角）だけを既定へ戻す。 */
+  onResetCamera: () => void;
   /** ビューの値が変わった（まとめて適用する）。 */
   onViewSettingsChanged: (view: ViewSettings) => void;
   /** 手で立てるプリセット（表情・口形とも）の重みが変わった。 */
@@ -351,6 +353,9 @@ export function setupGui(
   camera
     .add({ 注視点: callbacks.onLookAtTarget }, '注視点')
     .name('注視点（頭部中心）を見る');
+  // **`R`（正面・無表情に戻す）とは別に置く。** あちらは光も首も表情もまとめて戻すので、打ち込んだ
+  // transform を戻したいだけのときに使うと他の調整まで巻き添えになる。
+  camera.add({ 初期値: callbacks.onResetCamera }, '初期値').name('カメラを初期値に戻す');
   camera.addColor(state.view, 'background').name('背景色').onChange(pushView);
 
   // 既定は Unity 側 `DirectionalLight` の `m_Color` / `m_Intensity`。環境光の量は旧 web 版の
